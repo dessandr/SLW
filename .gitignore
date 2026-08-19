@@ -1,0 +1,46 @@
+# Python/editor state
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+build/
+dist/
+
+# Numerical and plotting products
+*.h5
+*.hdf5
+*.npy
+*.npz
+*.pkl
+*.csv
+*.tsv
+*.png
+*.jpg
+*.jpeg
+*.pdf
+*.svg
+*.log
+*.out
+*.aux
+
+# Wannier/QE run artifacts and material workspaces
+*.amn
+*.mmn
+*.eig
+*_hr.dat
+*_centres.xyz
+src/
+results/
+output/
+lifetime/
+J_epr_*/
+dJ_epr_*/
+
+# Archive/reference trees intentionally outside this repository
+perturbo-codes/
+reference_code/
+REPORT_*/
