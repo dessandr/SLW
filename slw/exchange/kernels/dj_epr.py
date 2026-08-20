@@ -62,13 +62,19 @@ def _configure_threads(nthreads):
 
 
 def _axis_list(text):
-    vals = [x.strip().lower() for x in str(text).split(",") if x.strip()]
-    out = []
-    for v in vals:
-        if v not in {"x", "y", "z"}:
-            raise ValueError(f"Unsupported axis '{v}'")
-        out.append(v)
-    return out or ["x", "y", "z"]
+    """Normalize compact or comma-separated Cartesian-axis input."""
+    normalized = "".join(
+        char
+        for char in str(text).strip().lower()
+        if char not in {",", " ", "\t"}
+    )
+    if not normalized:
+        return ["x", "y", "z"]
+    if any(char not in {"x", "y", "z"} for char in normalized):
+        raise ValueError(f"Unsupported axes '{text}'")
+    if len(set(normalized)) != len(normalized):
+        raise ValueError(f"Duplicate axes in '{text}'")
+    return list(normalized)
 
 
 def _labels_from_species_labels(species_labels, nat):
@@ -960,7 +966,11 @@ def main():
     ap.add_argument("--atom_labels", default="")
     ap.add_argument("--species_labels", default="", help="Comma-separated species for spglib orbit grouping, e.g. Mn,Mn,Te,Te.")
     ap.add_argument("--targets", default="all", help="Comma labels or 0-based indices; default all")
-    ap.add_argument("--axes", default="x,y,z")
+    ap.add_argument(
+        "--axes",
+        default="xyz",
+        help="Displacement axes in compact or comma-separated form, e.g. xyz or x,y,z",
+    )
     ap.add_argument("--mag_atoms", type=int, nargs="+", required=True)
     ap.add_argument("--mag_atoms_base", type=int, choices=[0, 1], default=0)
     ap.add_argument("--slices", required=True, help="Local orbital slices, e.g. '0:0:5,1:5:10'")

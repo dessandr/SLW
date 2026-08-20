@@ -1,0 +1,31 @@
+! Scalar LKAG J from a collinear qe2pert EPR pair.
+! Replace every path, mesh, atom index, slice, and energy with system values.
+&control
+  calculation = 'j',
+  prefix = 'sample',
+  outdir = './slw-tmp',
+  verbosity = 'high'
+/
+
+&parallel
+  execution = 'auto'
+/
+
+&exchange
+  input_format = 'epr',
+  ltensor = .false.,
+  epr_up = './input/sample_up_epr.h5',
+  epr_dn = './input/sample_dn_epr.h5',
+  hr_unit = 'ry',
+  efermi = 0.0,
+  kmesh = 4, 4, 4,
+  mag_atoms = 0, 1,
+  mag_atoms_base = 0,
+  slices = '0:0:5,1:5:10',
+  n_shells = 1,
+  integrator = 'contour',
+  ! Small smoke-test value; perform an empoints convergence study.
+  empoints = 64,
+  ! MPI requires one local process per rank.
+  nproc = 1
+/

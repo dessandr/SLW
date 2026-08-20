@@ -1,0 +1,34 @@
+! Full exchange tensor from a collinear qe2pert EPR pair.
+! The EPR channels are embedded in the internal spin-major convention.
+&control
+  calculation = 'j',
+  prefix = 'sample',
+  outdir = './slw-tmp',
+  verbosity = 'high'
+/
+
+&parallel
+  execution = 'auto'
+/
+
+&exchange
+  input_format = 'epr',
+  ltensor = .true.,
+  tensor_kernel = 'tb2j',
+  epr_up = './input/sample_up_epr.h5',
+  epr_dn = './input/sample_dn_epr.h5',
+  hr_unit = 'ry',
+  efermi = 0.0,
+  kmesh = 4, 4, 4,
+  mag_atoms = 0, 1,
+  mag_atoms_base = 0,
+  slices = '0:0:5,1:5:10',
+  axes = 'xyz',
+  spin_direction = 0.0, 0.0, 1.0,
+  n_shells = 1,
+  all_bonds = .true.,
+  integrator = 'contour',
+  ! Small smoke-test value; perform an empoints convergence study.
+  empoints = 64,
+  nproc = 1
+/

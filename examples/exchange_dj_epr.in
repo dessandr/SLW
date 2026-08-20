@@ -1,0 +1,38 @@
+! Scalar analytic dJ/du from qe2pert EPR electron-phonon data.
+! qmesh must be compatible with the EPR qc_dim and divide kmesh.
+&control
+  calculation = 'dj',
+  prefix = 'sample',
+  outdir = './slw-tmp',
+  verbosity = 'high'
+/
+
+&parallel
+  execution = 'auto'
+/
+
+&exchange
+  input_format = 'epr',
+  ltensor = .false.,
+  epr_up = './input/sample_up_epr.h5',
+  epr_dn = './input/sample_dn_epr.h5',
+  hr_unit = 'ry',
+  eph_unit = 'ry',
+  efermi = 0.0,
+  kmesh = 4, 4, 4,
+  qmesh = 2, 2, 2,
+  mag_atoms = 0, 1,
+  mag_atoms_base = 0,
+  slices = '0:0:5,1:5:10',
+  targets = 'all',
+  axes = 'xyz',
+  g_transform = 'kq',
+  ddelta_mode = 'off',
+  n_shells = 1,
+  integrator = 'contour',
+  ! Small smoke-test value; increase and converge for production.
+  empoints = 32,
+  nproc = 1,
+  omp_threads = 1,
+  precache_workers = 1
+/

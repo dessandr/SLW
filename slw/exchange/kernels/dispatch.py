@@ -139,7 +139,7 @@ _DJ_SCALAR_DEFAULTS: dict[str, Any] = {
     "atom_labels": "",
     "species_labels": "",
     "targets": "all",
-    "axes": "x,y,z",
+    "axes": "xyz",
     "mag_atoms_base": 0,
     "qmesh": None,
     "rp_idx": (0, 0, 0),

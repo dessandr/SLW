@@ -1,0 +1,42 @@
+! Tensor J from a raw spinor Wannier Hamiltonian plus optional atomic SOC.
+! groupby describes the input HR layout; it is never inferred from centres.
+&control
+  calculation = 'j',
+  prefix = 'sample_soc',
+  outdir = './slw-tmp',
+  verbosity = 'high'
+/
+
+&parallel
+  execution = 'auto'
+/
+
+&exchange
+  input_format = 'wannier',
+  ltensor = .true.,
+  tensor_kernel = 'tb2j',
+  spinor_hr = './input/sample_spinor_hr.dat',
+  groupby = 'orbital',
+  win = './input/sample.win',
+  centres = './input/sample_centres.xyz',
+  hr_unit = 'ev',
+  apply_degeneracy = .true.,
+  efermi = 0.0,
+  kmesh = 4, 4, 4,
+  mag_atoms = 0, 1,
+  mag_atoms_base = 0,
+  slices = '0:0:5,1:5:10',
+  axes = 'xyz',
+  spin_direction = 0.0, 0.0, 1.0,
+  n_shells = 1,
+  all_bonds = .true.,
+  integrator = 'contour',
+  empoints = 64,
+  nproc = 1
+/
+
+! Remove this card when the supplied spinor HR needs no additional SOC.
+! Replace the selectors with site/species manifolds present in sample.win.
+SOC (atomic)
+  LAMBDA Ligand-p 0.50
+  LAMBDA Mag1-d   0.05

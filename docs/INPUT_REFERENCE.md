@@ -530,7 +530,7 @@ Native engine: `slw.exchange.engine`; numerical kernel:
 | `atom_labels` | string | no | `''` | Advanced native-kernel option.<br>CLI aliases: `--atom_labels` |
 | `species_labels` | string | no | `''` | Comma-separated species for spglib orbit grouping, e.g. Mn,Mn,Te,Te.<br>CLI aliases: `--species_labels` |
 | `targets` | string | no | `all` | Comma labels or 0-based indices; default all<br>CLI aliases: `--targets` |
-| `axes` | string | no | `x,y,z` | Advanced native-kernel option.<br>CLI aliases: `--axes` |
+| `axes` | string | no | `xyz` | Displacement axes; compact (`xyz`) and comma-separated (`x,y,z`) forms are equivalent.<br>CLI aliases: `--axes` |
 | `mag_atoms` | list[int] | yes | — | Advanced native-kernel option.<br>CLI aliases: `--mag_atoms` |
 | `mag_atoms_base` | enum {0, 1} | no | `0` | Advanced native-kernel option.<br>CLI aliases: `--mag_atoms_base` |
 | `slices` | string | yes | — | Local orbital slices, e.g. '0:0:5,1:5:10'<br>CLI aliases: `--slices` |
@@ -1798,8 +1798,8 @@ registered `magnon_h5` kind uses these baseline keys:
 ## Validation and discovery commands
 
 ```bash
-# Validate every named input without opening scientific data
-slw_exchange.x -in exchange.in --dry-run
+# Validate an EPR J template without opening scientific data
+slw_exchange.x -in examples/exchange_j_epr.in --dry-run
 
 # List calculations
 slw_magph.x --list-calculations

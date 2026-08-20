@@ -13,6 +13,7 @@ from slw.cli.schema import parse_run_config
 from slw.exchange.config import build_exchange_request
 from slw.exchange.engine import ExchangeRunResult, _execute, prepare_run, run_exchange
 from slw.exchange.kernels.dispatch import KernelArtifacts, build_namespace
+from slw.exchange.kernels.dj_epr import _axis_list
 
 
 def _parameters(*, ltensor=False, source="epr"):
@@ -130,6 +131,19 @@ class ExchangeEngineTests(unittest.TestCase):
         self.assertEqual(namespace.mag_atoms, (0, 1))
         self.assertEqual(namespace.mag_atoms_base, 0)
         self.assertEqual(namespace.targets, (0, 1))
+
+    def test_scalar_dj_axis_input_survives_config_and_kernel_boundary(self):
+        for axes in ("xyz", "x,y,z", "xy", "x,y"):
+            with self.subTest(axes=axes):
+                request = build_exchange_request(
+                    "dj",
+                    {**_parameters(), "axes": axes},
+                    prefix="toy",
+                    savedir="/tmp/toy.save",
+                )
+                _, _, namespace = build_namespace(request)
+
+                self.assertEqual(_axis_list(namespace.axes), list(axes.replace(",", "")))
 
     def test_spinor_groupby_and_soc_card_reach_native_namespace(self):
         parameters = {

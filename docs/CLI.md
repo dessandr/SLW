@@ -115,7 +115,7 @@ Validate an input and display the selected execution plan without reading
 scientific data or creating output directories:
 
 ```bash
-slw_exchange.x -in examples/exchange.in --dry-run
+slw_exchange.x -in examples/exchange_j_epr.in --dry-run
 ```
 
 For exchange, `verbosity='normal'` prints stable phase/progress lines and a

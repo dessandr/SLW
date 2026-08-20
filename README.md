@@ -57,7 +57,8 @@ mpirun -np 16 slw_exchange.x -in exchange.in > exchange.out
 ```
 
 See [docs/CLI.md](docs/CLI.md) for the namelist schema, calculation registry,
-MPI behavior, dry-run validation, and input templates. The exhaustive
+MPI behavior, and dry-run validation. Ready-to-edit scalar/tensor EPR J and dJ
+inputs are listed in [examples/README.md](examples/README.md). The exhaustive
 calculation-by-calculation option reference is in
 [docs/INPUT_REFERENCE.md](docs/INPUT_REFERENCE.md).
 The native magnon–phonon redesign boundary and FM/AFM admission policy are in
