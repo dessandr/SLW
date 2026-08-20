@@ -1,0 +1,301 @@
+import contextlib
+import io
+import os
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+from unittest import mock
+
+from slw.cli.mpi import MPIContext
+from slw.cli.runner import run_stage
+from slw.cli.schema import parse_run_config
+from slw.exchange.config import ExchangeInputError, build_exchange_request
+from slw.exchange.engine import ExchangeRunResult, _execute, prepare_run, run_exchange
+from slw.exchange.legacy.reference.adapter import ReferenceArtifacts, build_namespace
+
+
+def _parameters(*, ltensor=False, source="epr"):
+    values = {
+        "input_format": source,
+        "ltensor": ltensor,
+        "efermi": 0.0,
+        "kmesh": [2, 2, 1],
+        "mag_atoms": [0, 1],
+        "slices": "0:0:2,1:2:4",
+    }
+    if source == "epr":
+        values.update(epr_up="up.h5", epr_dn="dn.h5")
+    else:
+        values.update(up_hr="up_hr.dat", dn_hr="dn_hr.dat")
+    return values
+
+
+def _run_config(calculation, parameters, *, execution="auto"):
+    groups = {
+        "control": {"calculation": calculation, "prefix": "toy", "outdir": "out"},
+        "parallel": {"execution": execution},
+        "exchange": dict(parameters),
+    }
+    return parse_run_config(groups, stage="exchange", cwd="/")
+
+
+class ExchangeEngineTests(unittest.TestCase):
+    def test_j_tensor_prepares_one_native_serial_plan(self):
+        parameters = _parameters(ltensor=True)
+        config = _run_config("j", parameters)
+        plan = prepare_run(
+            calculation="j",
+            requested_name="j",
+            parameters=parameters,
+            config=config,
+            context=MPIContext(),
+            program="slw_exchange.x",
+        )
+
+        self.assertFalse(plan.all_ranks)
+        self.assertIn("tensor J", plan.backend_label)
+        self.assertIn(("form", "tensor"), plan.summary)
+
+    def test_only_tensor_dj_selects_mpi_in_auto_mode(self):
+        parameters = _parameters(ltensor=True)
+        config = _run_config("dj", parameters)
+        plan = prepare_run(
+            calculation="dj",
+            requested_name="dj",
+            parameters=parameters,
+            config=config,
+            context=MPIContext(comm=object(), rank=0, size=4),
+            program="slw_exchange.x",
+        )
+        self.assertTrue(plan.all_ranks)
+
+        scalar_parameters = _parameters(ltensor=False)
+        scalar_config = _run_config("dj", scalar_parameters)
+        scalar = prepare_run(
+            calculation="dj",
+            requested_name="dj",
+            parameters=scalar_parameters,
+            config=scalar_config,
+            context=MPIContext(comm=object(), rank=0, size=4),
+            program="slw_exchange.x",
+        )
+        self.assertFalse(scalar.all_ranks)
+        self.assertIn("rank 0", scalar.warning)
+
+    def test_explicit_mpi_rejects_static_exchange(self):
+        parameters = _parameters(ltensor=True)
+        config = _run_config("j", parameters, execution="mpi")
+        with self.assertRaisesRegex(ExchangeInputError, "only for"):
+            prepare_run(
+                calculation="j",
+                requested_name="j",
+                parameters=parameters,
+                config=config,
+                context=MPIContext(comm=object(), rank=0, size=2),
+                program="slw_exchange.x",
+            )
+
+    def test_reference_namespace_is_built_without_argv_translation(self):
+        request = build_exchange_request(
+            "j",
+            _parameters(source="wannier"),
+            prefix="toy",
+            savedir="/tmp/toy.save",
+        )
+        module, function, namespace = build_namespace(request)
+
+        self.assertEqual(module, "slw.exchange.legacy.reference.compute_J_wannier_tensor")
+        self.assertEqual(function, "run")
+        self.assertEqual(namespace.kernel, "scalar")
+        self.assertEqual(namespace.mag_atoms_base, 0)
+        self.assertEqual(namespace.slices, "0:0:2,1:2:4")
+        self.assertTrue(os.path.isabs(namespace.out_dir))
+        self.assertTrue(os.path.isabs(namespace.out_name))
+        self.assertFalse(namespace.out_name.startswith(namespace.out_dir + namespace.out_dir))
+
+    def test_tensor_dj_normalizes_one_based_targets_with_atoms(self):
+        parameters = _parameters(ltensor=True)
+        parameters["mag_atoms"] = [1, 2]
+        parameters["mag_atoms_base"] = 1
+        parameters["targets"] = [1, 2]
+        request = build_exchange_request(
+            "dj",
+            parameters,
+            prefix="toy",
+            savedir="/tmp/toy.save",
+        )
+        _, _, namespace = build_namespace(request)
+
+        self.assertEqual(namespace.mag_atoms, (0, 1))
+        self.assertEqual(namespace.mag_atoms_base, 0)
+        self.assertEqual(namespace.targets, (0, 1))
+
+    def test_exchange_dry_run_uses_ltensor_and_touches_no_inputs(self):
+        text = """
+        &control
+          calculation = 'j',
+          prefix = 'toy',
+          outdir = './scratch'
+        /
+        &exchange
+          input_format = 'epr',
+          ltensor = .true.,
+          epr_up = 'missing-up.h5',
+          epr_dn = 'missing-dn.h5',
+          efermi = 0.0,
+          kmesh = 2, 2, 1,
+          mag_atoms = 0, 1,
+          slices = '0:0:2,1:2:4'
+        /
+        """
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        previous_stdin = sys.stdin
+        previous_cwd = os.getcwd()
+        with tempfile.TemporaryDirectory() as directory:
+            try:
+                os.chdir(directory)
+                sys.stdin = io.StringIO(text)
+                with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                    code = run_stage("exchange", ["--dry-run"])
+                self.assertFalse(os.path.exists(os.path.join(directory, "scratch")))
+            finally:
+                sys.stdin = previous_stdin
+                os.chdir(previous_cwd)
+
+        self.assertEqual(code, 0, stderr.getvalue())
+        self.assertIn("form            = tensor", stdout.getvalue())
+        self.assertIn("slw.exchange.engine", stdout.getvalue())
+        self.assertIn("toy.j_tensor.h5", stdout.getvalue())
+
+    def test_execution_emits_qe_style_phases_progress_and_timing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            request = build_exchange_request(
+                "j",
+                {
+                    **_parameters(ltensor=True),
+                    "out_dir": directory,
+                },
+                prefix="toy",
+                savedir=directory,
+            )
+
+            def fake_kernel(received, *, mpi, comm):
+                self.assertIs(received, request)
+                self.assertFalse(mpi)
+                self.assertIsNone(comm)
+                print("[J-epr-tensor] completed bond block 1/1")
+                paths = (received.output.h5_path, received.output.text_path)
+                for path in paths:
+                    Path(path).touch()
+                return ReferenceArtifacts(paths=paths)
+
+            stdout = io.StringIO()
+            with (
+                mock.patch("slw.exchange.engine.execute_reference", side_effect=fake_kernel),
+                contextlib.redirect_stdout(stdout),
+            ):
+                result = _execute(
+                    request,
+                    context=MPIContext(),
+                    program="slw_exchange.x",
+                    verbosity="normal",
+                    all_ranks=False,
+                )
+
+        output = stdout.getvalue()
+        self.assertEqual(result.artifacts, (request.output.h5_path, request.output.text_path))
+        self.assertGreaterEqual(result.wall_seconds, 0.0)
+        self.assertIn("Running tensor J kernel ...", output)
+        self.assertIn("completed bond block 1/1", output)
+        self.assertNotIn("Validating exchange output", output)
+        self.assertIn("SLW_EXCHANGE : CPU", output)
+        self.assertIn("WALL", output)
+
+    def test_public_api_discovers_mpi_and_runs_serial_mode_on_root_only(self):
+        request = build_exchange_request(
+            "j",
+            _parameters(),
+            prefix="toy",
+            savedir="/tmp/toy.save",
+        )
+
+        class RootComm:
+            def bcast(self, value, root=0):
+                self.values = getattr(self, "values", []) + [value]
+                self.root = root
+                return value
+
+        comm = RootComm()
+        context = MPIContext(comm=comm, rank=0, size=4)
+        expected = ExchangeRunResult(request, (), 1.0, 2.0, 1)
+        with (
+            mock.patch.object(MPIContext, "discover", return_value=context) as discover,
+            mock.patch("slw.exchange.engine._execute", return_value=expected) as execute,
+        ):
+            result = run_exchange(request)
+
+        discover.assert_called_once_with()
+        execute.assert_called_once()
+        self.assertIs(result, expected)
+        self.assertEqual(comm.root, 0)
+        self.assertEqual(len(comm.values), 2)
+
+    def test_public_api_nonroot_receives_serial_result_without_calculating(self):
+        request = build_exchange_request(
+            "j",
+            _parameters(),
+            prefix="toy",
+            savedir="/tmp/toy.save",
+        )
+        expected = ExchangeRunResult(request, (), 1.0, 2.0, 1)
+
+        class NonRootComm:
+            def __init__(self):
+                self.calls = 0
+
+            def bcast(self, value, root=0):
+                self.calls += 1
+                if self.calls == 1:
+                    return request, "auto", "slw_exchange.x", "normal"
+                self.received = value
+                return expected, None
+
+        comm = NonRootComm()
+        context = MPIContext(comm=comm, rank=2, size=4)
+        with mock.patch("slw.exchange.engine._execute") as execute:
+            result = run_exchange(request, context=context)
+
+        execute.assert_not_called()
+        self.assertIs(result, expected)
+        self.assertEqual(comm.received, (None, None))
+
+    def test_public_api_broadcasts_serial_root_failure(self):
+        request = build_exchange_request(
+            "j",
+            _parameters(),
+            prefix="toy",
+            savedir="/tmp/toy.save",
+        )
+
+        class RootComm:
+            def bcast(self, value, root=0):
+                return value
+
+        context = MPIContext(comm=RootComm(), rank=0, size=2)
+        with (
+            mock.patch(
+                "slw.exchange.engine._execute",
+                side_effect=OSError("write failed"),
+            ),
+            self.assertRaisesRegex(
+                RuntimeError,
+                "exchange calculation failed on rank 0: OSError: write failed",
+            ),
+        ):
+            run_exchange(request, context=context)
+
+
+if __name__ == "__main__":
+    unittest.main()

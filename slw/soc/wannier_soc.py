@@ -14,8 +14,8 @@ import numpy as np
 
 from slw.core.cli_paths import resolve_out_path, resolve_path, resolve_workdir
 from slw.core.wannier_io import read_wannier_hr, write_wannier_hr
-from slw.exchange.build_spinor_soc_hr import _apply_soc_to_onsite, _basis_permutation_from_win
-from slw.exchange.spinor_model import (
+from slw.exchange.legacy.build_spinor_soc_hr import _apply_soc_to_onsite, _basis_permutation_from_win
+from slw.exchange.legacy.spinor_model import (
     WANNIER90_D_ORDER,
     WANNIER90_P_ORDER,
     normalize_spin_direction,

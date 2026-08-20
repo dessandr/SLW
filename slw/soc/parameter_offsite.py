@@ -24,13 +24,15 @@ from typing import Sequence
 import numpy as np
 
 from slw.core.wannier_io import read_wannier_hr, write_wannier_hr
-from slw.exchange.build_downfolded_static_soc import (
+from slw.exchange.legacy.build_downfolded_static_soc import (
     _normalize_projection_groups_for_hamiltonian,
 )
-from slw.exchange.compute_J_epr_tensor import _win_projection_groups
-from slw.exchange.diagnose_J_epr_kspace import _full_k_mesh
-from slw.exchange.plot_epr_soc_bands import _clean_species
-from slw.exchange.spinor_model import (
+from slw.exchange.legacy.reference.compute_J_epr_tensor import (
+    _win_projection_groups,
+)
+from slw.exchange.legacy.diagnose_J_epr_kspace import _full_k_mesh
+from slw.exchange.legacy.plot_epr_soc_bands import _clean_species
+from slw.exchange.legacy.spinor_model import (
     WANNIER90_D_ORDER,
     WANNIER90_P_ORDER,
     d_orbital_l_matrices,

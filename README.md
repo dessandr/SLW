@@ -30,25 +30,66 @@ python -m pip install -e '.[mpi,phonon,kpath]'
   `dJ/du`, symmetry/ASR checks, SOC/spin-flip construction, and diagnostics.
 - `slw.soc`: pure Wannier spinor/SOC construction, fitting, band/DOS and
   real-space inspection.
-- `slw.magph`: EPR-to-magnon–phonon adapters, hybrid spectra, lifetimes,
-  chirality/rotational analysis, MPI runners, and plotting.
+- `slw.magph`: public namespace for the integrated magnon–phonon stage.
+- `slw.magph.legacy`: quarantined EPR adapters, numerical kernels, MPI
+  runners, analysis tools, and plotting code retained behind that stage.
 - `slw.interactions`: Wannier-gauge reference density and intersite-V tools.
 - `slw.phonon`: phonon parsing shared by the active workflows.
+
+## Stage executables
+
+Install the package to expose four QE-style workflow commands:
+
+```bash
+slw_epr.x      -in epr.in      > epr.out
+slw_exchange.x -in exchange.in > exchange.out
+slw_magph.x    -in magph.in    > magph.out
+slw_post.x     -in post.in     > post.out
+```
+
+They also accept standard input, for example
+`slw_exchange.x < exchange.in > exchange.out`. MPI-aware calculations read the
+input on rank 0 and broadcast it:
+
+```bash
+mpirun -np 16 slw_exchange.x -in exchange.in > exchange.out
+```
+
+See [docs/CLI.md](docs/CLI.md) for the namelist schema, calculation registry,
+MPI behavior, dry-run validation, and input templates. The exhaustive
+calculation-by-calculation option reference is in
+[docs/INPUT_REFERENCE.md](docs/INPUT_REFERENCE.md).
 
 Every material-dependent choice is explicit. In particular, exchange commands
 require the magnetic atom indices, local orbital slices, and k mesh instead of
 assuming a particular crystal or Wannier ordering.
 
-Use each command's `--help` as the authoritative interface, for example:
+The public exchange interface is the integrated stage command:
+
+```bash
+slw_exchange.x --list-calculations
+slw_exchange.x --help-calculation j --source epr
+```
+
+Individual modules outside the quarantined exchange and magph packages still
+provide diagnostic help where applicable:
 
 ```bash
 python -m slw.epc.compute_gkq_from_epr --help
-python -m slw.exchange.compute_J_epr_tensor --help
-python -m slw.exchange.compute_dJ_epr_tensor --help
-python -m slw.exchange.compute_J_wannier_tensor --help
 python -m slw.soc.wannier_soc --help
-python -m slw.magph.hybrid --help
 ```
+
+Historical exchange modules are quarantined under `slw.exchange.legacy` and
+are not re-exported from the public namespace. The temporary numerical-parity
+drivers used by the native engine live under `slw.exchange.legacy.reference`.
+New workflows should use `calculation='j'|'dj'` with
+`ltensor=.true.|.false.` through `slw_exchange.x`.
+
+Historical magph modules are likewise quarantined under `slw.magph.legacy`.
+The ten compatibility drivers used by `slw_epr.x` and `slw_magph.x` live in
+`slw.magph.legacy.reference`; helper and post-processing modules remain one
+level above them. Old `slw.magph.<module>` paths have no compatibility shims
+and are not public interfaces. Use `slw_magph.x` or `slw_post.x` instead.
 
 See [docs/SCOPE.md](docs/SCOPE.md) for the extraction boundary and retained
 module inventory.

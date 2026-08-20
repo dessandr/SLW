@@ -860,16 +860,16 @@ $$
 
 | 이론 object | 구현 위치 | 핵심 함수 또는 dataset |
 |---|---|---|
-| Scalar LKAG trace | [`slw/exchange/lkag_solver.py`](../slw/exchange/lkag_solver.py) | `lkag_trace_njit`, `compute_J_bulk` |
-| Scalar 네 항 $dJ$ | [`slw/exchange/lkag_solver.py`](../slw/exchange/lkag_solver.py) | `lkag_deriv_trace_njit`, `lkag_deriv_terms_njit` |
-| EPR $g(\mathbf k,\mathbf q)$ | [`slw/exchange/compute_dJ_epr_kspace.py`](../slw/exchange/compute_dJ_epr_kspace.py) | `_build_gkq_one` |
-| $\mathbf k+\mathbf q$ mapping 및 scalar $\partial G$ | [`slw/exchange/compute_dJ_epr_kspace.py`](../slw/exchange/compute_dJ_epr_kspace.py) | `_kq_map`, `_compute_chunk` |
-| Static spinor/TB2J tensor | [`slw/exchange/compute_J_epr_tensor.py`](../slw/exchange/compute_J_epr_tensor.py) | `_build_tb2j_projectors`, `_compute_tensor_tb2j`, `_decompose_tb2j_pair` |
-| Tensor $\partial A^{uv}$ | [`slw/exchange/compute_dJ_epr_tensor.py`](../slw/exchange/compute_dJ_epr_tensor.py) | `_compute_band_dg`, `_accumulate_dA_from_blocks`, `_compute_tensor_chunk_analytic` |
-| $dJ^{ab}$, $d\Gamma$, $d$DMI 분해 | [`slw/exchange/compute_dJ_epr_tensor.py`](../slw/exchange/compute_dJ_epr_tensor.py) | `_decompose_tb2j_dA`; `dJ_tensor_r`, `dJ_gamma_r`, `dDMI_r` |
-| MPI task distribution | [`slw/exchange/compute_dJ_epr_tensor_mpi.py`](../slw/exchange/compute_dJ_epr_tensor_mpi.py) | target atom $\times$ displacement axis 분배 |
-| EPC EPR real-space wrapper | [`slw/exchange/eph_epr_wrapper.py`](../slw/exchange/eph_epr_wrapper.py) | $g(\mathbf R_e,\mathbf R_p)$ loading/transform |
-| ASR 검사 | [`slw/exchange/check_dJ_asr.py`](../slw/exchange/check_dJ_asr.py) | tensor derivative acoustic sum rule |
+| Scalar LKAG trace | [`slw/exchange/legacy/lkag_solver.py`](../slw/exchange/legacy/lkag_solver.py) | `lkag_trace_njit`, `compute_J_bulk` |
+| Scalar 네 항 $dJ$ | [`slw/exchange/legacy/lkag_solver.py`](../slw/exchange/legacy/lkag_solver.py) | `lkag_deriv_trace_njit`, `lkag_deriv_terms_njit` |
+| EPR $g(\mathbf k,\mathbf q)$ | [`slw/exchange/legacy/reference/compute_dJ_epr_kspace.py`](../slw/exchange/legacy/reference/compute_dJ_epr_kspace.py) | `_build_gkq_one` |
+| $\mathbf k+\mathbf q$ mapping 및 scalar $\partial G$ | [`slw/exchange/legacy/reference/compute_dJ_epr_kspace.py`](../slw/exchange/legacy/reference/compute_dJ_epr_kspace.py) | `_kq_map`, `_compute_chunk` |
+| Static spinor/TB2J tensor | [`slw/exchange/legacy/reference/compute_J_epr_tensor.py`](../slw/exchange/legacy/reference/compute_J_epr_tensor.py) | `_build_tb2j_projectors`, `_compute_tensor_tb2j`, `_decompose_tb2j_pair` |
+| Tensor $\partial A^{uv}$ | [`slw/exchange/legacy/reference/compute_dJ_epr_tensor.py`](../slw/exchange/legacy/reference/compute_dJ_epr_tensor.py) | `_compute_band_dg`, `_accumulate_dA_from_blocks`, `_compute_tensor_chunk_analytic` |
+| $dJ^{ab}$, $d\Gamma$, $d$DMI 분해 | [`slw/exchange/legacy/reference/compute_dJ_epr_tensor.py`](../slw/exchange/legacy/reference/compute_dJ_epr_tensor.py) | `_decompose_tb2j_dA`; `dJ_tensor_r`, `dJ_gamma_r`, `dDMI_r` |
+| MPI task distribution | [`slw/exchange/legacy/reference/compute_dJ_epr_tensor_mpi.py`](../slw/exchange/legacy/reference/compute_dJ_epr_tensor_mpi.py) | target atom $\times$ displacement axis 분배 |
+| EPC EPR real-space wrapper | [`slw/exchange/legacy/eph_epr_wrapper.py`](../slw/exchange/legacy/eph_epr_wrapper.py) | $g(\mathbf R_e,\mathbf R_p)$ loading/transform |
+| ASR 검사 | [`slw/exchange/legacy/check_dJ_asr.py`](../slw/exchange/legacy/check_dJ_asr.py) | tensor derivative acoustic sum rule |
 
 ## 13. 관련 프로젝트 노트
 

@@ -5,7 +5,7 @@ import os
 import h5py
 import numpy as np
 
-from slw.exchange.eph_epr_wrapper import _read_meta
+from slw.exchange.legacy.eph_epr_wrapper import _read_meta
 from slw.core.set_ws_cell import init_rvec_images, set_wigner_seitz_cell
 from slw.core.wannier_io import read_wannier_u_matrix
 

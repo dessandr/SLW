@@ -1,0 +1,25 @@
+&control
+  calculation = 'j',
+  prefix = 'sample',
+  outdir = './slw-tmp',
+  verbosity = 'high'
+/
+
+&parallel
+  execution = 'auto'
+/
+
+&exchange
+  input_format = 'epr',
+  ltensor = .true.,
+  tensor_kernel = 'tb2j',
+  epr_up = './input/sample_up_epr.h5',
+  epr_dn = './input/sample_dn_epr.h5',
+  efermi = 0.0,
+  kmesh = 4, 4, 4,
+  mag_atoms = 0, 1,
+  slices = '0:0:5,1:5:10',
+  nproc = 8,
+  out_name = '${savedir}/sample.j_tensor.txt',
+  out_h5 = '${savedir}/sample.j_tensor.h5'
+/

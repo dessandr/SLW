@@ -39,6 +39,7 @@ output/
 lifetime/
 J_epr_*/
 dJ_epr_*/
+*.save/
 
 # Archive/reference trees intentionally outside this repository
 perturbo-codes/

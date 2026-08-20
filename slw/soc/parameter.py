@@ -20,9 +20,9 @@ from typing import Sequence
 import numpy as np
 
 from slw.core.wannier_io import read_wannier_hr, write_wannier_hr
-from slw.exchange.build_downfolded_static_soc import _selected_groups, _soc_matrix_for_groups
-from slw.exchange.diagnose_J_epr_kspace import _full_k_mesh
-from slw.exchange.spinor_model import WANNIER90_D_ORDER, WANNIER90_P_ORDER, spinor_from_collinear
+from slw.exchange.legacy.build_downfolded_static_soc import _selected_groups, _soc_matrix_for_groups
+from slw.exchange.legacy.diagnose_J_epr_kspace import _full_k_mesh
+from slw.exchange.legacy.spinor_model import WANNIER90_D_ORDER, WANNIER90_P_ORDER, spinor_from_collinear
 
 
 @dataclass(frozen=True)

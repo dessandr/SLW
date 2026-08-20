@@ -14,7 +14,7 @@ import re
 import numpy as np
 
 from slw.core.cli_paths import resolve_path, resolve_workdir
-from slw.magph.utils import parsing_POSCAR
+from slw.magph.legacy.utils import parsing_POSCAR
 
 
 GAMMA_LABELS = {"G", "Gamma", "GAMMA", "\\Gamma", "Γ"}

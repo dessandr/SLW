@@ -27,7 +27,7 @@ from slw.soc.band_splitting import (
     parse_band_selection,
     read_kpoints,
 )
-from slw.exchange.spinor_model import atomic_soc_block_diagonal
+from slw.exchange.legacy.spinor_model import atomic_soc_block_diagonal
 
 
 @dataclass(frozen=True)

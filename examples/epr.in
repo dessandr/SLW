@@ -1,0 +1,15 @@
+&control
+  calculation = 'gkq',
+  prefix = 'sample',
+  outdir = './slw-tmp',
+  verbosity = 'high'
+/
+
+&epr
+  epr = './input/sample_epr.h5',
+  out = '${savedir}/gkq.h5',
+  rotate = .true.,
+  u_mat = './input/sample_u.mat',
+  nproc = 8,
+  mode_block = 6
+/

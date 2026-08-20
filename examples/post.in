@@ -1,0 +1,14 @@
+&control
+  calculation = 'dj_asr',
+  prefix = 'sample',
+  outdir = './slw-tmp',
+  verbosity = 'high'
+/
+
+&post
+  h5 = '${savedir}/exchange_derivative.h5',
+  output = '${savedir}/exchange_derivative_asr.h5',
+  epr_h5 = './input/sample_up_epr.h5',
+  symprec = 1.0d-4,
+  verbose = .true.
+/
