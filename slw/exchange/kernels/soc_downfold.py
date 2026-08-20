@@ -33,7 +33,7 @@ from slw.exchange.kernels.spinor import (
     atomic_p_soc_block,
     spinor_from_collinear,
 )
-from slw.exchange.kernels.win_soc import _clean_species, _win_projection_groups
+from slw.soc.manifold import _clean_species, _win_projection_groups
 
 
 def _read_wannier_hr_compat(path):

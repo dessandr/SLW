@@ -16,6 +16,7 @@ from slw.exchange.model import (
     ExchangeSource,
     TensorKernel,
 )
+from slw.soc.model import SpinorGroupBy
 
 
 def _common(**updates):
@@ -120,7 +121,12 @@ class ExchangeConfigTests(unittest.TestCase):
 
         tensor = build_exchange_request(
             "j_tensor",
-            {**base, "spinor_hr": "spinor_hr.dat", "win": "model.win"},
+            {
+                **base,
+                "spinor_hr": "spinor_hr.dat",
+                "win": "model.win",
+                "groupby": "orbital",
+            },
             prefix="w",
             savedir="save",
         )
@@ -152,13 +158,14 @@ class ExchangeConfigTests(unittest.TestCase):
             _common(
                 input_format="epr",
                 spinor_hr="spinor_hr.dat",
-                spinor_basis_order="wannier_orbital",
+                groupby="orbital",
             ),
             prefix="d",
             savedir="save",
         )
         self.assertEqual(request.source, ExchangeSource.EPR)
         self.assertEqual(request.files.spinor_hr, "spinor_hr.dat")
+        self.assertEqual(request.groupby, SpinorGroupBy.ORBITAL)
 
         with self.assertRaisesRegex(ExchangeInputError, "supports only"):
             build_exchange_request(
@@ -191,7 +198,7 @@ class ExchangeConfigTests(unittest.TestCase):
                 savedir="save",
             )
 
-        with self.assertRaisesRegex(ExchangeInputError, "requires win with spinor_hr"):
+        with self.assertRaisesRegex(ExchangeInputError, "requires explicit groupby"):
             build_exchange_request(
                 "dj_tensor",
                 _common(input_format="epr", spinor_hr="spinor_hr.dat"),
@@ -333,7 +340,7 @@ class ExchangeConfigTests(unittest.TestCase):
                 savedir="save",
             )
 
-        with self.assertRaisesRegex(ExchangeInputError, "already a spinor/SOC"):
+        with self.assertRaisesRegex(ExchangeInputError, "unknown or unsupported"):
             build_exchange_request(
                 "j_tensor",
                 {
@@ -341,6 +348,7 @@ class ExchangeConfigTests(unittest.TestCase):
                     "up_hr": None,
                     "dn_hr": None,
                     "spinor_hr": "spinor_hr.dat",
+                    "groupby": "spin",
                     "dynamic_soc": True,
                 },
                 prefix="w",
@@ -397,7 +405,7 @@ class ExchangeConfigTests(unittest.TestCase):
         self.assertFalse(normalized.options["no_h5"])
         self.assertEqual(normalized.options["cfr_beta"], 400.0)
 
-    def test_soc_feature_dependencies_are_explicit(self):
+    def test_soc_card_and_groupby_contract(self):
         base = {
             "input_format": "wannier",
             "up_hr": "up_hr.dat",
@@ -407,17 +415,75 @@ class ExchangeConfigTests(unittest.TestCase):
             "mag_atoms": [0],
             "slices": "0:0:5",
         }
-        with self.assertRaisesRegex(ExchangeInputError, "soc_p_groups requires"):
+        with self.assertRaisesRegex(ExchangeInputError, "unknown or unsupported"):
             build_exchange_request(
                 "j_tensor",
                 {**base, "soc_p_groups": "0,1,2", "lambda_te": 0.0},
                 prefix="w",
                 savedir="save",
             )
-        with self.assertRaisesRegex(ExchangeInputError, "dynamic_soc requires"):
+        with self.assertRaisesRegex(ExchangeInputError, "explicit win"):
             build_exchange_request(
                 "j_tensor",
-                {**base, "dynamic_soc": True},
+                {
+                    **base,
+                    "soc_card": {
+                        "mode": "atomic",
+                        "entries": [{"selector": "Te-p", "lambda_ev": 0.5}],
+                    },
+                },
+                prefix="w",
+                savedir="save",
+            )
+
+        request = build_exchange_request(
+            "j_tensor",
+            {
+                **base,
+                "win": "model.win",
+                "soc_card": {
+                    "mode": "atomic",
+                    "entries": [
+                        {"selector": "Te-p", "lambda_ev": 0.5},
+                        {"selector": "Mn1-d", "lambda_ev": 0.05},
+                    ],
+                },
+            },
+            prefix="w",
+            savedir="save",
+        )
+        self.assertEqual(
+            tuple(item.selector for item in request.soc.manifolds),
+            ("Te-p", "Mn1-d"),
+        )
+
+        with self.assertRaisesRegex(ExchangeInputError, "duplicate manifold"):
+            build_exchange_request(
+                "j_tensor",
+                {
+                    **base,
+                    "win": "model.win",
+                    "soc_card": {
+                        "mode": "atomic",
+                        "entries": [
+                            {"selector": "Te-p", "lambda_ev": 0.5},
+                            {"selector": "te-P", "lambda_ev": 0.4},
+                        ],
+                    },
+                },
+                prefix="w",
+                savedir="save",
+            )
+
+        spinor = {**base, "up_hr": None, "dn_hr": None, "spinor_hr": "s.hr"}
+        with self.assertRaisesRegex(ExchangeInputError, "requires explicit groupby"):
+            build_exchange_request(
+                "j_tensor", spinor, prefix="w", savedir="save"
+            )
+        with self.assertRaisesRegex(ExchangeInputError, "spin or orbital"):
+            build_exchange_request(
+                "j_tensor",
+                {**spinor, "groupby": "wannier_spin"},
                 prefix="w",
                 savedir="save",
             )

@@ -51,8 +51,8 @@ from slw.exchange.kernels.spinor import (
     WANNIER90_P_ORDER,
     spinor_from_collinear,
 )
-from slw.exchange.kernels.spinor_hr import _basis_permutation_from_win
-from slw.exchange.kernels.win_soc import _win_projection_groups
+from slw.soc.manifold import _win_projection_groups
+from slw.soc.spinor import groupby_to_spin_major_indices, normalize_groupby
 
 
 def _read_wannier_hr_compat(path):
@@ -207,7 +207,7 @@ def _file_order_group_labels(labels, nwan, order):
     if not parsed:
         return []
     out = []
-    if mode in {"spin_major", "sector_spin"}:
+    if mode in {"spin", "spin_major", "sector_spin"}:
         for head, lo, hi in parsed:
             out.append(f"{head}:up file[{lo}:{hi}]")
         for head, lo, hi in parsed:
@@ -218,38 +218,23 @@ def _file_order_group_labels(labels, nwan, order):
             n = hi - lo
             out.append(f"{head} file[up={offset}:{offset + n},dn={offset + n}:{offset + 2 * n}]")
             offset += 2 * n
-    elif mode in {"wannier_orbital", "orbital_spinor"}:
+    elif mode in {"orbital", "wannier_orbital", "orbital_spinor"}:
         for head, lo, hi in parsed:
             out.append(f"{head} file[orbital_up_down_pairs={2 * lo}:{2 * hi}]")
     return out
 
 
-def _spinor_canonical_index_map(spinor_dim, *, basis_order="spin_major", win=None):
+def _spinor_canonical_index_map(spinor_dim, *, groupby, win=None):
     dim = int(spinor_dim)
     if dim % 2:
         raise ValueError(f"Spinor hr.dat dimension must be even, got {dim}")
     nwan = dim // 2
-    order = str(basis_order).strip().lower().replace("-", "_")
-    if order in {"spin_major", "sector_spin", "spin", "up_down", "wannier90_spin_major"}:
-        labels = _win_collinear_group_labels(win, nwan)
-        return np.arange(dim, dtype=np.int64), "spin_major", labels, _file_order_group_labels(labels, nwan, "spin_major")
-    if order in {"wannier_orbital", "orbital_spinor", "orbital_projection", "projection_orbital", "orbital_interleaved", "up_down_interleaved", "wannier90_orbital_spinor"}:
-        labels = _win_collinear_group_labels(win, nwan)
-        perm_file_from_canonical = np.empty(dim, dtype=np.int64)
-        perm_file_from_canonical[0::2] = np.arange(nwan, dtype=np.int64)
-        perm_file_from_canonical[1::2] = np.arange(nwan, dtype=np.int64) + nwan
-        inv = np.empty_like(perm_file_from_canonical)
-        inv[perm_file_from_canonical] = np.arange(dim, dtype=np.int64)
-        return inv, "wannier_orbital", labels, _file_order_group_labels(labels, nwan, "wannier_orbital")
-    if order in {"wannier_spin", "projection_spinor", "group_spinor", "wannier90_spinor", "w90_spinor", "win_interleaved"}:
-        perm_file_from_canonical, _resolved, labels = _basis_permutation_from_win(win, nwan, "win_interleaved")
-        inv = np.empty_like(perm_file_from_canonical)
-        inv[perm_file_from_canonical] = np.arange(dim, dtype=np.int64)
-        return inv, "wannier_spin", labels, _file_order_group_labels(labels, nwan, "wannier_spin")
-    perm_file_from_canonical, resolved, labels = _basis_permutation_from_win(win, nwan, order)
-    inv = np.empty_like(perm_file_from_canonical)
-    inv[perm_file_from_canonical] = np.arange(dim, dtype=np.int64)
-    return inv, resolved, labels, _file_order_group_labels(labels, nwan, resolved)
+    mode = normalize_groupby(groupby)
+    labels = _win_collinear_group_labels(win, nwan)
+    canonical = groupby_to_spin_major_indices(nwan, mode)
+    return canonical, mode.value, labels, _file_order_group_labels(
+        labels, nwan, mode.value
+    )
 
 
 
@@ -283,21 +268,14 @@ def _spinor_slice_summary(slices, nwan):
     return out
 
 
-def _slice_file_order_summary(slices, nwan, basis_order):
-    mode = str(basis_order).strip().lower().replace("-", "_")
-    if mode in {"wannier_spin", "projection_spinor", "group_spinor", "wannier90_spinor", "w90_spinor", "win_interleaved", "site_interleaved", "atom_interleaved", "group_interleaved"}:
-        out = {}
-        for site, slc in slices.items():
-            n = int(slc.stop) - int(slc.start)
-            start = 2 * int(slc.start)
-            out[int(site)] = {"up": (start, start + n), "dn": (start + n, start + 2 * n)}
-        return out
-    if mode in {"wannier_orbital", "orbital_spinor", "orbital_projection", "projection_orbital", "orbital_interleaved", "up_down_interleaved", "wannier90_orbital_spinor"}:
+def _slice_file_order_summary(slices, nwan, groupby):
+    mode = normalize_groupby(groupby).value
+    if mode == "orbital":
         return {
             int(site): {"orbital_up_down_pairs_file": (2 * int(slc.start), 2 * int(slc.stop))}
             for site, slc in slices.items()
         }
-    if mode in {"spin_major", "sector_spin", "spin", "up_down", "wannier90_spin_major"}:
+    if mode == "spin":
         out = {}
         for site, slc in slices.items():
             out[int(site)] = {
@@ -313,7 +291,7 @@ def _load_spinor_hr_hk(
     *,
     apply_degeneracy=True,
     hr_unit="ev",
-    basis_order="spin_major",
+    groupby=None,
     win=None,
     centres=None,
 ):
@@ -336,23 +314,20 @@ def _load_spinor_hr_hk(
         degens=degens,
         unit_scale=_unit_scale_to_ev(hr_unit),
     )
-    canonical_idx, resolved_order, labels, file_labels = _spinor_canonical_index_map(dim, basis_order=basis_order, win=win)
-    centres_order_guess = ""
-    centres_order_scores = {}
-    if centres and labels:
-        centres_order_guess, centres_order_scores = _infer_spinor_order_from_centres(centres, dim, labels)
+    canonical_idx, resolved_order, labels, file_labels = _spinor_canonical_index_map(
+        dim, groupby=groupby, win=win
+    )
     if not np.array_equal(canonical_idx, np.arange(int(dim), dtype=np.int64)):
         hk = hk[:, canonical_idx[:, None], canonical_idx]
     meta = {
         "spinor_dim": int(dim),
         "nwan": int(dim) // 2,
-        "basis_order": resolved_order,
+        "input_groupby": resolved_order,
+        "internal_groupby": "spin",
         "basis_groups_internal": _spinor_labels_from_collinear(labels, int(dim) // 2),
         "basis_groups_file": file_labels,
         "basis_groups_collinear_half": labels,
         "centres": centres or "",
-        "centres_order_guess": centres_order_guess,
-        "centres_order_scores": centres_order_scores,
     }
     return hk, meta
 
@@ -633,15 +608,35 @@ def _write_tensor_h5_simple(path, args, labels, pair_meta, tensor, trace_acc, el
             "up_hr": args.up_hr or "",
             "dn_hr": args.dn_hr or "",
             "spinor_hr": args.spinor_hr or "",
-            "spinor_basis_order": getattr(args, "spinor_basis_order", ""),
+            "input_groupby": getattr(args, "groupby", "") or "",
+            "internal_groupby": "spin",
             "centres": getattr(args, "centres", None) or "",
             "mag_subspace": getattr(args, "mag_subspace", ""),
             "win": args.win or "",
-            "soc": args.soc,
+            "base_hamiltonian": "spinor_hr" if args.spinor_hr else "collinear_up_down",
             "ref_epr_up": args.ref_epr_up or "",
             "ref_epr_dn": args.ref_epr_dn or "",
         }.items():
             basic.create_dataset(key, data=np.array(str(val), dtype=object), dtype=str_dt)
+        soc_entries = getattr(args, "_soc_entries", []) or []
+        basic.create_dataset("additional_soc", data=np.asarray(bool(soc_entries)))
+        basic.create_dataset(
+            "soc_mode",
+            data=np.array("atomic" if soc_entries else "none", dtype=object),
+            dtype=str_dt,
+        )
+        basic.create_dataset(
+            "soc_entries",
+            data=np.asarray(
+                [
+                    f"{entry.get('selector', entry['element'] + '-' + entry['orbital'])}:"
+                    f"{float(entry['lambda_ev']):.16g}"
+                    for entry in soc_entries
+                ],
+                dtype=object,
+            ),
+            dtype=str_dt,
+        )
         spin_magnitude = float(getattr(args, "spin_magnitude", 1.0))
         kernel_family = "scalar_lkag" if args.kernel == "scalar" else args.kernel
         for key, val in {
@@ -735,23 +730,6 @@ def run(args, comm=None):
     soc_entries, soc_win_path = [], ""
     intersite_soc_meta = {}
     if spinor_input:
-        active = []
-        if str(args.soc).strip():
-            active.append("--soc")
-        if float(args.lambda_te) != 0.0:
-            active.append("--lambda_te")
-        if str(args.soc_p_groups).strip():
-            active.append("--soc_p_groups")
-        if bool(args.intersite_soc):
-            active.append("--intersite_soc")
-        if bool(getattr(args, "dynamic_soc", False)):
-            active.append("--dynamic_soc")
-        if active:
-            raise ValueError(
-                "--spinor_hr is already a full spinor Hamiltonian; remove "
-                + ", ".join(active)
-                + " to avoid adding model/downfolded SOC again"
-            )
         if args.kernel == "scalar":
             raise ValueError("--kernel scalar requires collinear --up_hr/--dn_hr; use direct/tb2j for --spinor_hr")
         h_spin, spinor_meta = _load_spinor_hr_hk(
@@ -759,7 +737,7 @@ def run(args, comm=None):
             kpts,
             apply_degeneracy=bool(args.apply_degeneracy),
             hr_unit=args.hr_unit,
-            basis_order=args.spinor_basis_order,
+            groupby=args.groupby,
             win=args.win,
             centres=args.centres,
         )
@@ -768,7 +746,7 @@ def run(args, comm=None):
         spin_evals0 = np.linalg.eigvalsh(h_spin)
         print(
             f"[J-wannier-tensor] loaded spinor H(k) dim={h_spin.shape[1]} "
-            f"canonical_half_dim={dim} basis_order={spinor_meta['basis_order']} "
+            f"canonical_half_dim={dim} input_groupby={spinor_meta['input_groupby']} "
             f"band=({float(spin_evals0.min()):.6g},{float(spin_evals0.max()):.6g}) eV",
             flush=True,
         )
@@ -776,20 +754,7 @@ def run(args, comm=None):
             print(f"[J-wannier-tensor] basis_groups_file_order={spinor_meta['basis_groups_file']}", flush=True)
         if spinor_meta.get("basis_groups_internal"):
             print(f"[J-wannier-tensor] basis_groups_internal_spin_major={spinor_meta['basis_groups_internal']}", flush=True)
-        if spinor_meta.get("centres_order_guess"):
-            scores = spinor_meta.get("centres_order_scores", {})
-            score_txt = ", ".join(f"{k}={float(v):.3e}A" for k, v in sorted(scores.items()))
-            print(
-                f"[J-wannier-tensor] centres_order_guess={spinor_meta['centres_order_guess']} "
-                f"scores({score_txt})",
-                flush=True,
-            )
-            if str(spinor_meta.get("centres_order_guess")) != str(spinor_meta.get("basis_order")):
-                print(
-                    f"[J-wannier-tensor][WARN] --spinor_basis_order={spinor_meta.get('basis_order')} "
-                    f"but centres suggest {spinor_meta.get('centres_order_guess')}; J can be badly wrong if this mapping is wrong.",
-                    flush=True,
-                )
+        h_spin, soc_entries, soc_win_path = _apply_model_soc(h_spin, args, dim)
     else:
         hk_up, hk_dn = _load_hr_hk(
             args.up_hr,
@@ -818,7 +783,7 @@ def run(args, comm=None):
         slices = _load_slices(args, dim)
     if spinor_input:
         print(
-            f"[J-wannier-tensor] mag_subspace_file_order={_slice_file_order_summary(slices, dim, args.spinor_basis_order)}",
+            f"[J-wannier-tensor] mag_subspace_file_order={_slice_file_order_summary(slices, dim, args.groupby)}",
             flush=True,
         )
         print(
@@ -1018,15 +983,10 @@ def main():
     ap.add_argument("--dn_hr", default=None, help="Spin-down Wannier90 hr.dat; required unless --spinor_hr is used")
     ap.add_argument("--spinor_hr", default=None, help="Full spinor Wannier90 hr.dat from SOC/noncollinear Wannier90")
     ap.add_argument(
-        "--spinor_basis_order",
-        default="wannier_spin",
-        metavar="{wannier_spin,wannier_orbital}",
-        help=(
-            "Spinor ordering in --spinor_hr. wannier_spin = each .win projection group as "
-            "[group up block, group down block], e.g. Mn1 d up, Mn1 d down, Mn2 d up, ...; "
-            "wannier_orbital = [orb1 up, orb1 down, orb2 up, orb2 down, ...]. "
-            "Orbital/projection order always follows the .win projection order."
-        ),
+        "--groupby",
+        choices=["spin", "orbital"],
+        default=None,
+        help="Required for --spinor_hr: TB2J spin-major or orbital-interleaved layout.",
     )
     ap.add_argument("--centres", default=None, help="Optional Wannier90 centres.xyz for spinor_dim sanity check")
     ap.add_argument("--efermi", type=float, required=True, help="Fermi energy in eV")

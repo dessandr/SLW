@@ -1,4 +1,4 @@
-"""Plot TB2J exchange bonds and DMI vectors in real-space 3D coordinates."""
+"""Archived TB2J bond and DMI plotter."""
 
 import argparse
 import os

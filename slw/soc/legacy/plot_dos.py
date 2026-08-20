@@ -1,4 +1,4 @@
-"""Plot total or orbital-projected density of states from a Wannier90 Hamiltonian."""
+"""Archived Wannier90 density-of-states plotter."""
 
 from __future__ import annotations
 

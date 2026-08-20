@@ -1,7 +1,7 @@
 """Fit PRB-style interatomic Slater-Koster SOC templates.
 
 This module reuses the I/O and least-squares fitting machinery from
-``slw.soc.nonlocal_fit`` but replaces the nonlocal kernel with the
+``slw.soc.legacy.nonlocal_fit`` but replaces the nonlocal kernel with the
 two-center interatomic SOC form
 
     H_SOC(R) = i lambda_SK(R) . sigma
@@ -25,9 +25,13 @@ import numpy as np
 from scipy.optimize import least_squares
 
 from slw.core.cli_paths import resolve_path, resolve_workdir
-from slw.soc.band_splitting import compute_alignment_shift, parse_band_selection, read_kpoints
+from slw.soc.legacy.band_splitting import (
+    compute_alignment_shift,
+    parse_band_selection,
+    read_kpoints,
+)
 
-from slw.soc.nonlocal_fit import (
+from slw.soc.legacy.nonlocal_fit import (
     block_atom_fractional,
     block_orbital_index,
     build_lambda_bounds,

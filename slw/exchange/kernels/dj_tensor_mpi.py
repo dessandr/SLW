@@ -153,23 +153,27 @@ def _build_common_payload(args, rank=0):
     )
 
     if spinor_input:
-        if str(args.soc).strip() or abs(float(args.lambda_te)) > 0.0 or str(args.soc_p_groups).strip():
-            raise ValueError("--spinor_hr is already a SOC/noncollinear Hamiltonian; remove --soc/--lambda_te/--soc_p_groups")
         _rank_print(
             rank,
             f"Loading base H(k) from spinor_hr={args.spinor_hr} "
-            f"basis_order={args.spinor_basis_order} unit={args.spinor_hr_unit}",
+            f"groupby={args.groupby} unit={args.spinor_hr_unit}",
         )
         h_spin, spinor_meta = _load_spinor_hr_hk(
             args.spinor_hr,
             kpts,
             apply_degeneracy=bool(args.apply_degeneracy),
             hr_unit=args.spinor_hr_unit,
-            basis_order=args.spinor_basis_order,
+            groupby=args.groupby,
             win=args.win,
             centres=args.centres,
         )
         dim_col = int(spinor_meta["nwan"])
+        h_spin, soc_entries, soc_win = _apply_model_soc(h_spin, args, dim_col)
+        if soc_entries:
+            _rank_print(
+                rank,
+                f"added atomic SOC entries={len(soc_entries)} win={soc_win}",
+            )
         slices, slice_labels = _load_spinor_slices_for_global_atoms(args, dim_col, mag_atoms)
         if slice_labels:
             _rank_print(rank, f"mag_subspace={slice_labels}")
@@ -187,6 +191,8 @@ def _build_common_payload(args, rank=0):
             _rank_print(rank, f"applied model SOC entries={len(soc_entries)} win={soc_win or '<manual>'}")
 
     kdata = _precompute_spinor_kdata(h_spin, slices, args.efermi)
+    args._soc_entries = soc_entries
+    args._soc_win_path = soc_win
     kdata["kpts"] = kpts
     kdata["qpts"] = qpts
 

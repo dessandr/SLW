@@ -28,8 +28,8 @@ python -m pip install -e '.[mpi,phonon,kpath]'
   real-space conversion, and interpolation.
 - `slw.exchange`: EPR/Wannier LKAG scalar and tensor exchange, analytic
   `dJ/du`, symmetry/ASR checks, SOC/spin-flip construction, and diagnostics.
-- `slw.soc`: pure Wannier spinor/SOC construction, fitting, band/DOS and
-  real-space inspection.
+- `slw.soc`: typed atomic-SOC manifold input and the two TB2J spinor layouts;
+  abandoned fitting and visualization experiments live under `slw.soc.legacy`.
 - `slw.magph`: native exchange/phonon screening and dimension-generic
   self-energy, scattering-rate, and lifetime numerical APIs.
 - `slw.magph.legacy`: quarantined EPR adapters, numerical kernels, MPI
@@ -83,6 +83,11 @@ provide diagnostic help where applicable:
 python -m slw.epc.compute_gkq_from_epr --help
 python -m slw.soc.wannier_soc --help
 ```
+
+The collinear-to-spinor helper accepts only `--groupby spin|orbital` and, when
+centres are written, requires both spin-channel `centres.xyz` files. Additional
+onsite SOC is configured in `slw_exchange.x` with a final `SOC (atomic)` card;
+it is independent of whether the input HR is already spinor/noncollinear.
 
 Historical exchange modules are quarantined under `slw.exchange.legacy` and
 are not re-exported from the public namespace. The public engine dispatches

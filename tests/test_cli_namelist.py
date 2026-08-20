@@ -59,6 +59,42 @@ class NamelistTests(unittest.TestCase):
         with self.assertRaisesRegex(NamelistError, "defined in both"):
             parse_run_config(groups, stage="epr")
 
+    def test_atomic_soc_card_is_parsed_for_exchange(self):
+        groups = loads(
+            """
+            &control calculation = 'j' /
+            &exchange ltensor = .true. /
+            SOC (atomic)
+              LAMBDA Te-p 0.50 ! eV
+              LAMBDA Mn1-d 5.0d-2
+            """
+        )
+        config = parse_run_config(groups, stage="exchange")
+        self.assertEqual(
+            config.parameters["soc_card"],
+            {
+                "mode": "atomic",
+                "entries": [
+                    {"selector": "Te-p", "lambda_ev": 0.5},
+                    {"selector": "Mn1-d", "lambda_ev": 0.05},
+                ],
+            },
+        )
+
+    def test_soc_card_is_exchange_only_and_fails_closed(self):
+        groups = loads(
+            "&control calculation='gkq' /\nSOC (atomic)\nLAMBDA Te-p 0.5\n"
+        )
+        with self.assertRaisesRegex(NamelistError, "unexpected namelist group"):
+            parse_run_config(groups, stage="epr")
+        for body in (
+            "SOC (projected)\nLAMBDA Te-p 0.5\n",
+            "SOC (atomic)\nGROUP Te-p 0.5\n",
+            "SOC (atomic)\n",
+        ):
+            with self.subTest(body=body), self.assertRaises(NamelistError):
+                loads("&control calculation='j' /\n" + body)
+
 
 if __name__ == "__main__":
     unittest.main()

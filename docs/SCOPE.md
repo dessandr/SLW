@@ -11,7 +11,8 @@ SLW stands for **Spin-Lattice Wannier**. Its public Python namespace is `slw`.
 | `slw/exchange` | Public native typed `j`/`dj` engine with `ltensor` dispatch |
 | `slw/exchange/kernels` | Native EPR/Wannier scalar/tensor J and analytic dJ kernels with MPI work partitioning |
 | `slw/exchange/legacy` | Archive-only historical LKAG implementations, diagnostics, ASR/symmetry tools, and compatibility wrappers |
-| `slw/soc` | Wannier spinor construction, onsite/nonlocal SOC models and fitting, band/DOS/DMI/real-space inspection, and TB2J preparation |
+| `slw/soc` | Typed atomic-SOC manifolds, Wannier90 projection resolution, and strict TB2J `groupby=spin|orbital` spinor construction |
+| `slw/soc/legacy` | Archive-only SOC fitting, plotting, inspection, and superseded basis-layout experiments |
 | `slw/magph` | Native exchange/dJ/phonon screening, FM/bipartite-AFM LSWT and vertex construction, retarded self-energy/lifetime kernels, MPI k distribution, and lifetime output |
 | `slw/magph/legacy` | Quarantined magnon–phonon helpers, kernels, adapters, analyses, and plotting modules retained by active workflows |
 | `slw/magph/legacy/reference` | Quarantined compatibility drivers retained for non-native EPR/magph calculations and scientific reference |
@@ -58,5 +59,7 @@ lives in `core/wannier_io.py`, material-independent structure parsing in
 ## Input policy
 
 No material-specific magnetic atom list, orbital slice, k mesh, SOC element, or
-file prefix is selected by default. Commands that need those values require
-them explicitly or infer them from an unambiguous Wannier90 `.win` file.
+file prefix is selected by default. SOC site/species manifolds are explicit in
+the `SOC (atomic)` card and resolved against a supplied Wannier90 `.win` file.
+Spinor basis order is never inferred: raw spinor HR input declares one of the
+two TB2J `groupby` layouts.

@@ -6,7 +6,6 @@ import argparse
 import glob
 import multiprocessing as mp
 import os
-import re
 import sys
 import time
 
@@ -44,6 +43,7 @@ from slw.exchange.kernels.spinor import (
     add_atomic_p_soc,
     spinor_from_collinear,
 )
+from slw.soc.manifold import _clean_species, _win_projection_groups
 
 _AXES = ("x", "y", "z")
 
@@ -281,80 +281,6 @@ def _write_tsv(path, payload, tensor, tensor_axes):
 _WORKER_STATIC = None
 
 
-def _parse_soc_p_groups(text, *, base=0):
-    if not text:
-        return []
-    groups = []
-    for item in str(text).split(";"):
-        item = item.strip()
-        if not item:
-            continue
-        vals = [int(x.strip()) - int(base) for x in item.replace(",", " ").split()]
-        if len(vals) != 3:
-            raise ValueError(f"Each --soc_p_groups entry must contain 3 orbital indices, got {item!r}")
-        groups.append(vals)
-    return groups
-
-
-def _clean_species(label):
-    return re.sub(r"\d+$", "", str(label).strip()).lower()
-
-
-def _projection_orbitals(text):
-    clean = re.sub(r"\b(l|ang|angular)_?mom(entum)?\s*=\s*0\b", "s", str(text), flags=re.IGNORECASE)
-    clean = re.sub(r"\b(l|ang|angular)_?mom(entum)?\s*=\s*1\b", "p", clean, flags=re.IGNORECASE)
-    clean = re.sub(r"\b(l|ang|angular)_?mom(entum)?\s*=\s*2\b", "d", clean, flags=re.IGNORECASE)
-    clean = re.sub(r"\b(l|ang|angular)_?mom(entum)?\s*=\s*3\b", "f", clean, flags=re.IGNORECASE)
-    fields = [x.strip().lower() for x in re.split(r"[,; \t]+", clean) if x.strip()]
-    out = []
-    for item in fields:
-        item = item.strip("{}()")
-        if item in {"s", "p", "d", "f"}:
-            out.append(item)
-    return out
-
-
-def _orbital_count(kind):
-    counts = {"s": 1, "p": 3, "d": 5, "f": 7}
-    if kind not in counts:
-        raise ValueError(f"Unsupported projection orbital kind '{kind}'")
-    return counts[kind]
-
-
-def _parse_win_atoms_and_projections(win_path):
-    atoms = []
-    projections = []
-    block = None
-    with open(win_path, "r", encoding="utf-8") as f:
-        for raw in f:
-            line = raw.split("!", 1)[0].split("#", 1)[0].strip()
-            low = line.lower()
-            if not line:
-                continue
-            if low.startswith(("begin atoms_frac", "begin atoms_cart")):
-                block = "atoms"
-                continue
-            if low.startswith("begin projections"):
-                block = "projections"
-                continue
-            if low.startswith(("end atoms_frac", "end atoms_cart", "end projections")):
-                block = None
-                continue
-            if block == "atoms":
-                toks = line.split()
-                if len(toks) >= 4:
-                    atoms.append(toks[0])
-            elif block == "projections":
-                if ":" in line:
-                    lhs, rhs = line.split(":", 1)
-                else:
-                    lhs, rhs = line, line
-                orbitals = _projection_orbitals(rhs)
-                if orbitals:
-                    projections.append((lhs.strip(), orbitals))
-    return atoms, projections
-
-
 def _infer_win_path(epr_path, explicit=None):
     if explicit:
         return explicit
@@ -371,117 +297,66 @@ def _infer_win_path(epr_path, explicit=None):
     return None
 
 
-def _win_projection_groups(win_path):
-    atoms, projections = _parse_win_atoms_and_projections(win_path)
-    if not atoms:
-        raise ValueError(f"No atoms_frac/atoms_cart block found in {win_path}")
-    if not projections:
-        raise ValueError(f"No projections block found in {win_path}")
-
-    groups = []
-    offset = 0
-    used_atom_projection = [False] * len(atoms)
-    for label, orbitals in projections:
-        label_clean = _clean_species(label)
-        exact_matches = [i for i, atom in enumerate(atoms) if atom.lower() == label.lower()]
-        species_matches = [i for i, atom in enumerate(atoms) if _clean_species(atom) == label_clean]
-        matches = exact_matches if exact_matches else species_matches
-        if not matches:
-            raise ValueError(f"Projection label '{label}' did not match any atom in {win_path}")
-        for ia in matches:
-            if used_atom_projection[ia]:
-                raise ValueError(
-                    f"Atom '{atoms[ia]}' is matched by multiple projection lines in {win_path}; "
-                    "automatic SOC group inference would be ambiguous."
-                )
-            used_atom_projection[ia] = True
-            for orb in orbitals:
-                n = _orbital_count(orb)
-                groups.append(
-                    {
-                        "atom_index": ia,
-                        "atom_label": atoms[ia],
-                        "element": _clean_species(atoms[ia]),
-                        "orbital": orb,
-                        "indices": list(range(offset, offset + n)),
-                    }
-                )
-                offset += n
-    return atoms, groups, offset
-
-
-def _parse_soc_specs(text):
-    specs = []
-    if not text:
-        return specs
-    for item in re.split(r"[;]+", str(text)):
-        item = item.strip()
-        if not item:
-            continue
-        parts = [x.strip() for x in re.split(r"[:,= \t]+", item) if x.strip()]
-        if len(parts) != 3:
-            raise ValueError(f"Each --soc entry must be element:orbital:lambda_eV, got {item!r}")
-        elem, orb, lam = parts
-        orb = orb.lower()
-        if orb not in {"p", "d"}:
-            raise ValueError(f"Unsupported SOC orbital {orb!r}; supported: p, d")
-        specs.append((_clean_species(elem), orb, float(lam)))
-    return specs
-
-
 def _resolve_soc_entries(args, nwan):
     entries = []
-    specs = _parse_soc_specs(args.soc)
-    legacy_groups = _parse_soc_p_groups(args.soc_p_groups, base=args.soc_groups_base)
-    legacy_lambda = float(args.lambda_te)
-    legacy_element = _clean_species(args.soc_element)
-
-    if legacy_groups:
-        if abs(legacy_lambda) <= 0.0:
-            raise ValueError("--soc_p_groups was provided but --lambda_te is zero")
-        entries.append(
-            {
-                "element": legacy_element,
-                "orbital": "p",
-                "lambda_ev": legacy_lambda,
-                "groups": legacy_groups,
-                "source": "manual --soc_p_groups",
-            }
-        )
-    elif abs(legacy_lambda) > 0.0:
-        matching = [lam for elem, orb, lam in specs if elem == legacy_element and orb == "p"]
-        if matching:
-            if any(abs(float(lam) - legacy_lambda) > 1e-14 for lam in matching):
-                raise ValueError(
-                    f"Conflicting SOC lambda for {legacy_element}:p between --soc and --lambda_te={legacy_lambda}"
-                )
-        else:
-            specs.append((legacy_element, "p", legacy_lambda))
-
-    if not specs:
+    card_specs = tuple(getattr(args, "soc_manifolds", ()) or ())
+    if not card_specs:
         return entries, None
-
-    win_path = _infer_win_path(args.epr_up, explicit=args.win)
+    win_path = getattr(args, "win", None)
     if not win_path:
-        raise ValueError("--win is required for automatic SOC group inference")
+        raise ValueError("SOC (atomic) requires an explicit Wannier90 .win file")
     _atoms, all_groups, nproj = _win_projection_groups(win_path)
     if int(nproj) != int(nwan):
-        raise ValueError(f"{win_path} projection count={nproj} but EPR H(k) nwan={nwan}")
-
-    for elem, orb, lam in specs:
-        if legacy_groups and elem == legacy_element and orb == "p" and abs(lam - legacy_lambda) < 1e-14:
-            continue
-        groups = [g["indices"] for g in all_groups if g["element"] == elem and g["orbital"] == orb]
-        if not groups:
-            known = sorted({(g["element"], g["orbital"]) for g in all_groups})
-            raise ValueError(f"No {elem}:{orb} projection groups found in {win_path}; known={known}")
+        raise ValueError(
+            f"{win_path} projection count={nproj} but Hamiltonian nwan={nwan}"
+        )
+    used: set[int] = set()
+    for spec in card_specs:
+        selector = str(spec["selector"])
+        label, orb = selector.rsplit("-", 1)
+        exact = [
+            group
+            for group in all_groups
+            if str(group["atom_label"]).casefold() == label.casefold()
+            and str(group["orbital"]).lower() == orb
+        ]
+        matching = exact or [
+            group
+            for group in all_groups
+            if str(group["element"]).casefold()
+            == _clean_species(label).casefold()
+            and str(group["orbital"]).lower() == orb
+        ]
+        if not matching:
+            known = sorted(
+                {
+                    f"{group['atom_label']}-{group['orbital']}"
+                    for group in all_groups
+                }
+            )
+            raise ValueError(
+                f"SOC selector {selector!r} matched no Wannier manifold; "
+                f"known site manifolds={known}"
+            )
+        indices = {
+            int(index) for group in matching for index in group["indices"]
+        }
+        overlap = sorted(used & indices)
+        if overlap:
+            raise ValueError(
+                f"SOC selector {selector!r} overlaps a previous selector at "
+                f"Wannier indices {overlap}"
+            )
+        used.update(indices)
         entries.append(
             {
-                "element": elem,
+                "selector": selector,
+                "element": _clean_species(label),
                 "orbital": orb,
-                "lambda_ev": float(lam),
-                "groups": groups,
-                "source": win_path,
+                "lambda_ev": float(spec["lambda_ev"]),
+                "groups": [group["indices"] for group in matching],
+                "matched_labels": [group["atom_label"] for group in matching],
+                "source": "SOC (atomic)",
             }
         )
     return entries, win_path
@@ -495,9 +370,21 @@ def _apply_model_soc(h_spin, args, nwan):
         lam = float(entry["lambda_ev"])
         groups = entry["groups"]
         if orb == "p":
-            out = add_atomic_p_soc(out, groups, lambda_ev=lam, order=args.p_order, inplace=False)
+            out = add_atomic_p_soc(
+                out,
+                groups,
+                lambda_ev=lam,
+                order=WANNIER90_P_ORDER,
+                inplace=False,
+            )
         elif orb == "d":
-            out = add_atomic_d_soc(out, groups, lambda_ev=lam, order=args.d_order, inplace=False)
+            out = add_atomic_d_soc(
+                out,
+                groups,
+                lambda_ev=lam,
+                order=WANNIER90_D_ORDER,
+                inplace=False,
+            )
         else:
             raise ValueError(f"Unsupported SOC orbital: {orb}")
         print(
@@ -1204,7 +1091,6 @@ def _write_tensor_h5(path, args, labels, pair_meta, tensor, trace_acc, orbits, e
         basic.create_dataset("kmesh", data=np.asarray(args.kmesh, dtype=np.int64))
         basic.create_dataset("efermi_ev", data=np.array(float(args.efermi), dtype=np.float64))
         basic.create_dataset("spin_direction", data=np.asarray(args.spin_direction, dtype=np.float64))
-        basic.create_dataset("lambda_te_ev", data=np.array(float(args.lambda_te), dtype=np.float64))
         basic.create_dataset("tensor_axes", data=np.asarray(axes, dtype=object), dtype=str_dt)
         put_string(basic, "unit", "meV")
         put_string(basic, "hr_unit", args.hr_unit)
@@ -1231,29 +1117,42 @@ def _write_tensor_h5(path, args, labels, pair_meta, tensor, trace_acc, orbits, e
             "directed_bond_weight",
             data=np.array(stored_bond_weight, dtype=np.float64),
         )
-        put_string(basic, "p_order", args.p_order)
-        put_string(basic, "d_order", args.d_order)
-        put_string(basic, "soc", args.soc)
-        put_string(basic, "soc_element", args.soc_element)
+        put_string(basic, "base_hamiltonian", "epr_up_down")
+        put_string(basic, "input_groupby", "")
+        put_string(basic, "internal_groupby", "spin")
         put_string(basic, "win_path", getattr(args, "_soc_win_path", "") or "")
         soc_entries = getattr(args, "_soc_entries", []) or []
         basic.create_dataset(
+            "additional_soc",
+            data=np.array(bool(soc_entries), dtype=np.bool_),
+        )
+        put_string(basic, "soc_mode", "atomic" if soc_entries else "none")
+        basic.create_dataset(
             "soc_entries",
             data=np.asarray(
-                [f"{e['element']}:{e['orbital']}:{float(e['lambda_ev']):.16g}" for e in soc_entries],
+                [
+                    f"{e.get('selector', e['element'] + '-' + e['orbital'])}:"
+                    f"{float(e['lambda_ev']):.16g}"
+                    for e in soc_entries
+                ],
                 dtype=object,
             ),
             dtype=str_dt,
         )
-        soc_p_groups = []
-        soc_d_groups = []
-        for entry in soc_entries:
-            if entry["orbital"] == "p":
-                soc_p_groups.extend(entry["groups"])
-            elif entry["orbital"] == "d":
-                soc_d_groups.extend(entry["groups"])
-        basic.create_dataset("soc_p_groups", data=np.asarray(soc_p_groups, dtype=np.int64).reshape(-1, 3))
-        basic.create_dataset("soc_d_groups", data=np.asarray(soc_d_groups, dtype=np.int64).reshape(-1, 5))
+        basic.create_dataset(
+            "soc_resolved_groups",
+            data=np.asarray(
+                [
+                    ";".join(
+                        ",".join(str(int(index)) for index in group)
+                        for group in entry["groups"]
+                    )
+                    for entry in soc_entries
+                ],
+                dtype=object,
+            ),
+            dtype=str_dt,
+        )
         put_string(basic, "command", " ".join(sys.argv))
         basic.create_dataset("empoints", data=np.array(int(args.empoints), dtype=np.int64))
         basic.create_dataset("nproc", data=np.array(int(args.nproc), dtype=np.int64))

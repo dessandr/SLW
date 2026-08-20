@@ -1,4 +1,4 @@
-"""Interactive real-space heatmap viewer for Wannier90 hr.dat blocks."""
+"""Archived interactive hr.dat viewer."""
 
 import argparse
 import os

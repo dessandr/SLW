@@ -77,6 +77,8 @@ def parse_run_config(
         raise NamelistError(f"unknown SLW stage: {stage}")
 
     allowed_groups = {"control", "parallel", "input", stage}
+    if stage == "exchange":
+        allowed_groups.add("soc_card")
     unknown_groups = sorted(set(groups) - allowed_groups)
     if unknown_groups:
         rendered = ", ".join(f"&{name}" for name in unknown_groups)
@@ -129,6 +131,8 @@ def parse_run_config(
             f"&{stage}: {', '.join(overlap)}"
         )
     parameters = {**generic, **specific}
+    if "soc_card" in groups:
+        parameters["soc_card"] = groups["soc_card"]
     variables = {"prefix": prefix, "outdir": outdir, "savedir": savedir}
     parameters = expand_placeholders(parameters, variables)
 

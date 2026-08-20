@@ -11,6 +11,8 @@ from numbers import Integral
 from pathlib import Path
 from typing import Any
 
+from slw.soc.model import AtomicSOCManifold, AtomicSOCSpec, SpinorGroupBy
+
 from .model import (
     ExchangeCalculation,
     ExchangeFiles,
@@ -64,14 +66,6 @@ _J_TENSOR_EPR_OPTIONS = {
     "hr_unit",
     "axes",
     "spin_direction",
-    "soc",
-    "soc_element",
-    "lambda_te",
-    "soc_p_groups",
-    "soc_groups_base",
-    "soc_p_groups_base",
-    "p_order",
-    "d_order",
     "n_shells",
     "d_max",
     "all_bonds",
@@ -93,13 +87,8 @@ _J_TENSOR_EPR_OPTIONS = {
     "nproc",
     "collinear_override",
     "spin_magnitude",
-    "d_subspace",
-    "soc_active",
-    "lambda_soc",
-    "dynamic_soc",
 }
 _J_TENSOR_WANNIER_OPTIONS = {
-    "spinor_basis_order",
     "hr_unit",
     "ref_epr_up",
     "ref_epr_dn",
@@ -107,22 +96,6 @@ _J_TENSOR_WANNIER_OPTIONS = {
     "apply_degeneracy",
     "axes",
     "spin_direction",
-    "soc",
-    "mag_subspace",
-    "soc_element",
-    "lambda_te",
-    "soc_p_groups",
-    "soc_groups_base",
-    "soc_p_groups_base",
-    "p_order",
-    "d_order",
-    "intersite_soc",
-    "d_subspace",
-    "soc_active",
-    "lambda_soc",
-    "e0",
-    "eta",
-    "hermitianize_soc",
     "n_shells",
     "d_max",
     "all_bonds",
@@ -136,7 +109,6 @@ _J_TENSOR_WANNIER_OPTIONS = {
     "nproc",
     "collinear_override",
     "spin_magnitude",
-    "dynamic_soc",
 }
 _J_SCALAR_WANNIER_OPTIONS = {
     "hr_unit",
@@ -190,9 +162,7 @@ _DJ_SCALAR_OPTIONS = {
     "no_symmetry_orbits",
 }
 _DJ_TENSOR_OPTIONS = {
-    "spinor_basis_order",
     "spinor_hr_unit",
-    "mag_subspace",
     "apply_degeneracy",
     "hr_unit",
     "eph_unit",
@@ -203,14 +173,6 @@ _DJ_TENSOR_OPTIONS = {
     "disp_axes",
     "tensor_axes",
     "spin_direction",
-    "soc",
-    "soc_element",
-    "lambda_te",
-    "soc_p_groups",
-    "soc_groups_base",
-    "soc_p_groups_base",
-    "p_order",
-    "d_order",
     "emin",
     "empoints",
     "integrator",
@@ -248,9 +210,6 @@ _ADVANCED_OPTION_SPECS: dict[str, _OptionSpec] = {
             "collinear_override",
             "debug_epr_positions",
             "debug_orbits",
-            "dynamic_soc",
-            "hermitianize_soc",
-            "intersite_soc",
             "nn_only",
             "no_h5",
             "no_symmetry",
@@ -262,16 +221,8 @@ _ADVANCED_OPTION_SPECS: dict[str, _OptionSpec] = {
         name: _OptionSpec("str")
         for name in (
             "atom_labels",
-            "d_subspace",
-            "mag_subspace",
-            "soc",
-            "soc_active",
-            "soc_element",
-            "soc_p_groups",
         )
     },
-    "d_order": _OptionSpec("str", allow_empty=False),
-    "p_order": _OptionSpec("str", allow_empty=False),
     "debug_out": _OptionSpec("str", allow_empty=False),
     "debug_bond": _OptionSpec("int_csv_vector", length=5, allow_empty=True),
     **{
@@ -292,16 +243,12 @@ _ADVANCED_OPTION_SPECS: dict[str, _OptionSpec] = {
     },
     "debug_orbit_shell": _OptionSpec("int", minimum=0.0, allow_none=True),
     "debug_shell": _OptionSpec("int", minimum=0.0, allow_none=True),
-    "soc_groups_base": _OptionSpec("int", choices=(0, 1)),
-    "soc_p_groups_base": _OptionSpec("int", choices=(0, 1)),
     **{
         name: _OptionSpec("float")
-        for name in ("angle_tolerance", "e0", "emin", "lambda_te")
+        for name in ("angle_tolerance", "emin")
     },
-    "lambda_soc": _OptionSpec("float", allow_none=True),
     "cfr_beta": _OptionSpec("float", minimum=0.0, strict_minimum=True),
     "d_max": _OptionSpec("float", minimum=0.0, strict_minimum=True),
-    "eta": _OptionSpec("float", minimum=0.0),
     "spin_magnitude": _OptionSpec("float", minimum=0.0, strict_minimum=True),
     "symprec": _OptionSpec("float", minimum=0.0, strict_minimum=True),
     "qmesh": _OptionSpec(
@@ -319,9 +266,6 @@ _ADVANCED_OPTION_SPECS: dict[str, _OptionSpec] = {
     "ddelta_mode": _OptionSpec("choice", choices=("off", "local", "onsite")),
     "g_transform": _OptionSpec("choice", choices=("kq", "k_only_rp")),
     "rotation_mode": _OptionSpec("choice", choices=("none",)),
-    "spinor_basis_order": _OptionSpec(
-        "choice", choices=("wannier_spin", "wannier_orbital")
-    ),
     "ref_epr_up": _OptionSpec("path", allow_none=True),
     "ref_epr_dn": _OptionSpec("path", allow_none=True),
 }
@@ -905,6 +849,77 @@ def _has_value(value: Any) -> bool:
     return value is not None and (not isinstance(value, str) or bool(value.strip()))
 
 
+def _spinor_groupby(
+    values: dict[str, Any], files: ExchangeFiles
+) -> SpinorGroupBy | None:
+    raw = values.pop("groupby", None)
+    if files.spinor_hr is None:
+        if raw is not None:
+            raise ExchangeInputError("groupby is valid only with spinor_hr")
+        return None
+    if raw is None:
+        raise ExchangeInputError(
+            "spinor_hr requires explicit groupby='spin' or groupby='orbital'"
+        )
+    try:
+        return SpinorGroupBy(str(raw).strip().lower())
+    except ValueError as exc:
+        raise ExchangeInputError(
+            f"groupby must be spin or orbital, got {raw!r}"
+        ) from exc
+
+
+def _atomic_soc(
+    values: dict[str, Any],
+    files: ExchangeFiles,
+    *,
+    ltensor: bool,
+) -> AtomicSOCSpec | None:
+    raw = values.pop("soc_card", None)
+    if raw is None:
+        return None
+    if not ltensor:
+        raise ExchangeInputError("SOC (atomic) requires ltensor=true")
+    if files.win is None:
+        raise ExchangeInputError("SOC (atomic) requires an explicit win file")
+    if not isinstance(raw, Mapping):
+        raise ExchangeInputError("SOC card payload must be a mapping")
+    mode = str(raw.get("mode", "")).strip().lower()
+    if mode != "atomic":
+        raise ExchangeInputError(
+            f"unsupported SOC card mode {mode!r}; only atomic is supported"
+        )
+    entries = raw.get("entries")
+    if not isinstance(entries, Sequence) or isinstance(
+        entries, (str, bytes, bytearray)
+    ):
+        raise ExchangeInputError("SOC (atomic) entries must be a sequence")
+    manifolds: list[AtomicSOCManifold] = []
+    for index, entry in enumerate(entries, start=1):
+        if not isinstance(entry, Mapping):
+            raise ExchangeInputError(
+                f"SOC (atomic) entry {index} must contain selector and lambda_ev"
+            )
+        unknown = sorted(set(entry) - {"selector", "lambda_ev"})
+        if unknown or "selector" not in entry or "lambda_ev" not in entry:
+            raise ExchangeInputError(
+                f"SOC (atomic) entry {index} must contain only selector and lambda_ev"
+            )
+        try:
+            manifolds.append(
+                AtomicSOCManifold(
+                    selector=str(entry["selector"]),
+                    lambda_ev=entry["lambda_ev"],
+                )
+            )
+        except (TypeError, ValueError) as exc:
+            raise ExchangeInputError(str(exc)) from exc
+    try:
+        return AtomicSOCSpec(tuple(manifolds))
+    except ValueError as exc:
+        raise ExchangeInputError(str(exc)) from exc
+
+
 def _validate_advanced_combinations(
     values: dict[str, Any],
     files: ExchangeFiles,
@@ -921,49 +936,8 @@ def _validate_advanced_combinations(
                 "ref_epr_up and ref_epr_dn must be provided together"
             )
 
-    lambda_te = float(values.get("lambda_te", 0.0))
-    if _has_value(values.get("soc_p_groups")) and lambda_te == 0.0:
-        raise ExchangeInputError("soc_p_groups requires a nonzero lambda_te")
-
-    if files.spinor_hr is not None:
-        active: list[str] = []
-        for name in ("soc", "soc_p_groups"):
-            if _has_value(values.get(name)):
-                active.append(name)
-        if lambda_te != 0.0:
-            active.append("lambda_te")
-        if calculation is ExchangeCalculation.J:
-            for name in ("intersite_soc", "dynamic_soc"):
-                if bool(values.get(name, False)):
-                    active.append(name)
-        if active:
-            raise ExchangeInputError(
-                "spinor_hr is already a spinor/SOC Hamiltonian; remove model SOC "
-                f"option(s): {', '.join(active)}"
-            )
-
-        basis_order = str(values.get("spinor_basis_order", "wannier_spin"))
-        if basis_order == "wannier_spin" and files.win is None:
-            raise ExchangeInputError(
-                "spinor_basis_order='wannier_spin' requires win with spinor_hr; "
-                "use spinor_basis_order='wannier_orbital' for interleaved orbitals"
-            )
-        if _has_value(values.get("mag_subspace")) and files.win is None:
-            raise ExchangeInputError("spinor_hr with mag_subspace requires win")
-
-    for feature in ("intersite_soc", "dynamic_soc"):
-        if not bool(values.get(feature, False)):
-            continue
-        missing = []
-        if files.win is None:
-            missing.append("win")
-        for name in ("lambda_soc", "d_subspace", "soc_active"):
-            if not _has_value(values.get(name)):
-                missing.append(name)
-        if missing:
-            raise ExchangeInputError(
-                f"{feature} requires " + ", ".join(missing)
-            )
+    # Spinor layout and SOC-card dependencies are normalized before the
+    # advanced numerical options reach this compatibility bridge.
 
 
 def _normalize_tensor_dj_targets(
@@ -1098,6 +1072,8 @@ def build_exchange_request(
         ltensor=ltensor,
         source=source,
     )
+    groupby = _spinor_groupby(values, files)
+    soc = _atomic_soc(values, files, ltensor=ltensor)
     mode_name = f"{mode.value}{'_tensor' if ltensor else ''}"
     output = _output(prefix, savedir, values, mode_name)
 
@@ -1139,6 +1115,8 @@ def build_exchange_request(
         slices=slices,
         files=files,
         output=output,
+        groupby=groupby,
+        soc=soc,
         options=ExchangeOptions.from_mapping(options),
     )
 

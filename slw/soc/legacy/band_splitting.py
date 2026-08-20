@@ -1,5 +1,5 @@
 """
-SOC/noSOC Wannier band splitting analysis.
+Archived SOC/noSOC Wannier band splitting analysis.
 
 This module compares gauge-invariant eigenenergies from separately
 Wannierized SOC and noSOC Hamiltonians. It does not subtract Hamiltonian

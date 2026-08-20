@@ -91,7 +91,7 @@ _J_WANNIER_DEFAULTS: dict[str, Any] = {
     "up_hr": None,
     "dn_hr": None,
     "spinor_hr": None,
-    "spinor_basis_order": "wannier_spin",
+    "groupby": None,
     "centres": None,
     "hr_unit": "ev",
     "ref_epr_up": None,
@@ -166,7 +166,7 @@ _DJ_SCALAR_DEFAULTS: dict[str, Any] = {
 
 _DJ_TENSOR_DEFAULTS: dict[str, Any] = {
     "spinor_hr": None,
-    "spinor_basis_order": "wannier_spin",
+    "groupby": None,
     "spinor_hr_unit": "ev",
     "win": None,
     "centres": None,
@@ -283,6 +283,18 @@ def build_namespace(request: ExchangeRequest) -> tuple[str, str, argparse.Namesp
     _normalize_aliases(advanced)
     options.update(advanced)
     options.update(_core_options(request))
+    options["groupby"] = request.groupby.value if request.groupby is not None else None
+    options["soc_manifolds"] = (
+        tuple(
+            {
+                "selector": manifold.selector,
+                "lambda_ev": manifold.lambda_ev,
+            }
+            for manifold in request.soc.manifolds
+        )
+        if request.soc is not None
+        else ()
+    )
     if request.calculation is ExchangeCalculation.J:
         if request.ltensor:
             options["kernel"] = request.tensor_kernel.value

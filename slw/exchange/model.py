@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
+from slw.soc.model import AtomicSOCSpec, SpinorGroupBy
+
 
 class ExchangeCalculation(str, Enum):
     """Order of the requested exchange calculation."""
@@ -136,6 +138,8 @@ class ExchangeRequest:
     slices: tuple[OrbitalSlice, ...]
     files: ExchangeFiles
     output: ExchangeOutput
+    groupby: SpinorGroupBy | None = None
+    soc: AtomicSOCSpec | None = None
     options: ExchangeOptions = ExchangeOptions()
 
     @property

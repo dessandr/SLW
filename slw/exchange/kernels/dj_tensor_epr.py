@@ -828,11 +828,9 @@ def run_analytic(args):
     )
 
     if spinor_input:
-        if str(args.soc).strip() or abs(float(args.lambda_te)) > 0.0 or str(args.soc_p_groups).strip():
-            raise ValueError("--spinor_hr is already a SOC/noncollinear Hamiltonian; remove --soc/--lambda_te/--soc_p_groups")
         print(
             f"[dJ-epr-tensor] Loading base H(k) from spinor_hr={args.spinor_hr} "
-            f"basis_order={args.spinor_basis_order} unit={args.spinor_hr_unit}",
+            f"groupby={args.groupby} unit={args.spinor_hr_unit}",
             flush=True,
         )
         h_spin, spinor_meta = _load_spinor_hr_hk(
@@ -840,7 +838,7 @@ def run_analytic(args):
             kpts,
             apply_degeneracy=bool(args.apply_degeneracy),
             hr_unit=args.spinor_hr_unit,
-            basis_order=args.spinor_basis_order,
+            groupby=args.groupby,
             win=args.win,
             centres=args.centres,
         )
@@ -849,25 +847,19 @@ def run_analytic(args):
             print(f"[dJ-epr-tensor] basis_groups_file_order={spinor_meta['basis_groups_file']}", flush=True)
         if spinor_meta.get("basis_groups_internal"):
             print(f"[dJ-epr-tensor] basis_groups_internal_spin_major={spinor_meta['basis_groups_internal']}", flush=True)
-        if spinor_meta.get("centres_order_guess"):
-            scores = spinor_meta.get("centres_order_scores", {})
-            score_txt = ", ".join(f"{k}={float(v):.3e}A" for k, v in sorted(scores.items()))
+        h_spin, soc_entries, soc_win = _apply_model_soc(h_spin, args, dim_col)
+        if soc_entries:
             print(
-                f"[dJ-epr-tensor] centres_order_guess={spinor_meta['centres_order_guess']} scores({score_txt})",
+                f"[dJ-epr-tensor] added atomic SOC entries={len(soc_entries)} "
+                f"win={soc_win}",
                 flush=True,
             )
-            if str(spinor_meta.get("centres_order_guess")) != str(spinor_meta.get("basis_order")):
-                print(
-                    f"[dJ-epr-tensor][WARN] --spinor_basis_order={spinor_meta.get('basis_order')} "
-                    f"but centres suggest {spinor_meta.get('centres_order_guess')}",
-                    flush=True,
-                )
         slices, slice_labels = _load_spinor_slices_for_global_atoms(args, dim_col, mag_atoms)
         if slice_labels:
             print(f"[dJ-epr-tensor] mag_subspace={slice_labels}", flush=True)
         print(
             f"[dJ-epr-tensor] mag_subspace_file_order="
-            f"{_slice_file_order_summary(slices, dim_col, args.spinor_basis_order)}",
+            f"{_slice_file_order_summary(slices, dim_col, args.groupby)}",
             flush=True,
         )
         print(
@@ -891,6 +883,8 @@ def run_analytic(args):
             )
 
     spin_evals = np.linalg.eigvalsh(h_spin)
+    args._soc_entries = soc_entries
+    args._soc_win_path = soc_win
     print(
         f"[dJ-epr-tensor] base spinor H(k) dim={h_spin.shape[1]} "
         f"band=({float(spin_evals.min()):.6g},{float(spin_evals.max()):.6g}) eV",
@@ -1000,7 +994,8 @@ def _save_results(args, results, pair_meta, labels, tensor_axes, disp_axes, qmes
         h5.attrs["atomic_gauge_bond_phase"] = "endpoint_j_at_R_times_exp(+i2pi_q_dot_R)"
         h5.attrs["directed_bond_mate"] = "(j,i,-R;Rp-R)_periodic"
         h5.attrs["base_hamiltonian"] = "spinor_hr" if getattr(args, "spinor_hr", None) else "epr_up_down"
-        h5.attrs["spinor_basis_order"] = str(getattr(args, "spinor_basis_order", ""))
+        h5.attrs["input_groupby"] = str(getattr(args, "groupby", "") or "")
+        h5.attrs["internal_groupby"] = "spin"
         basic = h5.create_group("basic_data")
         basic.create_dataset("tensor_axes", data=np.asarray(("x", "y", "z"), dtype=object), dtype=str_dt)
         basic.create_dataset("pauli_axes", data=np.asarray(("0", "x", "y", "z"), dtype=object), dtype=str_dt)
@@ -1008,7 +1003,23 @@ def _save_results(args, results, pair_meta, labels, tensor_axes, disp_axes, qmes
         basic.create_dataset("epr_up", data=np.array(str(args.epr_up), dtype=object), dtype=str_dt)
         basic.create_dataset("epr_dn", data=np.array(str(args.epr_dn), dtype=object), dtype=str_dt)
         basic.create_dataset("spinor_hr", data=np.array(str(getattr(args, "spinor_hr", "") or ""), dtype=object), dtype=str_dt)
-        basic.create_dataset("spinor_basis_order", data=np.array(str(getattr(args, "spinor_basis_order", "") or ""), dtype=object), dtype=str_dt)
+        basic.create_dataset("input_groupby", data=np.array(str(getattr(args, "groupby", "") or ""), dtype=object), dtype=str_dt)
+        basic.create_dataset("internal_groupby", data=np.array("spin", dtype=object), dtype=str_dt)
+        soc_entries = getattr(args, "_soc_entries", []) or []
+        basic.create_dataset("additional_soc", data=np.asarray(bool(soc_entries)))
+        basic.create_dataset("soc_mode", data=np.array("atomic" if soc_entries else "none", dtype=object), dtype=str_dt)
+        basic.create_dataset(
+            "soc_entries",
+            data=np.asarray(
+                [
+                    f"{entry.get('selector', entry['element'] + '-' + entry['orbital'])}:"
+                    f"{float(entry['lambda_ev']):.16g}"
+                    for entry in soc_entries
+                ],
+                dtype=object,
+            ),
+            dtype=str_dt,
+        )
         basic.create_dataset("win", data=np.array(str(getattr(args, "win", "") or ""), dtype=object), dtype=str_dt)
         basic.create_dataset("centres", data=np.array(str(getattr(args, "centres", "") or ""), dtype=object), dtype=str_dt)
         basic.create_dataset("command", data=np.array(" ".join(sys.argv), dtype=object), dtype=str_dt)
@@ -1025,7 +1036,6 @@ def _save_results(args, results, pair_meta, labels, tensor_axes, disp_axes, qmes
         basic.create_dataset("numba_threads", data=np.array(int(args.numba_threads), dtype=np.int64))
         basic.create_dataset("blas_threads", data=np.array(int(args.blas_threads), dtype=np.int64))
         basic.create_dataset("integrator", data=np.array(str(args.integrator), dtype=object), dtype=str_dt)
-        basic.create_dataset("soc", data=np.array(str(getattr(args, "soc", "") or ""), dtype=object), dtype=str_dt)
         basic.create_dataset("unit", data=np.array("meV/A", dtype=object), dtype=str_dt)
         bonds = h5.create_group("bonds")
         bonds.create_dataset("mag_i_atom", data=np.asarray([m["gi"] for m in pair_meta], dtype=np.int64))
@@ -1088,14 +1098,10 @@ def build_arg_parser():
     ap.add_argument("--epr_dn", required=True, help="EPR down HDF5; still required for g(k+q,k)")
     ap.add_argument("--spinor_hr", default=None, help="Optional full SOC/noncollinear Wannier90 spinor hr.dat used as base Hamiltonian")
     ap.add_argument(
-        "--spinor_basis_order",
-        default="wannier_spin",
-        choices=["wannier_spin", "wannier_orbital"],
-        help=(
-            "Ordering in --spinor_hr. wannier_spin = each .win projection group as "
-            "[group up block, group down block]; wannier_orbital = "
-            "[orb1 up, orb1 down, orb2 up, orb2 down, ...]."
-        ),
+        "--groupby",
+        choices=["spin", "orbital"],
+        default=None,
+        help="Required for --spinor_hr: TB2J spin-major or orbital-interleaved layout.",
     )
     ap.add_argument("--spinor_hr_unit", choices=["ev", "ry", "ha"], default="ev", help="Unit of --spinor_hr matrix elements")
     ap.add_argument("--win", default=None, help="Wannier90 .win used to infer spinor projection order and magnetic slices")

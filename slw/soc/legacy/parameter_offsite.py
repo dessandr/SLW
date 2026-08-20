@@ -1,7 +1,7 @@
 
 """Fit site-pair SOC parameters from Wannier90 position matrices.
 
-This is the experimental offsite extension of ``slw.soc.parameter``.  It uses
+This is the archived offsite extension of ``slw.soc.legacy.parameter``. It uses
 Wannier90 ``*_r.dat`` position matrix elements and a collinear charge-channel
 Hamiltonian to build k-dependent templates
 
@@ -38,8 +38,8 @@ from slw.exchange.kernels.spinor import (
     p_orbital_l_matrices,
     spinor_from_collinear,
 )
-from slw.exchange.kernels.win_soc import _clean_species
-from slw.soc.parameter import (
+from slw.soc.manifold import _clean_species
+from slw.soc.legacy.parameter import (
     _cfg_value,
     _cfg_vec,
     _hmap_to_hk,

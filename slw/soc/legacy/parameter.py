@@ -1,4 +1,4 @@
-"""Fit onsite atomic SOC parameters against a spinor SOC Wannier Hamiltonian.
+"""Archived onsite atomic SOC fitting experiment.
 
 This module builds a spin-major model Hamiltonian
 

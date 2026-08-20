@@ -1,5 +1,5 @@
 """
-Prepare Wannier files for TB2J SOC calculations.
+Archived TB2J preparation workflow.
 
 All material-dependent paths and dimensions are explicit command-line inputs.
 """

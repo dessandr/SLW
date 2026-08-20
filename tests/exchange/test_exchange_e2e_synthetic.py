@@ -165,6 +165,11 @@ class SyntheticExchangeEndToEndTests(unittest.TestCase):
                     )
                     if request.mode_name == "dj_tensor":
                         self.assertEqual(int(handle.attrs["complete"]), 1)
+                    if request.mode_name in {"j_tensor", "dj_tensor"}:
+                        basic = handle["basic_data"]
+                        self.assertEqual(basic["internal_groupby"].asstr()[()], "spin")
+                        self.assertFalse(bool(basic["additional_soc"][()]))
+                        self.assertEqual(basic["soc_mode"].asstr()[()], "none")
 
     def test_two_rank_static_j_matches_serial(self) -> None:
         serial = self._request("j", "serial_j", no_symmetry_orbits=True)

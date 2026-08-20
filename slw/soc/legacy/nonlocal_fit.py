@@ -1,5 +1,5 @@
 """
-Fit effective SOC corrections to a spinful collinear Hamiltonian.
+Archived fitting of effective SOC corrections to a spinful Hamiltonian.
 
 The default model keeps atomic L.S as onsite terms and represents nonlocal
 spin-flip processes with bond-resolved Slater-Koster d-p operators. The output
@@ -22,7 +22,7 @@ from slw.core.cli_paths import resolve_path, resolve_workdir
 from slw.core.constants import BOHR_TO_ANG
 from slw.core.wannier_io import read_wannier_hr, write_wannier_hr
 from slw.exchange.kernels.spinor import atomic_soc_block_diagonal
-from slw.soc.band_splitting import (
+from slw.soc.legacy.band_splitting import (
     compute_alignment_shift,
     parse_band_selection,
     read_kpoints,

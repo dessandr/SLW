@@ -1,5 +1,5 @@
 """
-Build a spinor noSOC Hamiltonian from collinear up/down Wannier hr.dat files.
+Archived collinear-to-spinor builder with superseded basis layouts.
 
 The collinear spin channels are combined as
 

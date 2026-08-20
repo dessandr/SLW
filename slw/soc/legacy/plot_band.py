@@ -1,4 +1,4 @@
-"""Plot a Wannier90 band structure along the path declared in a ``.win`` file."""
+"""Archived Wannier90 band plotter."""
 
 from __future__ import annotations
 

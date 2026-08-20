@@ -131,6 +131,34 @@ class ExchangeEngineTests(unittest.TestCase):
         self.assertEqual(namespace.mag_atoms_base, 0)
         self.assertEqual(namespace.targets, (0, 1))
 
+    def test_spinor_groupby_and_soc_card_reach_native_namespace(self):
+        parameters = {
+            "input_format": "wannier",
+            "ltensor": True,
+            "spinor_hr": "spinor_hr.dat",
+            "groupby": "orbital",
+            "win": "model.win",
+            "efermi": 0.0,
+            "kmesh": [1, 1, 1],
+            "mag_atoms": [0],
+            "slices": "0:0:3",
+            "soc_card": {
+                "mode": "atomic",
+                "entries": [{"selector": "Te-p", "lambda_ev": 0.5}],
+            },
+        }
+        request = build_exchange_request(
+            "j", parameters, prefix="toy", savedir="/tmp/toy.save"
+        )
+        _, _, namespace = build_namespace(request)
+
+        self.assertEqual(namespace.groupby, "orbital")
+        self.assertEqual(
+            namespace.soc_manifolds,
+            ({"selector": "Te-p", "lambda_ev": 0.5},),
+        )
+        self.assertNotIn("groupby", request.options)
+
     def test_exchange_dry_run_uses_ltensor_and_touches_no_inputs(self):
         text = """
         &control

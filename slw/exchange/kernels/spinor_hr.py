@@ -8,18 +8,8 @@ import os
 import numpy as np
 
 from slw.core.wannier_io import read_wannier_hr, write_wannier_hr
-from slw.exchange.kernels.spinor import (
-    WANNIER90_D_ORDER,
-    WANNIER90_P_ORDER,
-    add_atomic_d_soc,
-    add_atomic_p_soc,
-    normalize_spin_direction,
-    spinor_from_collinear,
-)
-from slw.exchange.kernels.win_soc import (
-    _resolve_soc_groups_from_win,
-    _win_projection_groups,
-)
+from slw.exchange.kernels.spinor import normalize_spin_direction, spinor_from_collinear
+from slw.soc.spinor import normalize_groupby, spin_major_to_groupby_indices
 
 
 def _read_wannier_hr_compat(path):
@@ -41,102 +31,9 @@ def _resolve_hr_path(path=None, prefix=None):
     return f"{prefix}_hr.dat"
 
 
-def _apply_soc_to_onsite(h_spin_onsite, args, nwan):
-    entries, win_path = _resolve_soc_groups_from_win(args, nwan)
-    out = np.asarray(h_spin_onsite, dtype=np.complex128)
-    for entry in entries:
-        orb = entry["orbital"]
-        lam = float(entry["lambda_ev"])
-        groups = entry["groups"]
-        if orb == "p":
-            out = add_atomic_p_soc(out, groups, lambda_ev=lam, order=args.p_order, inplace=False)
-        elif orb == "d":
-            out = add_atomic_d_soc(out, groups, lambda_ev=lam, order=args.d_order, inplace=False)
-        else:
-            raise ValueError(f"Unsupported SOC orbital: {orb}")
-        print(
-            f"[spinor-soc-hr] added {entry['element']}:{orb} SOC "
-            f"lambda={lam:g} eV groups={groups} source={entry['source']}",
-            flush=True,
-        )
-    return out, entries, win_path
-
-
-def _clean_selector_element(text):
-    return str(text).strip().split()[0].strip().capitalize()
-
-
-def _parse_subspace_selector(text):
-    specs = []
-    for item in str(text or "").split(";"):
-        item = item.strip()
-        if not item:
-            continue
-        parts = [x.strip() for x in item.replace(",", ":").split(":") if x.strip()]
-        if len(parts) != 2:
-            raise ValueError(f"Expected magnetic subspace selector element:orbital, got {item!r}")
-        specs.append((_clean_selector_element(parts[0]), parts[1].lower()))
-    return specs
-
-
-def _suggest_spinor_slices_from_win(win_path, nwan, selector):
-    specs = _parse_subspace_selector(selector)
-    if not specs:
-        return "", []
-    if not win_path:
-        raise ValueError("--mag_subspace requires --win")
-    _atoms, groups, nproj = _win_projection_groups(win_path)
-    if int(nproj) != int(nwan):
-        raise ValueError(f"{win_path} projection count={nproj} but hr.dat nwan={nwan}")
-    matched = []
-    for elem, orb in specs:
-        found = [g for g in groups if str(g["element"]).capitalize() == elem and str(g["orbital"]).lower() == orb]
-        if not found:
-            known = sorted({(g["element"], g["orbital"]) for g in groups})
-            raise ValueError(f"No {elem}:{orb} groups found in {win_path}; known={known}")
-        matched.extend(found)
-    out = []
-    labels = []
-    for isite, group in enumerate(matched):
-        idx = np.asarray(group["indices"], dtype=np.int64).reshape(-1)
-        up0 = int(idx.min())
-        up1 = int(idx.max()) + 1
-        if not np.array_equal(idx, np.arange(up0, up1, dtype=np.int64)):
-            raise ValueError(
-                "--mag_subspace spinor_slices currently require contiguous group indices; "
-                f"{group['atom_label']}:{group['orbital']} has {idx.tolist()}"
-            )
-        out.append(f"{isite}:{up0}:{up1}:{int(nwan) + up0}:{int(nwan) + up1}")
-        labels.append(f"{group['atom_label']}:{group['orbital']}[{up0}:{up1}]")
-    return ",".join(out), labels
-
-
-def _basis_permutation_from_win(win_path, nwan, basis_order):
-    order = str(basis_order).strip().lower().replace("-", "_")
-    if order in {"spin_major", "spin"}:
-        return np.arange(2 * int(nwan), dtype=np.int64), "spin_major", []
-    if order not in {"win_interleaved", "site_interleaved", "atom_interleaved", "group_interleaved"}:
-        raise ValueError(f"Unsupported --basis_order {basis_order!r}; use spin_major or win_interleaved")
-    if not win_path:
-        raise ValueError("--basis_order win_interleaved requires --win")
-    _atoms, groups, nproj = _win_projection_groups(win_path)
-    if int(nproj) != int(nwan):
-        raise ValueError(f"{win_path} projection count={nproj} but hr.dat nwan={nwan}")
-    seen = []
-    for group in groups:
-        seen.extend(int(x) for x in group["indices"])
-    if sorted(seen) != list(range(int(nwan))):
-        raise ValueError(f".win projection groups do not cover 0..{int(nwan)-1}: got {sorted(seen)[:12]}...")
-    perm = []
-    for group in groups:
-        idx = [int(x) for x in group["indices"]]
-        perm.extend(idx)
-        perm.extend([int(nwan) + i for i in idx])
-    labels = [
-        f"{g['atom_label']}:{g['orbital']}[{g['indices'][0]}:{g['indices'][-1] + 1}]"
-        for g in groups
-    ]
-    return np.asarray(perm, dtype=np.int64), "win_interleaved", labels
+def _basis_permutation(nwan, groupby):
+    mode = normalize_groupby(groupby)
+    return spin_major_to_groupby_indices(int(nwan), mode), mode.value
 
 
 def _read_centres_xyz(path):
@@ -165,35 +62,57 @@ def _centres_default_output(out_hr):
     return stem + "_centres.xyz"
 
 
+def _normalized_centre_row(line):
+    fields = line.split()
+    if len(fields) < 4:
+        raise ValueError(f"Invalid centres.xyz row: {line!r}")
+    try:
+        coordinates = tuple(float(value) for value in fields[1:4])
+    except ValueError as exc:
+        raise ValueError(f"Invalid centres.xyz coordinates: {line!r}") from exc
+    return fields[0], coordinates
+
+
 def _write_spinor_centres(args, nwan, perm, out_hr):
-    up_path = args.centres_up or args.centres
+    up_path = args.centres_up
     dn_path = args.centres_dn
     if not up_path and not dn_path:
+        if args.centres_output:
+            raise ValueError(
+                "centres_output requires both centres_up and centres_dn"
+            )
         return None
-    if not up_path:
-        raise ValueError("Provide --centres or --centres_up for spinor centres output")
+    if not up_path or not dn_path:
+        raise ValueError(
+            "spinor centres output requires both centres_up and centres_dn"
+        )
     up_wann, up_atoms = _split_centres_body(_read_centres_xyz(up_path), nwan)
-    if dn_path:
-        dn_wann, dn_atoms = _split_centres_body(_read_centres_xyz(dn_path), nwan)
-        if len(up_atoms) != len(dn_atoms):
-            raise ValueError(f"atom centre row count mismatch: up={len(up_atoms)}, dn={len(dn_atoms)}")
-        atom_lines = up_atoms
-    else:
-        dn_wann = up_wann
-        atom_lines = up_atoms
+    dn_wann, dn_atoms = _split_centres_body(_read_centres_xyz(dn_path), nwan)
+    if len(up_atoms) != len(dn_atoms):
+        raise ValueError(
+            f"atom centre row count mismatch: up={len(up_atoms)}, dn={len(dn_atoms)}"
+        )
+    for index, (up_line, dn_line) in enumerate(zip(up_atoms, dn_atoms, strict=True)):
+        up_label, up_xyz = _normalized_centre_row(up_line)
+        dn_label, dn_xyz = _normalized_centre_row(dn_line)
+        if up_label != dn_label or not np.allclose(up_xyz, dn_xyz, rtol=0.0, atol=1.0e-8):
+            raise ValueError(
+                f"atomic centre row {index} differs between spin channels"
+            )
+    atom_lines = up_atoms
     spin_major = up_wann + dn_wann
     ordered_wann = [spin_major[int(i)] for i in np.asarray(perm, dtype=np.int64).tolist()]
     out_path = args.centres_output or _centres_default_output(out_hr)
     os.makedirs(os.path.dirname(os.path.abspath(out_path)) or ".", exist_ok=True)
     with open(out_path, "w", encoding="utf-8") as f:
         f.write(f"    {len(ordered_wann) + len(atom_lines)}\n")
-        f.write(f" spinor Wannier centres generated by SLW basis_order={args.basis_order}\n")
+        f.write(f" spinor Wannier centres generated by SLW groupby={args.groupby}\n")
         f.writelines(line if line.endswith("\n") else line + "\n" for line in ordered_wann)
         f.writelines(line if line.endswith("\n") else line + "\n" for line in atom_lines)
     return out_path
 
 
-def build_spinor_soc_hr(args):
+def build_spinor_hr(args):
     up_path = _resolve_hr_path(args.up_hr, args.prefix_up)
     dn_path = _resolve_hr_path(args.dn_hr, args.prefix_dn)
     out_path = args.output
@@ -213,6 +132,18 @@ def build_spinor_soc_hr(args):
         raise ValueError(f"up degeneracy count={len(degens_up)} does not match nrpts={len(h_up)}")
     if len(degens_dn) != len(h_dn):
         raise ValueError(f"dn degeneracy count={len(degens_dn)} does not match nrpts={len(h_dn)}")
+    up_r = list(h_up)
+    dn_r = list(h_dn)
+    up_degeneracy = dict(zip(up_r, degens_up, strict=True))
+    dn_degeneracy = dict(zip(dn_r, degens_dn, strict=True))
+    inconsistent = [
+        r for r in up_r if up_degeneracy[r] != dn_degeneracy[r]
+    ]
+    if inconsistent:
+        raise ValueError(
+            "up/down R-point degeneracies differ for "
+            f"{inconsistent[:5]}"
+        )
 
     nwan = int(dim_up)
     nvec = normalize_spin_direction(args.spin_direction)
@@ -220,28 +151,25 @@ def build_spinor_soc_hr(args):
     for r in h_up:
         spinor[r] = spinor_from_collinear(h_up[r], h_dn[r], n=nvec)
 
-    entries = []
-    win_path = ""
-    if args.soc or args.lambda_te != 0.0 or args.soc_p_groups:
-        onsite = (0, 0, 0)
-        if onsite not in spinor:
-            raise KeyError("R=(0,0,0) onsite block not found; cannot add onsite model SOC")
-        spinor[onsite], entries, win_path = _apply_soc_to_onsite(spinor[onsite], args, nwan)
-    if not win_path and args.win:
-        win_path = args.win
-
-    perm, basis_order, basis_groups = _basis_permutation_from_win(win_path, nwan, args.basis_order)
-    if basis_order != "spin_major":
+    perm, groupby = _basis_permutation(nwan, args.groupby)
+    if groupby != "spin":
         spinor = {r: h[np.ix_(perm, perm)] for r, h in spinor.items()}
 
     os.makedirs(os.path.dirname(os.path.abspath(out_path)) or ".", exist_ok=True)
     header = (
         "SLW spinor hr from collinear up/down"
         f"; spin_direction={','.join(f'{x:.10g}' for x in nvec)}"
-        f"; soc={args.soc or 'legacy'}"
-        f"; basis_order={basis_order}"
+        "; additional_soc=none"
+        f"; groupby={groupby}"
     )
-    write_wannier_hr(out_path, 2 * nwan, degens_up, spinor, header=header)
+    output_degeneracies = [up_degeneracy[r] for r in sorted(spinor)]
+    write_wannier_hr(
+        out_path,
+        2 * nwan,
+        output_degeneracies,
+        spinor,
+        header=header,
+    )
     centres_path = _write_spinor_centres(args, nwan, perm, out_path)
     print("[spinor-soc-hr] summary", flush=True)
     print(f"  up_hr: {up_path}", flush=True)
@@ -250,21 +178,9 @@ def build_spinor_soc_hr(args):
     print(f"  nwan: {nwan} -> spinor_dim: {2 * nwan}", flush=True)
     print(f"  nrpts: {len(spinor)}", flush=True)
     print(f"  spin_direction: {nvec.tolist()}", flush=True)
-    print(f"  basis_order: {basis_order}", flush=True)
-    if basis_groups:
-        print(f"  basis_groups: {basis_groups}", flush=True)
-    print(f"  win_path: {win_path or ''}", flush=True)
+    print(f"  groupby: {groupby}", flush=True)
     if centres_path:
         print(f"  centres_output: {centres_path}", flush=True)
-    soc_summary = [
-        f"{e['element']}:{e['orbital']}:{float(e['lambda_ev']):.8g}"
-        for e in entries
-    ]
-    print(f"  soc_entries: {soc_summary}", flush=True)
-    if args.mag_subspace:
-        slices, labels = _suggest_spinor_slices_from_win(win_path or args.win, nwan, args.mag_subspace)
-        print(f"  mag_subspace: {labels}", flush=True)
-        print(f"  suggested_spinor_slices: {slices}", flush=True)
     return out_path
 
 
@@ -278,33 +194,22 @@ def main():
     ap.add_argument("-o", "--output", default=None, help="Output spinor hr.dat path")
     ap.add_argument("--out_prefix", default=None, help="Output prefix; writes <out_prefix>_hr.dat if --output is omitted")
     ap.add_argument(
-        "--basis_order",
-        choices=["spin_major", "win_interleaved", "site_interleaved", "atom_interleaved", "group_interleaved"],
-        default="spin_major",
-        help="Output spinor basis. Default spin_major writes all up orbitals then all down orbitals.",
+        "--groupby",
+        choices=["spin", "orbital"],
+        required=True,
+        help="TB2J output layout: all spin sectors or interleaved spin per orbital.",
     )
-    ap.add_argument("--centres", default=None, help="Single collinear centres.xyz file; duplicated if spin-down centres is omitted")
     ap.add_argument("--centres_up", default=None, help="Spin-up centres.xyz file")
     ap.add_argument("--centres_dn", default=None, help="Spin-down centres.xyz file")
     ap.add_argument("--centres_output", default=None, help="Output spinor centres.xyz path")
     ap.add_argument("--spin_direction", type=float, nargs=3, default=[0.0, 0.0, 1.0])
-    ap.add_argument("--soc", default="", help="Model SOC specs inferred from .win projections, e.g. 'I:p:0.6;Cr:d:0.05'")
-    ap.add_argument("--win", default=None, help="Wannier90 .win file used to infer p/d SOC orbital groups")
-    ap.add_argument("--mag_subspace", default="", help="Magnetic subspace selector for suggested spinor_slices, e.g. 'Cr:d'")
-    ap.add_argument("--soc_element", default="", help="Element for compatibility --lambda_te p-SOC mode")
-    ap.add_argument("--lambda_te", type=float, default=0.0, help="Compatibility onsite p SOC lambda in eV; prefer --soc")
-    ap.add_argument("--soc_p_groups", default="", help="Manual p groups, e.g. '10,11,12;25,26,27'")
-    ap.add_argument("--soc_p_groups_base", type=int, choices=[0, 1], default=0)
-    ap.add_argument("--p_order", default=WANNIER90_P_ORDER)
-    ap.add_argument("--d_order", default=WANNIER90_D_ORDER)
     args = ap.parse_args()
 
     if args.prefix:
         args.prefix_up = args.prefix_up or f"{args.prefix}_up"
         args.prefix_dn = args.prefix_dn or f"{args.prefix}_dn"
         args.out_prefix = args.out_prefix or args.prefix
-    args.epr_up = ""
-    build_spinor_soc_hr(args)
+    build_spinor_hr(args)
 
 
 if __name__ == "__main__":

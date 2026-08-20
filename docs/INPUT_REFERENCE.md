@@ -255,6 +255,54 @@ enables the existing local multiprocessing path.
 | `out_h5` | path | no | mode-derived | HDF5 product path. |
 | `out_name` | path | no | mode-derived | Text product path when the mode writes one. |
 
+### Spinor basis and atomic SOC
+
+Raw `spinor_hr` input must declare exactly one TB2J layout:
+
+| Key | Allowed values | Meaning |
+|---|---|---|
+| `groupby` | `spin` | `[all up orbitals | all down orbitals]` |
+| `groupby` | `orbital` | `[orb1 up, orb1 down, orb2 up, orb2 down, ...]` |
+
+SLW never infers this value from `wannier_centres.xyz`. Internally both layouts
+are converted to `groupby='spin'`. The same permutation is applied to HR rows,
+HR columns, and Wannier-centre rows when collinear up/down inputs are exported
+as a spinor model. A centre export requires both spin-channel centre files;
+atomic rows must match and are written once.
+
+Additional onsite SOC is a final QE-style card, not a namelist option:
+
+```fortran
+&control
+  calculation = 'j'
+/
+&exchange
+  input_format = 'wannier',
+  ltensor = .true.,
+  spinor_hr = 'model_hr.dat',
+  groupby = 'orbital',
+  win = 'model.win',
+  ...
+/
+SOC (atomic)
+  LAMBDA Te-p  0.50
+  LAMBDA Mn1-d 0.05
+```
+
+`LABEL-p` and `LABEL-d` select Wannier90 projection manifolds. A species label
+such as `Te-p` applies to every matching Te site; a site label such as `Mn1-d`
+applies only to that site. Values are in eV. Overlapping or unmatched selectors,
+missing projection metadata, and inconsistent projection counts are errors.
+Wannier90 real-harmonic ordering is fixed internally; manual orbital indices
+and custom p/d order controls are not accepted. No card means no *additional*
+SOC. A `spinor_hr` may therefore represent either a SOC or SOC-free
+noncollinear Hamiltonian, and an SOC card may add a separate term to either.
+
+The historical keys `spinor_basis_order`, `basis_order`, `soc`, `lambda_te`,
+`soc_p_groups`, `p_order`, `d_order`, `intersite_soc`, and `dynamic_soc` are not
+part of the native input schema. Any such rows in archived backend documentation
+refer only to quarantined code and are rejected by `slw_exchange.x`.
+
 The option tables below retain detailed kernel tuning fields. The old parser
 default shown for an output field is historical; the native output defaults
 in the paragraph above take precedence. `kernel` is a compatibility alias for
@@ -322,11 +370,8 @@ Frontend-fixed values: `kernel='scalar'`. Supplying a conflicting value is an er
 
 | Namelist key | Type | Parser required | Parser default | Meaning / CLI aliases |
 |---|---|---:|---|---|
-| `up_hr` | string | no | none / runtime | Spin-up Wannier90 hr.dat; required unless --spinor_hr is used<br>CLI aliases: `--up_hr` |
-| `dn_hr` | string | no | none / runtime | Spin-down Wannier90 hr.dat; required unless --spinor_hr is used<br>CLI aliases: `--dn_hr` |
-| `spinor_hr` | string | no | none / runtime | Full spinor Wannier90 hr.dat from SOC/noncollinear Wannier90<br>CLI aliases: `--spinor_hr` |
-| `spinor_basis_order` | string | no | `wannier_spin` | Spinor ordering in --spinor_hr. wannier_spin = each .win projection group as [group up block, group down block], e.g. Mn1 d up, Mn1 d down, Mn2 d up, ...; wannier_orbital = [orb1 up, orb1 down, orb2 up, orb2 down, ...]. Orbital/projection order always follows the .win projection order.<br>CLI aliases: `--spinor_basis_order` |
-| `centres` | string | no | none / runtime | Optional Wannier90 centres.xyz for spinor_dim sanity check<br>CLI aliases: `--centres` |
+| `up_hr` | string | yes | — | Spin-up collinear Wannier90 hr.dat.<br>CLI aliases: `--up_hr` |
+| `dn_hr` | string | yes | — | Spin-down collinear Wannier90 hr.dat.<br>CLI aliases: `--dn_hr` |
 | `efermi` | float | yes | — | Fermi energy in eV<br>CLI aliases: `--efermi` |
 | `hr_unit` | enum {ev, ry, ha} | no | `ev` | Unit of input hr.dat matrix elements; Wannier90 default is eV<br>CLI aliases: `--hr_unit` |
 | `ref_epr_up` | string | no | none / runtime | Optional reference EPR up HDF5 for H(k) scale/gauge diagnostics<br>CLI aliases: `--ref_epr_up` |
@@ -335,27 +380,11 @@ Frontend-fixed values: `kernel='scalar'`. Supplying a conflicting value is an er
 | `kmesh` | int[3] | yes | — | Advanced native-kernel option.<br>CLI aliases: `--kmesh` |
 | `mag_atoms` | list[int] | yes | — | Magnetic atom indices<br>CLI aliases: `--mag_atoms` |
 | `mag_atoms_base` | enum {0, 1} | no | `0` | Advanced native-kernel option.<br>CLI aliases: `--mag_atoms_base` |
-| `slices` | string | no | `''` | Manual local orbital slices, e.g. '0:0:5,1:5:10'<br>CLI aliases: `--slices` |
+| `slices` | string | yes | — | Manual local orbital slices, e.g. `0:0:5,1:5:10`. |
 | `apply_degeneracy` | boolean | no | .true. | Divide HR blocks by Wannier90 degeneracy before H(k) construction; standard Wannier90 needs this<br>CLI aliases: `--apply_degeneracy`, `--no-apply_degeneracy` |
-| `kernel` | enum {scalar, direct, tb2j} | no | `tb2j` | scalar is the SOC-free collinear LKAG reference; tb2j/direct use spinor tensor kernels<br>CLI aliases: `--kernel` |
-| `axes` | string | no | `xyz` | Tensor axes to compute, subset of xyz<br>CLI aliases: `--axes` |
+| `axes` | string | no | `xyz` | Isotropic tensor-envelope axes used by the current scalar writer.<br>CLI aliases: `--axes` |
 | `spin_direction` | float[3] | no | `[0.0, 0.0, 1.0]` | Advanced native-kernel option.<br>CLI aliases: `--spin_direction` |
-| `soc` | string | no | `''` | Model SOC specs inferred from --win, e.g. 'Te:p:0.5;Cr:d:0.05'<br>CLI aliases: `--soc` |
-| `win` | string | no | none / runtime | Wannier90 .win file; inferred only when the working directory contains exactly one candidate<br>CLI aliases: `--win` |
-| `mag_subspace` | string | no | `''` | Infer magnetic local slices from .win projections, e.g. 'Cr:d;Cr:d' or 'Cr:d'<br>CLI aliases: `--mag_subspace` |
-| `soc_element` | string | no | `''` | Element for compatibility --lambda_te p-SOC mode<br>CLI aliases: `--soc_element` |
-| `lambda_te` | float | no | `0.0` | Advanced native-kernel option.<br>CLI aliases: `--lambda_te` |
-| `soc_p_groups` | string | no | `''` | Advanced native-kernel option.<br>CLI aliases: `--soc_p_groups` |
-| `soc_groups_base` | enum {0, 1} | no | `0` | Advanced native-kernel option.<br>CLI aliases: `--soc_groups_base`, `--soc_p_groups_base` |
-| `p_order` | string | no | `pz,px,py` | Advanced native-kernel option.<br>CLI aliases: `--p_order` |
-| `d_order` | string | no | `dz2,dxz,dyz,dx2-y2,dxy` | Advanced native-kernel option.<br>CLI aliases: `--d_order` |
-| `intersite_soc` | boolean | no | .false. | Add downfolded intersite SOC correction to the selected d subspace<br>CLI aliases: `--intersite_soc` |
-| `d_subspace` | string | no | `''` | Target low-energy subspace for --intersite_soc<br>CLI aliases: `--d_subspace` |
-| `soc_active` | string | no | `''` | SOC-active ligand subspace for --intersite_soc<br>CLI aliases: `--soc_active` |
-| `lambda_soc` | float | no | none / runtime | Atomic SOC lambda in eV for --intersite_soc<br>CLI aliases: `--lambda_soc` |
-| `e0` | float | no | `0.0` | Downfolding energy E0 in eV for --intersite_soc<br>CLI aliases: `--e0` |
-| `eta` | float | no | `0.0` | Downfolding broadening in eV for --intersite_soc<br>CLI aliases: `--eta` |
-| `hermitianize_soc` | boolean | no | .true. | Advanced native-kernel option.<br>CLI aliases: `--hermitianize_soc`, `--no-hermitianize_soc` |
+| `win` | string | no | none | Optional explicit Wannier90 structure source; scalar J does not accept an SOC card. |
 | `n_shells` | int | no | `10` | Advanced native-kernel option.<br>CLI aliases: `--n_shells` |
 | `d_max` | float | no | `20.0` | Advanced native-kernel option.<br>CLI aliases: `--d_max` |
 | `all_bonds` | boolean | no | .true. | Keep directed bonds; default matches compute_J_epr_tensor<br>CLI aliases: `--all_bonds`, `--canonical_bonds` |
@@ -368,7 +397,6 @@ Frontend-fixed values: `kernel='scalar'`. Supplying a conflicting value is an er
 | `nproc` | int | no | `1` | Serial local energy-worker processes; must be 1 per MPI rank<br>CLI aliases: `--nproc` |
 | `collinear_override` | boolean | no | .false. | Override J_zz with (J_xx+J_yy)/2 in collinear calculations<br>CLI aliases: `--collinear_override` |
 | `spin_magnitude` | float | no | `1.0` | Spin magnitude S to scale J by 1/S^2<br>CLI aliases: `--spin_magnitude` |
-| `dynamic_soc` | boolean | no | .false. | Perform dynamic ligand SOC downfolding inside the energy loop<br>CLI aliases: `--dynamic_soc` |
 | `out_dir` | string | no | `J_wannier_tensor` | Advanced native-kernel option.<br>CLI aliases: `--out_dir` |
 | `out_name` | string | no | `J_wannier_tensor.txt` | Advanced native-kernel option.<br>CLI aliases: `--out_name` |
 | `out_h5` | string | no | `J_wannier_tensor.h5` | Advanced native-kernel option.<br>CLI aliases: `--out_h5` |
@@ -377,13 +405,11 @@ Frontend-fixed values: `kernel='scalar'`. Supplying a conflicting value is an er
 
 **Runtime requirements:** Set `input_format='epr'` or `'wannier'`. EPR requires
 `epr_up`, `epr_dn`, `efermi`, `kmesh`, `slices`, and at least two
-`mag_atoms`. Automatic model-SOC groups require `win`; manual `soc_p_groups`
-require nonzero `lambda_te`; `dynamic_soc=.true.` requires `win`,
-`d_subspace`, `soc_active`, and `lambda_soc`. Wannier requires `efermi`,
-`kmesh`, `mag_atoms`, and either `spinor_hr` or the complete `up_hr` + `dn_hr`
-pair. Collinear input requires `slices`; spinor input requires `slices` or
-`win` + `mag_subspace`. A supplied `spinor_hr` takes precedence and cannot be
-combined with model-SOC additions.
+`mag_atoms`. Wannier requires `efermi`, `kmesh`, `mag_atoms`, and either
+`spinor_hr` or the complete `up_hr` + `dn_hr` pair. All inputs require explicit
+`slices`. Raw spinor input additionally requires `groupby='spin'|'orbital'`.
+The optional `SOC (atomic)` card requires `win` and may be combined with either
+collinear or spinor input; it always denotes an additional onsite term.
 
 **Outputs:** `${savedir}/${prefix}.j_tensor.txt` and `.h5` with
 `J_tensor_r`, `J_iso_r`, `J_gamma_r`, `J_dmi_tensor_r`, and `DMI_r`.
@@ -411,14 +437,7 @@ Native engine: `slw.exchange.engine`; numerical kernel:
 | `kernel` | enum {tb2j, direct} | no | `tb2j` | tb2j: TB2J-like Pauli A-tensor mapping. direct: raw D_i^a G D_j^b G trace.<br>CLI aliases: `--kernel` |
 | `axes` | string | no | `xyz` | Tensor axes to compute, subset of xyz<br>CLI aliases: `--axes` |
 | `spin_direction` | float[3] | no | `[0.0, 0.0, 1.0]` | Advanced native-kernel option.<br>CLI aliases: `--spin_direction` |
-| `soc` | string | no | `''` | Generic model SOC specs, e.g. 'Te:p:0.5;Cr:d:0.05'. Groups are inferred from --win.<br>CLI aliases: `--soc` |
-| `win` | string | no | none / runtime | wannier90 .win file used to infer p/d SOC orbital groups<br>CLI aliases: `--win` |
-| `soc_element` | string | no | `''` | Element for compatibility --lambda_te p-SOC mode<br>CLI aliases: `--soc_element` |
-| `lambda_te` | float | no | `0.0` | Compatibility model onsite p-SOC lambda in eV; prefer --soc<br>CLI aliases: `--lambda_te` |
-| `soc_p_groups` | string | no | `''` | Semicolon-separated p orbital groups, e.g. '10,11,12;25,26,27'<br>CLI aliases: `--soc_p_groups` |
-| `soc_groups_base` | enum {0, 1} | no | `0` | Index base for --soc_p_groups<br>CLI aliases: `--soc_groups_base`, `--soc_p_groups_base` |
-| `p_order` | string | no | `pz,px,py` | p orbital order inside each SOC group<br>CLI aliases: `--p_order` |
-| `d_order` | string | no | `dz2,dxz,dyz,dx2-y2,dxy` | d orbital order inside each SOC group<br>CLI aliases: `--d_order` |
+| `win` | string | with SOC card | none | Wannier90 projections used to resolve SOC site/species manifolds. |
 | `n_shells` | int | no | `10` | Advanced native-kernel option.<br>CLI aliases: `--n_shells` |
 | `d_max` | float | no | `20.0` | Advanced native-kernel option.<br>CLI aliases: `--d_max` |
 | `all_bonds` | boolean | no | .true. | Keep directed bonds<br>CLI aliases: `--all_bonds`, `--canonical_bonds` |
@@ -439,10 +458,6 @@ Native engine: `slw.exchange.engine`; numerical kernel:
 | `nproc` | int | no | `1` | Serial local energy-worker processes; must be 1 per MPI rank<br>CLI aliases: `--nproc` |
 | `collinear_override` | boolean | no | .false. | Override J_zz with (J_xx+J_yy)/2 in collinear calculations<br>CLI aliases: `--collinear_override` |
 | `spin_magnitude` | float | no | `1.0` | Spin magnitude S to scale J by 1/S^2<br>CLI aliases: `--spin_magnitude` |
-| `d_subspace` | string | no | `''` | Target low-energy subspace for dynamic SOC downfolding<br>CLI aliases: `--d_subspace` |
-| `soc_active` | string | no | `''` | SOC-active ligand subspace for dynamic SOC downfolding<br>CLI aliases: `--soc_active` |
-| `lambda_soc` | float | no | none / runtime | Atomic SOC lambda in eV for dynamic SOC downfolding<br>CLI aliases: `--lambda_soc` |
-| `dynamic_soc` | boolean | no | .false. | Perform dynamic ligand SOC downfolding inside the energy loop<br>CLI aliases: `--dynamic_soc` |
 | `out_dir` | string | no | `J_epr_tensor` | Advanced native-kernel option.<br>CLI aliases: `--out_dir` |
 | `out_name` | string | no | `J_epr_tensor.txt` | Advanced native-kernel option.<br>CLI aliases: `--out_name` |
 | `out_h5` | string | no | `J_epr_tensor.h5` | Advanced native-kernel option.<br>CLI aliases: `--out_h5` |
@@ -454,10 +469,10 @@ Native engine: `slw.exchange.engine`; numerical kernel:
 
 | Namelist key | Type | Parser required | Parser default | Meaning / CLI aliases |
 |---|---|---:|---|---|
-| `up_hr` | string | no | none / runtime | Spin-up Wannier90 hr.dat; required unless --spinor_hr is used<br>CLI aliases: `--up_hr` |
-| `dn_hr` | string | no | none / runtime | Spin-down Wannier90 hr.dat; required unless --spinor_hr is used<br>CLI aliases: `--dn_hr` |
-| `spinor_hr` | string | no | none / runtime | Full spinor Wannier90 hr.dat from SOC/noncollinear Wannier90<br>CLI aliases: `--spinor_hr` |
-| `spinor_basis_order` | string | no | `wannier_spin` | Spinor ordering in --spinor_hr. wannier_spin = each .win projection group as [group up block, group down block], e.g. Mn1 d up, Mn1 d down, Mn2 d up, ...; wannier_orbital = [orb1 up, orb1 down, orb2 up, orb2 down, ...]. Orbital/projection order always follows the .win projection order.<br>CLI aliases: `--spinor_basis_order` |
+| `up_hr` | string | conditional | — | Spin-up collinear Wannier90 hr.dat; supply together with `dn_hr`, or supply `spinor_hr` instead.<br>CLI aliases: `--up_hr` |
+| `dn_hr` | string | conditional | — | Spin-down collinear Wannier90 hr.dat; supply together with `up_hr`, or supply `spinor_hr` instead.<br>CLI aliases: `--dn_hr` |
+| `spinor_hr` | string | conditional | — | Full spinor Wannier90 hr.dat; mutually exclusive with the collinear pair.<br>CLI aliases: `--spinor_hr` |
+| `groupby` | enum {spin, orbital} | with `spinor_hr` | — | Explicit TB2J spinor layout; normalized internally to spin-major. |
 | `centres` | string | no | none / runtime | Optional Wannier90 centres.xyz for spinor_dim sanity check<br>CLI aliases: `--centres` |
 | `efermi` | float | yes | — | Fermi energy in eV<br>CLI aliases: `--efermi` |
 | `hr_unit` | enum {ev, ry, ha} | no | `ev` | Unit of input hr.dat matrix elements; Wannier90 default is eV<br>CLI aliases: `--hr_unit` |
@@ -469,25 +484,10 @@ Native engine: `slw.exchange.engine`; numerical kernel:
 | `mag_atoms_base` | enum {0, 1} | no | `0` | Advanced native-kernel option.<br>CLI aliases: `--mag_atoms_base` |
 | `slices` | string | no | `''` | Manual local orbital slices, e.g. '0:0:5,1:5:10'<br>CLI aliases: `--slices` |
 | `apply_degeneracy` | boolean | no | .true. | Divide HR blocks by Wannier90 degeneracy before H(k) construction; standard Wannier90 needs this<br>CLI aliases: `--apply_degeneracy`, `--no-apply_degeneracy` |
-| `kernel` | enum {scalar, direct, tb2j} | no | `tb2j` | scalar is the SOC-free collinear LKAG reference; tb2j/direct use spinor tensor kernels<br>CLI aliases: `--kernel` |
+| `tensor_kernel` | enum {direct, tb2j} | no | `tb2j` | Tensor integration/decomposition convention. The compatibility alias `kernel` accepts the same values.<br>CLI aliases: `--kernel` |
 | `axes` | string | no | `xyz` | Tensor axes to compute, subset of xyz<br>CLI aliases: `--axes` |
 | `spin_direction` | float[3] | no | `[0.0, 0.0, 1.0]` | Advanced native-kernel option.<br>CLI aliases: `--spin_direction` |
-| `soc` | string | no | `''` | Model SOC specs inferred from --win, e.g. 'Te:p:0.5;Cr:d:0.05'<br>CLI aliases: `--soc` |
-| `win` | string | no | none / runtime | Wannier90 .win file; inferred only when the working directory contains exactly one candidate<br>CLI aliases: `--win` |
-| `mag_subspace` | string | no | `''` | Infer magnetic local slices from .win projections, e.g. 'Cr:d;Cr:d' or 'Cr:d'<br>CLI aliases: `--mag_subspace` |
-| `soc_element` | string | no | `''` | Element for compatibility --lambda_te p-SOC mode<br>CLI aliases: `--soc_element` |
-| `lambda_te` | float | no | `0.0` | Advanced native-kernel option.<br>CLI aliases: `--lambda_te` |
-| `soc_p_groups` | string | no | `''` | Advanced native-kernel option.<br>CLI aliases: `--soc_p_groups` |
-| `soc_groups_base` | enum {0, 1} | no | `0` | Advanced native-kernel option.<br>CLI aliases: `--soc_groups_base`, `--soc_p_groups_base` |
-| `p_order` | string | no | `pz,px,py` | Advanced native-kernel option.<br>CLI aliases: `--p_order` |
-| `d_order` | string | no | `dz2,dxz,dyz,dx2-y2,dxy` | Advanced native-kernel option.<br>CLI aliases: `--d_order` |
-| `intersite_soc` | boolean | no | .false. | Add downfolded intersite SOC correction to the selected d subspace<br>CLI aliases: `--intersite_soc` |
-| `d_subspace` | string | no | `''` | Target low-energy subspace for --intersite_soc<br>CLI aliases: `--d_subspace` |
-| `soc_active` | string | no | `''` | SOC-active ligand subspace for --intersite_soc<br>CLI aliases: `--soc_active` |
-| `lambda_soc` | float | no | none / runtime | Atomic SOC lambda in eV for --intersite_soc<br>CLI aliases: `--lambda_soc` |
-| `e0` | float | no | `0.0` | Downfolding energy E0 in eV for --intersite_soc<br>CLI aliases: `--e0` |
-| `eta` | float | no | `0.0` | Downfolding broadening in eV for --intersite_soc<br>CLI aliases: `--eta` |
-| `hermitianize_soc` | boolean | no | .true. | Advanced native-kernel option.<br>CLI aliases: `--hermitianize_soc`, `--no-hermitianize_soc` |
+| `win` | string | with SOC card | none | Wannier90 projections used to resolve SOC site/species manifolds. |
 | `n_shells` | int | no | `10` | Advanced native-kernel option.<br>CLI aliases: `--n_shells` |
 | `d_max` | float | no | `20.0` | Advanced native-kernel option.<br>CLI aliases: `--d_max` |
 | `all_bonds` | boolean | no | .true. | Keep directed bonds; default matches compute_J_epr_tensor<br>CLI aliases: `--all_bonds`, `--canonical_bonds` |
@@ -500,7 +500,6 @@ Native engine: `slw.exchange.engine`; numerical kernel:
 | `nproc` | int | no | `1` | Serial local energy-worker processes; must be 1 per MPI rank<br>CLI aliases: `--nproc` |
 | `collinear_override` | boolean | no | .false. | Override J_zz with (J_xx+J_yy)/2 in collinear calculations<br>CLI aliases: `--collinear_override` |
 | `spin_magnitude` | float | no | `1.0` | Spin magnitude S to scale J by 1/S^2<br>CLI aliases: `--spin_magnitude` |
-| `dynamic_soc` | boolean | no | .false. | Perform dynamic ligand SOC downfolding inside the energy loop<br>CLI aliases: `--dynamic_soc` |
 | `out_dir` | string | no | `J_wannier_tensor` | Advanced native-kernel option.<br>CLI aliases: `--out_dir` |
 | `out_name` | string | no | `J_wannier_tensor.txt` | Advanced native-kernel option.<br>CLI aliases: `--out_name` |
 | `out_h5` | string | no | `J_wannier_tensor.h5` | Advanced native-kernel option.<br>CLI aliases: `--out_h5` |
@@ -568,9 +567,9 @@ Native engine: `slw.exchange.engine`; numerical kernel:
 structure even when `spinor_hr` supplies the electronic Hamiltonian.
 `efermi`, `kmesh`, `mag_atoms`, and parser-required `slices` are mandatory.
 `qmesh` defaults to EPR `qc_dim` and must divide `kmesh`; `targets` currently
-defaults to the first magnetic atom only. A supplied `spinor_hr` cannot be
-combined with model-SOC options. Set `targets`, `disp_axes`, and `qmesh`
-explicitly for production work. Under a multi-rank launch,
+defaults to the first magnetic atom only. A supplied `spinor_hr` requires
+explicit `groupby` and may be combined with an additional `SOC (atomic)` card.
+Set `targets`, `disp_axes`, and `qmesh` explicitly for production work. Under a multi-rank launch,
 `execution='auto'` selects the MPI backend; otherwise the serial backend is
 used.
 
@@ -589,11 +588,10 @@ use `numba_threads` and `blas_threads` for rank-local work.
 | `epr_up` | string | yes | — | EPR up HDF5; still required for g(k+q,k) and structure metadata<br>CLI aliases: `--epr_up` |
 | `epr_dn` | string | yes | — | EPR down HDF5; still required for g(k+q,k)<br>CLI aliases: `--epr_dn` |
 | `spinor_hr` | string | no | none / runtime | Optional full SOC/noncollinear Wannier90 spinor hr.dat used as base Hamiltonian<br>CLI aliases: `--spinor_hr` |
-| `spinor_basis_order` | enum {wannier_spin, wannier_orbital} | no | `wannier_spin` | Ordering in --spinor_hr. wannier_spin = each .win projection group as [group up block, group down block]; wannier_orbital = [orb1 up, orb1 down, orb2 up, orb2 down, ...].<br>CLI aliases: `--spinor_basis_order` |
+| `groupby` | enum {spin, orbital} | with `spinor_hr` | — | Explicit TB2J spinor layout; normalized internally to spin-major. |
 | `spinor_hr_unit` | enum {ev, ry, ha} | no | `ev` | Unit of --spinor_hr matrix elements<br>CLI aliases: `--spinor_hr_unit` |
-| `win` | string | no | none / runtime | Wannier90 .win used to infer spinor projection order and magnetic slices<br>CLI aliases: `--win` |
-| `centres` | string | no | none / runtime | Optional Wannier90 centres.xyz for spinor ordering diagnostics<br>CLI aliases: `--centres` |
-| `mag_subspace` | string | no | `''` | Infer magnetic local slices from .win projections, e.g. 'Mn:d'<br>CLI aliases: `--mag_subspace` |
+| `win` | string | with SOC card | none | Wannier90 projections used to resolve SOC site/species manifolds. |
+| `centres` | string | no | none | Optional spinor centres count validation; never used to infer `groupby`. |
 | `apply_degeneracy` | boolean | no | .true. | Divide spinor_hr blocks by Wannier90 degeneracy before H(k)<br>CLI aliases: `--apply_degeneracy`, `--no-apply_degeneracy` |
 | `hr_unit` | string | no | `ry` | Advanced native-kernel option.<br>CLI aliases: `--hr_unit` |
 | `eph_unit` | string | no | `ry` | Advanced native-kernel option.<br>CLI aliases: `--eph_unit` |
@@ -608,13 +606,6 @@ use `numba_threads` and `blas_threads` for rank-local work.
 | `disp_axes` | string | no | `xyz` | Advanced native-kernel option.<br>CLI aliases: `--disp_axes` |
 | `tensor_axes` | string | no | `xyz` | Advanced native-kernel option.<br>CLI aliases: `--tensor_axes` |
 | `spin_direction` | float[3] | no | `[0.0, 0.0, 1.0]` | Advanced native-kernel option.<br>CLI aliases: `--spin_direction` |
-| `soc` | string | no | `''` | Generic model SOC specs inferred from --win, e.g. 'Te:p:0.5;Mn:d:0.05'<br>CLI aliases: `--soc` |
-| `soc_element` | string | no | `''` | Element for compatibility --lambda_te p-SOC mode<br>CLI aliases: `--soc_element` |
-| `lambda_te` | float | no | `0.0` | Compatibility model onsite p-SOC lambda in eV; prefer --soc<br>CLI aliases: `--lambda_te` |
-| `soc_p_groups` | string | no | `''` | Semicolon-separated p orbital groups, e.g. '10,11,12;25,26,27'<br>CLI aliases: `--soc_p_groups` |
-| `soc_groups_base` | enum {0, 1} | no | `0` | Index base for --soc_p_groups<br>CLI aliases: `--soc_groups_base`, `--soc_p_groups_base` |
-| `p_order` | string | no | `pz,px,py` | Advanced native-kernel option.<br>CLI aliases: `--p_order` |
-| `d_order` | string | no | `dz2,dxz,dyz,dx2-y2,dxy` | Advanced native-kernel option.<br>CLI aliases: `--d_order` |
 | `slices` | string | yes | — | Local orbital slices, e.g. '0:0:5,1:5:10'<br>CLI aliases: `--slices` |
 | `emin` | float | no | `-25.0` | Advanced native-kernel option.<br>CLI aliases: `--emin` |
 | `empoints` | int | no | `300` | Advanced native-kernel option.<br>CLI aliases: `--empoints` |
