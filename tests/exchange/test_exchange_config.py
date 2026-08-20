@@ -265,7 +265,7 @@ class ExchangeConfigTests(unittest.TestCase):
         )
         self.assertEqual(request.mag_atoms, (0, 2))
         self.assertEqual(request.atom_index_base, 1)
-        self.assertNotIn("mag_atoms_base", request.legacy_options)
+        self.assertNotIn("mag_atoms_base", request.options)
 
     def test_advanced_options_are_allowlisted_immutable_and_pickleable(self):
         request = build_exchange_request(
@@ -279,8 +279,8 @@ class ExchangeConfigTests(unittest.TestCase):
             prefix="d",
             savedir="save",
         )
-        self.assertEqual(request.legacy_options["qmesh"], (2, 1, 1))
-        self.assertEqual(request.legacy_options["nproc"], 4)
+        self.assertEqual(request.options["qmesh"], (2, 1, 1))
+        self.assertEqual(request.options["nproc"], 4)
         self.assertEqual(pickle.loads(pickle.dumps(request)), request)
 
         with self.assertRaisesRegex(ExchangeInputError, "unknown or unsupported"):
@@ -300,8 +300,8 @@ class ExchangeConfigTests(unittest.TestCase):
             prefix="d",
             savedir="save",
         )
-        self.assertFalse(tensor.legacy_options["onsite_deriv_projector"])
-        self.assertNotIn("onsite_deriv_exchange_field", tensor.legacy_options)
+        self.assertFalse(tensor.options["onsite_deriv_projector"])
+        self.assertNotIn("onsite_deriv_exchange_field", tensor.options)
 
         with self.assertRaisesRegex(ExchangeInputError, "different boolean values"):
             build_exchange_request(
@@ -358,7 +358,7 @@ class ExchangeConfigTests(unittest.TestCase):
             prefix="d",
             savedir="save",
         )
-        self.assertEqual(target_request.legacy_options["targets"], (0, 2))
+        self.assertEqual(target_request.options["targets"], (0, 2))
 
     def test_declarative_advanced_schema_rejects_invalid_values(self):
         cases = (
@@ -394,8 +394,8 @@ class ExchangeConfigTests(unittest.TestCase):
             prefix="x",
             savedir="save",
         )
-        self.assertFalse(normalized.legacy_options["no_h5"])
-        self.assertEqual(normalized.legacy_options["cfr_beta"], 400.0)
+        self.assertFalse(normalized.options["no_h5"])
+        self.assertEqual(normalized.options["cfr_beta"], 400.0)
 
     def test_soc_feature_dependencies_are_explicit(self):
         base = {

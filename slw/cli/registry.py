@@ -173,10 +173,10 @@ _REGISTRY: dict[str, tuple[Action, ...]] = {
         ),
         _action(
             "lifetime",
-            "Compute MPI-distributed magnon lifetimes",
-            "slw.magph.legacy.reference.lifetime_mpi_dynamic",
-            mpi="slw.magph.legacy.reference.lifetime_mpi_dynamic",
-            required_any=(("input_file",),),
+            "Compute native MPI-distributed magnon lifetimes",
+            backends={
+                "default": _backend(handler="slw.magph.engine:prepare_run"),
+            },
         ),
         _action(
             "scattering_kbz",

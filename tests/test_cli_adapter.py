@@ -29,7 +29,7 @@ class ArgumentAdapterTests(unittest.TestCase):
 
     def test_store_false_destination_is_selected(self):
         parser = parser_for(
-            "slw.exchange.legacy.reference.compute_J_epr_tensor"
+            "slw.exchange.kernels.j_tensor_epr"
         )
         parameters = {
             "epr_up": "up.h5",

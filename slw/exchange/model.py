@@ -69,7 +69,7 @@ class ExchangeOutput:
 
 
 def _freeze_option_value(value: Any) -> Any:
-    """Recursively remove mutable containers from retained legacy values."""
+    """Recursively remove mutable containers from numerical option values."""
 
     if isinstance(value, Mapping):
         return tuple(
@@ -84,13 +84,13 @@ def _freeze_option_value(value: Any) -> Any:
 
 
 @dataclass(frozen=True)
-class LegacyOptions(Mapping[str, Any]):
-    """Immutable, pickle-friendly mapping of validated compatibility options."""
+class ExchangeOptions(Mapping[str, Any]):
+    """Immutable, pickle-friendly mapping of validated numerical options."""
 
     entries: tuple[tuple[str, Any], ...] = ()
 
     @classmethod
-    def from_mapping(cls, values: Mapping[str, Any]) -> LegacyOptions:
+    def from_mapping(cls, values: Mapping[str, Any]) -> ExchangeOptions:
         entries = tuple(
             (str(key), _freeze_option_value(value))
             for key, value in sorted(values.items())
@@ -110,7 +110,7 @@ class LegacyOptions(Mapping[str, Any]):
         return len(self.entries)
 
     def as_dict(self) -> dict[str, Any]:
-        """Return a shallow mutable copy suitable for a legacy adapter."""
+        """Return a shallow mutable copy for private kernel dispatch."""
 
         return dict(self.entries)
 
@@ -136,7 +136,7 @@ class ExchangeRequest:
     slices: tuple[OrbitalSlice, ...]
     files: ExchangeFiles
     output: ExchangeOutput
-    legacy_options: LegacyOptions = LegacyOptions()
+    options: ExchangeOptions = ExchangeOptions()
 
     @property
     def mode_name(self) -> str:

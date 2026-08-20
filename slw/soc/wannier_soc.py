@@ -14,12 +14,15 @@ import numpy as np
 
 from slw.core.cli_paths import resolve_out_path, resolve_path, resolve_workdir
 from slw.core.wannier_io import read_wannier_hr, write_wannier_hr
-from slw.exchange.legacy.build_spinor_soc_hr import _apply_soc_to_onsite, _basis_permutation_from_win
-from slw.exchange.legacy.spinor_model import (
+from slw.exchange.kernels.spinor import (
     WANNIER90_D_ORDER,
     WANNIER90_P_ORDER,
     normalize_spin_direction,
     spinor_from_collinear,
+)
+from slw.exchange.kernels.spinor_hr import (
+    _apply_soc_to_onsite,
+    _basis_permutation_from_win,
 )
 
 
@@ -77,10 +80,8 @@ def _write_spinor_centres(out_path, centres_up, centres_down, nwan, perm, basis_
     with open(out_path, "w", encoding="utf-8") as f:
         f.write(f"    {len(ordered_wann) + len(up_atoms)}\n")
         f.write(f" SLW spinor Wannier centres basis_order={basis_order}\n")
-        for line in ordered_wann:
-            f.write(line if line.endswith("\n") else line + "\n")
-        for line in up_atoms:
-            f.write(line if line.endswith("\n") else line + "\n")
+        f.writelines(line if line.endswith("\n") else line + "\n" for line in ordered_wann)
+        f.writelines(line if line.endswith("\n") else line + "\n" for line in up_atoms)
 
 
 def _separated_to_wannier_orbital_permutation(nwan):

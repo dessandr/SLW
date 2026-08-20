@@ -19,7 +19,8 @@
   kmesh = 4, 4, 4,
   mag_atoms = 0, 1,
   slices = '0:0:5,1:5:10',
-  nproc = 8,
+  ! MPI uses one local process per rank. Serial runs may raise this value.
+  nproc = 1,
   out_name = '${savedir}/sample.j_tensor.txt',
   out_h5 = '${savedir}/sample.j_tensor.h5'
 /

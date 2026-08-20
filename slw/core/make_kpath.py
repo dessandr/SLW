@@ -14,7 +14,7 @@ import re
 import numpy as np
 
 from slw.core.cli_paths import resolve_path, resolve_workdir
-from slw.magph.legacy.utils import parsing_POSCAR
+from slw.core.structure_io import read_structure
 
 
 GAMMA_LABELS = {"G", "Gamma", "GAMMA", "\\Gamma", "Γ"}
@@ -202,7 +202,7 @@ def main(argv=None):
     args = build_argparser().parse_args(argv)
     workdir = resolve_workdir(args.workdir)
     input_path = resolve_path(workdir, args.input)
-    lattice, labels, cart_pos = parsing_POSCAR(input_path)
+    lattice, labels, cart_pos = read_structure(input_path)
     kind, points, path = get_points_path(
         lattice,
         labels,

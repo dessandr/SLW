@@ -1,27 +1,13 @@
-"""Legacy Green-function kernels shared by Wannier and EPR workflows."""
+"""Archived import path for :mod:`slw.exchange.kernels.green`."""
 
-from __future__ import annotations
+from importlib import import_module as _import_module
 
-import numpy as np
+_impl = _import_module("slw.exchange.kernels.green")
 
 
-def green_subblock_from_coefficients(
-    coefficients_i: np.ndarray,
-    coefficients_j: np.ndarray,
-    inverse_denominator: np.ndarray,
-) -> np.ndarray:
-    """Construct ``G_ij = C_i diag(d) C_j^H`` without a dense diagonal matrix."""
-    coefficients_i = np.asarray(coefficients_i, dtype=np.complex128)
-    coefficients_j = np.asarray(coefficients_j, dtype=np.complex128)
-    inverse_denominator = np.asarray(inverse_denominator, dtype=np.complex128)
-    if coefficients_i.shape[-1] != inverse_denominator.shape[0]:
-        raise ValueError(
-            "Coefficient/eigenvalue mismatch: "
-            f"{coefficients_i.shape[-1]} != {inverse_denominator.shape[0]}"
-        )
-    if coefficients_j.shape[-1] != inverse_denominator.shape[0]:
-        raise ValueError(
-            "Coefficient/eigenvalue mismatch: "
-            f"{coefficients_j.shape[-1]} != {inverse_denominator.shape[0]}"
-        )
-    return (coefficients_i * inverse_denominator[None, :]) @ coefficients_j.conj().T
+def __getattr__(name):
+    return getattr(_impl, name)
+
+
+def __dir__():
+    return sorted(set(globals()) | set(dir(_impl)))

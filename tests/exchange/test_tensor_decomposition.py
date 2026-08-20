@@ -2,8 +2,8 @@ import unittest
 
 import numpy as np
 
-from slw.exchange.legacy.reference.compute_dJ_epr_tensor import _decompose_tb2j_dA
-from slw.exchange.legacy.reference.compute_J_epr_tensor import _decompose_tb2j_pair
+from slw.exchange.kernels.dj_tensor_epr import _decompose_tb2j_dA
+from slw.exchange.kernels.j_tensor_epr import _decompose_tb2j_pair
 
 
 def _dmi_matrix(vector):

@@ -2,7 +2,7 @@ import unittest
 
 import numpy as np
 
-from slw.exchange.legacy.reference.compute_J_epr_kspace import _compute_j_direct
+from slw.exchange.kernels.j_epr import _compute_j_direct
 
 
 def _toy_exchange_problem():

@@ -5,8 +5,8 @@ from unittest import mock
 import numpy as np
 
 from slw.exchange.config import build_exchange_request
-from slw.exchange.legacy.reference import adapter
-from slw.exchange.legacy.reference import compute_dJ_epr_tensor_mpi as mpi_driver
+from slw.exchange.kernels import dispatch as adapter
+from slw.exchange.kernels import dj_tensor_mpi as mpi_driver
 
 
 class _SingleRankComm:
@@ -56,8 +56,8 @@ def _setup(*, tasks=()):
     }
 
 
-class ExchangeReferenceMPITests(unittest.TestCase):
-    def test_explicit_communicator_reaches_reference_adapter_unchanged(self):
+class ExchangeNativeMPITests(unittest.TestCase):
+    def test_explicit_communicator_reaches_native_dispatch_unchanged(self):
         request = build_exchange_request(
             "dj",
             {

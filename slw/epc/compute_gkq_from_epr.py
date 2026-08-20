@@ -5,9 +5,9 @@ import os
 import h5py
 import numpy as np
 
-from slw.exchange.legacy.eph_epr_wrapper import _read_meta
 from slw.core.set_ws_cell import init_rvec_images, set_wigner_seitz_cell
 from slw.core.wannier_io import read_wannier_u_matrix
+from slw.epc.epr_io import read_epr_metadata
 
 
 def _phase_plus(fracs, rvecs):
@@ -134,7 +134,7 @@ def build_gkq_wannier_from_epr(epr_path):
       meta: dict
     """
     with h5py.File(epr_path, "r") as h5:
-        meta = _read_meta(h5)
+        meta = read_epr_metadata(h5)
         grp = h5["eph_matrix_wannier"]
         nk = tuple(int(x) for x in meta.nk_grid)
         nq = tuple(int(x) for x in meta.nq_grid)

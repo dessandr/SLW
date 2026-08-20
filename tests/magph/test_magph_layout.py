@@ -17,7 +17,6 @@ HISTORICAL_MODULES = (
     "input_parser",
     "kernels",
     "lifetime_mpi_dynamic",
-    "lswt",
     "numerics",
     "plot",
     "plot_coupling_bz",
@@ -35,7 +34,6 @@ HISTORICAL_MODULES = (
     "solver_mpi",
     "tensor_adapter",
     "utils",
-    "vertex",
 )
 
 REFERENCE_DRIVERS = (
@@ -51,12 +49,36 @@ REFERENCE_DRIVERS = (
     "prepare_lifetime",
 )
 
+NATIVE_MODULES = {
+    "__init__.py",
+    "config.py",
+    "coupling.py",
+    "derivative.py",
+    "engine.py",
+    "lifetime.py",
+    "lswt.py",
+    "model.py",
+    "output.py",
+    "parallel.py",
+    "phonon.py",
+    "pipeline.py",
+    "screening.py",
+    "self_energy.py",
+    "vertex.py",
+}
+
 
 class MagphLayoutTests(unittest.TestCase):
     def test_package_root_contains_no_historical_modules(self):
         root = Path(slw.magph.__file__).resolve().parent
         modules = {path.name for path in root.glob("*.py")}
-        self.assertEqual(modules, {"__init__.py"})
+        self.assertEqual(modules, NATIVE_MODULES)
+
+    def test_public_namespace_exports_only_native_modules(self):
+        for name in slw.magph.__all__:
+            with self.subTest(name=name):
+                value = getattr(slw.magph, name)
+                self.assertNotIn(".legacy", getattr(value, "__module__", ""))
 
     def test_historical_module_paths_are_not_preserved(self):
         for name in HISTORICAL_MODULES:
@@ -67,9 +89,7 @@ class MagphLayoutTests(unittest.TestCase):
         for name in REFERENCE_DRIVERS:
             with self.subTest(name=name):
                 self.assertIsNotNone(
-                    importlib.util.find_spec(
-                        f"slw.magph.legacy.reference.{name}"
-                    )
+                    importlib.util.find_spec(f"slw.magph.legacy.reference.{name}")
                 )
 
 

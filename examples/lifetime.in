@@ -1,0 +1,29 @@
+&control
+  calculation = 'lifetime',
+  prefix = 'sample',
+  outdir = './slw-tmp',
+  verbosity = 'normal'
+/
+
+&parallel
+  execution = 'auto'
+/
+
+&magph
+  exchange_h5 = '${savedir}/sample.j.h5',
+  derivative_h5 = '${savedir}/sample.dj.h5',
+  phonon_cache = '${savedir}/phonon_cache.npz',
+  magnetic_order = 'fm',
+  spin_magnitudes = 1.0,
+  quantization_axis = 0.0, 0.0, 1.0,
+  kmesh = 4, 4, 4,
+  kshift = 0.5, 0.5, 0.5,
+  temperature_k = 300.0,
+  broadening_mev = 0.2,
+  asr_policy = 'fail',
+  q_chunk_size = 64,
+  bond_chunk_size = 64,
+  vertex_q_chunk_size = 64,
+  self_energy_q_chunk_size = 64,
+  output = '${savedir}/sample.lifetime.npz'
+/

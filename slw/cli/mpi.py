@@ -96,3 +96,11 @@ class MPIContext:
         if self.comm is None:
             return [value]
         return list(self.comm.allgather(value))
+
+    def gather(self, value: Any, root: int = 0) -> list[Any] | None:
+        """Gather Python payloads while preserving the size-one API."""
+
+        if self.comm is None:
+            return [value] if self.rank == root else None
+        gathered = self.comm.gather(value, root=root)
+        return None if gathered is None else list(gathered)

@@ -31,6 +31,11 @@ class RegistryTests(unittest.TestCase):
         self.assertEqual(resolved.action.name, "dj")
         self.assertTrue(resolved.backend.is_native)
 
+    def test_lifetime_uses_native_magph_handler(self):
+        resolved = resolve_action("magph", "lifetime", {})
+        self.assertEqual(resolved.backend.handler, "slw.magph.engine:prepare_run")
+        self.assertTrue(resolved.backend.is_native)
+
     def test_dispersion_rejects_implicit_material_path(self):
         with self.assertRaisesRegex(RegistryError, "explicit win or kpath"):
             resolve_action("epr", "dispersion", {"epr": "input.h5"})

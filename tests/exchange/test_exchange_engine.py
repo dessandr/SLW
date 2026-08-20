@@ -10,9 +10,9 @@ from unittest import mock
 from slw.cli.mpi import MPIContext
 from slw.cli.runner import run_stage
 from slw.cli.schema import parse_run_config
-from slw.exchange.config import ExchangeInputError, build_exchange_request
+from slw.exchange.config import build_exchange_request
 from slw.exchange.engine import ExchangeRunResult, _execute, prepare_run, run_exchange
-from slw.exchange.legacy.reference.adapter import ReferenceArtifacts, build_namespace
+from slw.exchange.kernels.dispatch import KernelArtifacts, build_namespace
 
 
 def _parameters(*, ltensor=False, source="epr"):
@@ -57,7 +57,7 @@ class ExchangeEngineTests(unittest.TestCase):
         self.assertIn("tensor J", plan.backend_label)
         self.assertIn(("form", "tensor"), plan.summary)
 
-    def test_only_tensor_dj_selects_mpi_in_auto_mode(self):
+    def test_all_exchange_modes_select_mpi_in_auto_mode(self):
         parameters = _parameters(ltensor=True)
         config = _run_config("dj", parameters)
         plan = prepare_run(
@@ -80,21 +80,21 @@ class ExchangeEngineTests(unittest.TestCase):
             context=MPIContext(comm=object(), rank=0, size=4),
             program="slw_exchange.x",
         )
-        self.assertFalse(scalar.all_ranks)
-        self.assertIn("rank 0", scalar.warning)
+        self.assertTrue(scalar.all_ranks)
+        self.assertIsNone(scalar.warning)
 
-    def test_explicit_mpi_rejects_static_exchange(self):
+    def test_explicit_mpi_accepts_static_exchange(self):
         parameters = _parameters(ltensor=True)
         config = _run_config("j", parameters, execution="mpi")
-        with self.assertRaisesRegex(ExchangeInputError, "only for"):
-            prepare_run(
-                calculation="j",
-                requested_name="j",
-                parameters=parameters,
-                config=config,
-                context=MPIContext(comm=object(), rank=0, size=2),
-                program="slw_exchange.x",
-            )
+        plan = prepare_run(
+            calculation="j",
+            requested_name="j",
+            parameters=parameters,
+            config=config,
+            context=MPIContext(comm=object(), rank=0, size=2),
+            program="slw_exchange.x",
+        )
+        self.assertTrue(plan.all_ranks)
 
     def test_reference_namespace_is_built_without_argv_translation(self):
         request = build_exchange_request(
@@ -105,7 +105,7 @@ class ExchangeEngineTests(unittest.TestCase):
         )
         module, function, namespace = build_namespace(request)
 
-        self.assertEqual(module, "slw.exchange.legacy.reference.compute_J_wannier_tensor")
+        self.assertEqual(module, "slw.exchange.kernels.j_wannier")
         self.assertEqual(function, "run")
         self.assertEqual(namespace.kernel, "scalar")
         self.assertEqual(namespace.mag_atoms_base, 0)
@@ -189,11 +189,11 @@ class ExchangeEngineTests(unittest.TestCase):
                 paths = (received.output.h5_path, received.output.text_path)
                 for path in paths:
                     Path(path).touch()
-                return ReferenceArtifacts(paths=paths)
+                return KernelArtifacts(paths=paths)
 
             stdout = io.StringIO()
             with (
-                mock.patch("slw.exchange.engine.execute_reference", side_effect=fake_kernel),
+                mock.patch("slw.exchange.engine.execute_kernel", side_effect=fake_kernel),
                 contextlib.redirect_stdout(stdout),
             ):
                 result = _execute(
@@ -234,7 +234,7 @@ class ExchangeEngineTests(unittest.TestCase):
             mock.patch.object(MPIContext, "discover", return_value=context) as discover,
             mock.patch("slw.exchange.engine._execute", return_value=expected) as execute,
         ):
-            result = run_exchange(request)
+            result = run_exchange(request, execution="serial")
 
         discover.assert_called_once_with()
         execute.assert_called_once()
@@ -258,14 +258,14 @@ class ExchangeEngineTests(unittest.TestCase):
             def bcast(self, value, root=0):
                 self.calls += 1
                 if self.calls == 1:
-                    return request, "auto", "slw_exchange.x", "normal"
+                    return request, "serial", "slw_exchange.x", "normal"
                 self.received = value
                 return expected, None
 
         comm = NonRootComm()
         context = MPIContext(comm=comm, rank=2, size=4)
         with mock.patch("slw.exchange.engine._execute") as execute:
-            result = run_exchange(request, context=context)
+            result = run_exchange(request, context=context, execution="serial")
 
         execute.assert_not_called()
         self.assertIs(result, expected)
@@ -294,7 +294,7 @@ class ExchangeEngineTests(unittest.TestCase):
                 "exchange calculation failed on rank 0: OSError: write failed",
             ),
         ):
-            run_exchange(request, context=context)
+            run_exchange(request, context=context, execution="serial")
 
 
 if __name__ == "__main__":

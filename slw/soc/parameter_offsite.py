@@ -16,37 +16,35 @@ where ``P_ab`` masks orbital rows on site type ``a`` and columns on site type
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass
 import os
 import time
-from typing import Sequence
+from collections.abc import Sequence
+from dataclasses import dataclass
 
 import numpy as np
 
-from slw.core.wannier_io import read_wannier_hr, write_wannier_hr
-from slw.exchange.legacy.build_downfolded_static_soc import (
-    _normalize_projection_groups_for_hamiltonian,
-)
-from slw.exchange.legacy.reference.compute_J_epr_tensor import (
+from slw.core.wannier_io import write_wannier_hr
+from slw.exchange.kernels.epr import _full_k_mesh
+from slw.exchange.kernels.j_tensor_epr import (
     _win_projection_groups,
 )
-from slw.exchange.legacy.diagnose_J_epr_kspace import _full_k_mesh
-from slw.exchange.legacy.plot_epr_soc_bands import _clean_species
-from slw.exchange.legacy.spinor_model import (
+from slw.exchange.kernels.soc_downfold import (
+    _normalize_projection_groups_for_hamiltonian,
+)
+from slw.exchange.kernels.spinor import (
     WANNIER90_D_ORDER,
     WANNIER90_P_ORDER,
     d_orbital_l_matrices,
     p_orbital_l_matrices,
     spinor_from_collinear,
 )
+from slw.exchange.kernels.win_soc import _clean_species
 from slw.soc.parameter import (
     _cfg_value,
     _cfg_vec,
     _hmap_to_hk,
-    _read_soc_parameter_input,
     _read_wannier_hr_compat,
     band_weights,
-    fit_soc_parameters,
     relative_energies,
 )
 
@@ -401,7 +399,7 @@ def build_pair_soc_templates_onsite_l(
         p_order=p_order,
         d_order=d_order,
     )
-    nk = int(len(kpts))
+    nk = len(kpts)
     templates = []
     summaries = []
     for spec in specs:
@@ -841,8 +839,7 @@ def run(args):
             f.write(f"template_mode = {args.template_mode}\n")
             f.write(f"r_source = {r_source}\n")
             if orbital_group_specs:
-                for group in orbital_group_specs:
-                    f.write(f"orbital_group_{group['name']} = {group['element']} {' '.join(group['orbital_names'])}\n")
+                f.writelines(f"orbital_group_{group['name']} = {group['element']} {' '.join(group['orbital_names'])}\n" for group in orbital_group_specs)
             f.write(f"initial_loss = {fitter.loss(x0):.12e}\n")
             f.write(f"final_loss = {float(result.fun):.12e}\n")
             f.write(f"final_rms = {fitter.rms(result.x):.12e}\n")

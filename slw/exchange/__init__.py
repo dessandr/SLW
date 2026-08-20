@@ -1,5 +1,4 @@
-"""Exchange coupling module (J-mapping, LKAG)."""
-"""Integrated exchange API."""
+"""Integrated static and displacement-derivative exchange API."""
 
 from .config import ExchangeInputError, build_exchange_request
 from .engine import ExchangeRunResult, run_exchange

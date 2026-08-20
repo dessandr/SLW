@@ -30,7 +30,8 @@ python -m pip install -e '.[mpi,phonon,kpath]'
   `dJ/du`, symmetry/ASR checks, SOC/spin-flip construction, and diagnostics.
 - `slw.soc`: pure Wannier spinor/SOC construction, fitting, band/DOS and
   real-space inspection.
-- `slw.magph`: public namespace for the integrated magnon–phonon stage.
+- `slw.magph`: native exchange/phonon screening and dimension-generic
+  self-energy, scattering-rate, and lifetime numerical APIs.
 - `slw.magph.legacy`: quarantined EPR adapters, numerical kernels, MPI
   runners, analysis tools, and plotting code retained behind that stage.
 - `slw.interactions`: Wannier-gauge reference density and intersite-V tools.
@@ -59,6 +60,10 @@ See [docs/CLI.md](docs/CLI.md) for the namelist schema, calculation registry,
 MPI behavior, dry-run validation, and input templates. The exhaustive
 calculation-by-calculation option reference is in
 [docs/INPUT_REFERENCE.md](docs/INPUT_REFERENCE.md).
+The native magnon–phonon redesign boundary and FM/AFM admission policy are in
+[docs/MAGPH_DESIGN.md](docs/MAGPH_DESIGN.md). Native
+`calculation='lifetime'` is registered; hybrid, Berry, spectral, and plotting
+routes remain behind the compatibility boundary.
 
 Every material-dependent choice is explicit. In particular, exchange commands
 require the magnetic atom indices, local orbital slices, and k mesh instead of
@@ -80,16 +85,23 @@ python -m slw.soc.wannier_soc --help
 ```
 
 Historical exchange modules are quarantined under `slw.exchange.legacy` and
-are not re-exported from the public namespace. The temporary numerical-parity
-drivers used by the native engine live under `slw.exchange.legacy.reference`.
-New workflows should use `calculation='j'|'dj'` with
-`ltensor=.true.|.false.` through `slw_exchange.x`.
+are not re-exported from the public namespace. The public engine dispatches
+only to `slw.exchange.kernels`; archived wrappers are not entered by
+`slw_exchange.x`. New workflows should use `calculation='j'|'dj'` with
+`ltensor=.true.|.false.` through the stage executable.
+
+All four exchange modes participate in MPI when `execution='auto'` discovers
+more than one rank. Scalar/tensor J and scalar dJ split the energy integration;
+tensor dJ splits target/displacement-axis tasks. Rank 0 alone writes the final
+products. Use `nproc=1` per MPI rank; serial runs may raise `nproc` for local
+multiprocessing.
 
 Historical magph modules are likewise quarantined under `slw.magph.legacy`.
-The ten compatibility drivers used by `slw_epr.x` and `slw_magph.x` live in
-`slw.magph.legacy.reference`; helper and post-processing modules remain one
-level above them. Old `slw.magph.<module>` paths have no compatibility shims
-and are not public interfaces. Use `slw_magph.x` or `slw_post.x` instead.
+The retained compatibility drivers live in `slw.magph.legacy.reference`;
+helper and post-processing modules remain one level above them. Old
+`slw.magph.<module>` paths have no compatibility shims and are not public
+interfaces. `slw_magph.x` lifetime now uses only native typed modules; the
+remaining registered magph calculations still use the compatibility boundary.
 
 See [docs/SCOPE.md](docs/SCOPE.md) for the extraction boundary and retained
 module inventory.

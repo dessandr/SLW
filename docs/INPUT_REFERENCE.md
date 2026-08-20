@@ -221,9 +221,9 @@ aliases that inject `ltensor=.true.`.
 
 | `calculation` | `ltensor` | Input source | MPI | Purpose |
 |---|---:|---|---:|---|
-| `j` | `.false.` | epr, wannier | no | Scalar collinear LKAG exchange |
-| `j` | `.true.` | epr, wannier | no | Full exchange tensor |
-| `dj` | `.false.` | epr | no | Scalar analytic dJ/du |
+| `j` | `.false.` | epr, wannier | yes | Scalar collinear LKAG exchange |
+| `j` | `.true.` | epr, wannier | yes | Full exchange tensor |
+| `dj` | `.false.` | epr | yes | Scalar analytic dJ/du |
 | `dj` | `.true.` | epr | yes | Tensor analytic dJ/du |
 
 All four modes require `input_format`, `efermi`, a positive three-component
@@ -233,6 +233,13 @@ Wannier J accepts that pair or one `spinor_hr`. Native filename stems are
 `${prefix}.j`, `${prefix}.j_tensor`, `${prefix}.dj`, and
 `${prefix}.dj_tensor` under `${savedir}`. `out_dir`, `out_h5`, and `out_name`
 override those paths.
+
+With `execution='auto'`, a launch containing more than one rank uses MPI for
+every mode. Scalar/tensor J and scalar dJ partition the contour or pole energy
+mesh; tensor dJ partitions target/displacement-axis tasks. Rank 0 writes the
+final HDF5/text products after the collective reduction. Set `nproc=1` under
+MPI to avoid nested process oversubscription. In a serial launch, `nproc>1`
+enables the existing local multiprocessing path.
 
 | Native namelist key | Type | Required | Default | Meaning |
 |---|---|---:|---|---|
@@ -269,28 +276,28 @@ Wannier scalar J is currently stored in an isotropic `J_tensor_r` envelope.
 
 #### `input_format='epr'`
 
-Native engine: `slw.exchange.engine`; parity kernel:
-`slw.exchange.legacy.reference.compute_J_epr_kspace`.
+Native engine: `slw.exchange.engine`; numerical kernel:
+`slw.exchange.kernels.j_epr`.
 
 | Namelist key | Type | Parser required | Parser default | Meaning / CLI aliases |
 |---|---|---:|---|---|
-| `epr_up` | string | yes | — | Compatibility input retained by the backend.<br>CLI aliases: `--epr_up` |
-| `epr_dn` | string | yes | — | Compatibility input retained by the backend.<br>CLI aliases: `--epr_dn` |
+| `epr_up` | string | yes | — | Advanced native-kernel option.<br>CLI aliases: `--epr_up` |
+| `epr_dn` | string | yes | — | Advanced native-kernel option.<br>CLI aliases: `--epr_dn` |
 | `atom_labels` | string | no | `''` | Comma-separated labels for EPR atoms; default Atom1,Atom2,...<br>CLI aliases: `--atom_labels` |
 | `species_labels` | string | no | `''` | Comma-separated species for spglib orbit grouping, e.g. Mn,Mn,Te,Te.<br>CLI aliases: `--species_labels` |
-| `hr_unit` | enum {ev, ry, ha} | no | `ry` | Compatibility input retained by the backend.<br>CLI aliases: `--hr_unit` |
-| `mag_atoms` | list[int] | yes | — | Compatibility input retained by the backend.<br>CLI aliases: `--mag_atoms` |
-| `mag_atoms_base` | enum {0, 1} | no | `0` | Compatibility input retained by the backend.<br>CLI aliases: `--mag_atoms_base` |
+| `hr_unit` | enum {ev, ry, ha} | no | `ry` | Advanced native-kernel option.<br>CLI aliases: `--hr_unit` |
+| `mag_atoms` | list[int] | yes | — | Advanced native-kernel option.<br>CLI aliases: `--mag_atoms` |
+| `mag_atoms_base` | enum {0, 1} | no | `0` | Advanced native-kernel option.<br>CLI aliases: `--mag_atoms_base` |
 | `slices` | string | yes | — | Local slices as '0:0:5,1:5:10'<br>CLI aliases: `--slices` |
-| `efermi` | float | yes | — | Compatibility input retained by the backend.<br>CLI aliases: `--efermi` |
-| `kmesh` | int[3] | yes | — | Compatibility input retained by the backend.<br>CLI aliases: `--kmesh` |
-| `n_shells` | int | no | `10` | Compatibility input retained by the backend.<br>CLI aliases: `--n_shells` |
-| `d_max` | float | no | `20.0` | Compatibility input retained by the backend.<br>CLI aliases: `--d_max` |
-| `emin` | float | no | `-25.0` | Compatibility input retained by the backend.<br>CLI aliases: `--emin` |
-| `empoints` | int | no | `500` | Compatibility input retained by the backend.<br>CLI aliases: `--empoints` |
-| `integrator` | enum {contour, cfr, cfr_ozaki} | no | `contour` | Compatibility input retained by the backend.<br>CLI aliases: `--integrator` |
-| `cfr_beta` | float | no | `400.0` | Compatibility input retained by the backend.<br>CLI aliases: `--cfr_beta` |
-| `nproc` | int | no | `1` | Parallel contour chunks/processes<br>CLI aliases: `--nproc` |
+| `efermi` | float | yes | — | Advanced native-kernel option.<br>CLI aliases: `--efermi` |
+| `kmesh` | int[3] | yes | — | Advanced native-kernel option.<br>CLI aliases: `--kmesh` |
+| `n_shells` | int | no | `10` | Advanced native-kernel option.<br>CLI aliases: `--n_shells` |
+| `d_max` | float | no | `20.0` | Advanced native-kernel option.<br>CLI aliases: `--d_max` |
+| `emin` | float | no | `-25.0` | Advanced native-kernel option.<br>CLI aliases: `--emin` |
+| `empoints` | int | no | `500` | Advanced native-kernel option.<br>CLI aliases: `--empoints` |
+| `integrator` | enum {contour, cfr, cfr_ozaki} | no | `contour` | Advanced native-kernel option.<br>CLI aliases: `--integrator` |
+| `cfr_beta` | float | no | `400.0` | Advanced native-kernel option.<br>CLI aliases: `--cfr_beta` |
+| `nproc` | int | no | `1` | Serial local energy-worker processes; must be 1 per MPI rank<br>CLI aliases: `--nproc` |
 | `symprec` | float | no | `0.0001` | spglib symmetry tolerance for orbit grouping.<br>CLI aliases: `--symprec` |
 | `angle_tolerance` | float | no | `-1.0` | spglib angle tolerance in degrees; -1 uses spglib default.<br>CLI aliases: `--angle_tolerance` |
 | `orbit_grouping` | enum {spglib, shell} | no | `spglib` | Orbit grouping mode. shell groups all bonds with the same shell index and distance.<br>CLI aliases: `--orbit_grouping` |
@@ -301,15 +308,15 @@ Native engine: `slw.exchange.engine`; parity kernel:
 | `debug_bond` | string | no | `''` | Write debug for one directed bond: gi,gj,R1,R2,R3.<br>CLI aliases: `--debug_bond` |
 | `debug_out` | string | no | `J_debug_pairs.tsv` | Debug TSV filename inside --out_dir.<br>CLI aliases: `--debug_out` |
 | `no_symmetry_orbits` | boolean | no | .false. | Fallback to distance/pair orbit grouping.<br>CLI aliases: `--no_symmetry_orbits` |
-| `out_dir` | string | no | `.` | Compatibility input retained by the backend.<br>CLI aliases: `--out_dir` |
-| `out_name` | string | no | `J_epr_kspace.txt` | Compatibility input retained by the backend.<br>CLI aliases: `--out_name` |
+| `out_dir` | string | no | `.` | Advanced native-kernel option.<br>CLI aliases: `--out_dir` |
+| `out_name` | string | no | `J_epr_kspace.txt` | Advanced native-kernel option.<br>CLI aliases: `--out_name` |
 | `out_h5` | string | no | none / runtime | Optional J_r HDF5 filename/path. Default: &lt;out_name basename&gt;.Jr.h5<br>CLI aliases: `--out_h5` |
 | `no_h5` | boolean | no | .false. | Disable J_r HDF5 output.<br>CLI aliases: `--no_h5` |
 
 #### `input_format='wannier'`
 
-Native engine: `slw.exchange.engine`; parity kernel:
-`slw.exchange.legacy.reference.compute_J_wannier_tensor`.
+Native engine: `slw.exchange.engine`; numerical kernel:
+`slw.exchange.kernels.j_wannier`.
 
 Frontend-fixed values: `kernel='scalar'`. Supplying a conflicting value is an error.
 
@@ -325,46 +332,46 @@ Frontend-fixed values: `kernel='scalar'`. Supplying a conflicting value is an er
 | `ref_epr_up` | string | no | none / runtime | Optional reference EPR up HDF5 for H(k) scale/gauge diagnostics<br>CLI aliases: `--ref_epr_up` |
 | `ref_epr_dn` | string | no | none / runtime | Optional reference EPR down HDF5 for H(k) scale/gauge diagnostics<br>CLI aliases: `--ref_epr_dn` |
 | `ref_hr_unit` | enum {ev, ry, ha} | no | `ry` | Reference EPR hopping unit<br>CLI aliases: `--ref_hr_unit` |
-| `kmesh` | int[3] | yes | — | Compatibility input retained by the backend.<br>CLI aliases: `--kmesh` |
+| `kmesh` | int[3] | yes | — | Advanced native-kernel option.<br>CLI aliases: `--kmesh` |
 | `mag_atoms` | list[int] | yes | — | Magnetic atom indices<br>CLI aliases: `--mag_atoms` |
-| `mag_atoms_base` | enum {0, 1} | no | `0` | Compatibility input retained by the backend.<br>CLI aliases: `--mag_atoms_base` |
+| `mag_atoms_base` | enum {0, 1} | no | `0` | Advanced native-kernel option.<br>CLI aliases: `--mag_atoms_base` |
 | `slices` | string | no | `''` | Manual local orbital slices, e.g. '0:0:5,1:5:10'<br>CLI aliases: `--slices` |
 | `apply_degeneracy` | boolean | no | .true. | Divide HR blocks by Wannier90 degeneracy before H(k) construction; standard Wannier90 needs this<br>CLI aliases: `--apply_degeneracy`, `--no-apply_degeneracy` |
 | `kernel` | enum {scalar, direct, tb2j} | no | `tb2j` | scalar is the SOC-free collinear LKAG reference; tb2j/direct use spinor tensor kernels<br>CLI aliases: `--kernel` |
 | `axes` | string | no | `xyz` | Tensor axes to compute, subset of xyz<br>CLI aliases: `--axes` |
-| `spin_direction` | float[3] | no | `[0.0, 0.0, 1.0]` | Compatibility input retained by the backend.<br>CLI aliases: `--spin_direction` |
+| `spin_direction` | float[3] | no | `[0.0, 0.0, 1.0]` | Advanced native-kernel option.<br>CLI aliases: `--spin_direction` |
 | `soc` | string | no | `''` | Model SOC specs inferred from --win, e.g. 'Te:p:0.5;Cr:d:0.05'<br>CLI aliases: `--soc` |
 | `win` | string | no | none / runtime | Wannier90 .win file; inferred only when the working directory contains exactly one candidate<br>CLI aliases: `--win` |
 | `mag_subspace` | string | no | `''` | Infer magnetic local slices from .win projections, e.g. 'Cr:d;Cr:d' or 'Cr:d'<br>CLI aliases: `--mag_subspace` |
 | `soc_element` | string | no | `''` | Element for compatibility --lambda_te p-SOC mode<br>CLI aliases: `--soc_element` |
-| `lambda_te` | float | no | `0.0` | Compatibility input retained by the backend.<br>CLI aliases: `--lambda_te` |
-| `soc_p_groups` | string | no | `''` | Compatibility input retained by the backend.<br>CLI aliases: `--soc_p_groups` |
-| `soc_groups_base` | enum {0, 1} | no | `0` | Compatibility input retained by the backend.<br>CLI aliases: `--soc_groups_base`, `--soc_p_groups_base` |
-| `p_order` | string | no | `pz,px,py` | Compatibility input retained by the backend.<br>CLI aliases: `--p_order` |
-| `d_order` | string | no | `dz2,dxz,dyz,dx2-y2,dxy` | Compatibility input retained by the backend.<br>CLI aliases: `--d_order` |
+| `lambda_te` | float | no | `0.0` | Advanced native-kernel option.<br>CLI aliases: `--lambda_te` |
+| `soc_p_groups` | string | no | `''` | Advanced native-kernel option.<br>CLI aliases: `--soc_p_groups` |
+| `soc_groups_base` | enum {0, 1} | no | `0` | Advanced native-kernel option.<br>CLI aliases: `--soc_groups_base`, `--soc_p_groups_base` |
+| `p_order` | string | no | `pz,px,py` | Advanced native-kernel option.<br>CLI aliases: `--p_order` |
+| `d_order` | string | no | `dz2,dxz,dyz,dx2-y2,dxy` | Advanced native-kernel option.<br>CLI aliases: `--d_order` |
 | `intersite_soc` | boolean | no | .false. | Add downfolded intersite SOC correction to the selected d subspace<br>CLI aliases: `--intersite_soc` |
 | `d_subspace` | string | no | `''` | Target low-energy subspace for --intersite_soc<br>CLI aliases: `--d_subspace` |
 | `soc_active` | string | no | `''` | SOC-active ligand subspace for --intersite_soc<br>CLI aliases: `--soc_active` |
 | `lambda_soc` | float | no | none / runtime | Atomic SOC lambda in eV for --intersite_soc<br>CLI aliases: `--lambda_soc` |
 | `e0` | float | no | `0.0` | Downfolding energy E0 in eV for --intersite_soc<br>CLI aliases: `--e0` |
 | `eta` | float | no | `0.0` | Downfolding broadening in eV for --intersite_soc<br>CLI aliases: `--eta` |
-| `hermitianize_soc` | boolean | no | .true. | Compatibility input retained by the backend.<br>CLI aliases: `--hermitianize_soc`, `--no-hermitianize_soc` |
-| `n_shells` | int | no | `10` | Compatibility input retained by the backend.<br>CLI aliases: `--n_shells` |
-| `d_max` | float | no | `20.0` | Compatibility input retained by the backend.<br>CLI aliases: `--d_max` |
+| `hermitianize_soc` | boolean | no | .true. | Advanced native-kernel option.<br>CLI aliases: `--hermitianize_soc`, `--no-hermitianize_soc` |
+| `n_shells` | int | no | `10` | Advanced native-kernel option.<br>CLI aliases: `--n_shells` |
+| `d_max` | float | no | `20.0` | Advanced native-kernel option.<br>CLI aliases: `--d_max` |
 | `all_bonds` | boolean | no | .true. | Keep directed bonds; default matches compute_J_epr_tensor<br>CLI aliases: `--all_bonds`, `--canonical_bonds` |
-| `nn_only` | boolean | no | .false. | Compatibility input retained by the backend.<br>CLI aliases: `--nn_only` |
-| `orbit_grouping` | enum {none, distance, shell} | no | `distance` | Compatibility input retained by the backend.<br>CLI aliases: `--orbit_grouping` |
-| `integrator` | enum {contour, cfr_ozaki, cfr_pole} | no | `contour` | Compatibility input retained by the backend.<br>CLI aliases: `--integrator` |
-| `emin` | float | no | `-25.0` | Compatibility input retained by the backend.<br>CLI aliases: `--emin` |
-| `empoints` | int | no | `500` | Compatibility input retained by the backend.<br>CLI aliases: `--empoints` |
-| `cfr_beta` | float | no | `1000.0` | Compatibility input retained by the backend.<br>CLI aliases: `--cfr_beta` |
-| `nproc` | int | no | `1` | Compatibility input retained by the backend.<br>CLI aliases: `--nproc` |
+| `nn_only` | boolean | no | .false. | Advanced native-kernel option.<br>CLI aliases: `--nn_only` |
+| `orbit_grouping` | enum {none, distance, shell} | no | `distance` | Advanced native-kernel option.<br>CLI aliases: `--orbit_grouping` |
+| `integrator` | enum {contour, cfr_ozaki, cfr_pole} | no | `contour` | Advanced native-kernel option.<br>CLI aliases: `--integrator` |
+| `emin` | float | no | `-25.0` | Advanced native-kernel option.<br>CLI aliases: `--emin` |
+| `empoints` | int | no | `500` | Advanced native-kernel option.<br>CLI aliases: `--empoints` |
+| `cfr_beta` | float | no | `1000.0` | Advanced native-kernel option.<br>CLI aliases: `--cfr_beta` |
+| `nproc` | int | no | `1` | Serial local energy-worker processes; must be 1 per MPI rank<br>CLI aliases: `--nproc` |
 | `collinear_override` | boolean | no | .false. | Override J_zz with (J_xx+J_yy)/2 in collinear calculations<br>CLI aliases: `--collinear_override` |
 | `spin_magnitude` | float | no | `1.0` | Spin magnitude S to scale J by 1/S^2<br>CLI aliases: `--spin_magnitude` |
 | `dynamic_soc` | boolean | no | .false. | Perform dynamic ligand SOC downfolding inside the energy loop<br>CLI aliases: `--dynamic_soc` |
-| `out_dir` | string | no | `J_wannier_tensor` | Compatibility input retained by the backend.<br>CLI aliases: `--out_dir` |
-| `out_name` | string | no | `J_wannier_tensor.txt` | Compatibility input retained by the backend.<br>CLI aliases: `--out_name` |
-| `out_h5` | string | no | `J_wannier_tensor.h5` | Compatibility input retained by the backend.<br>CLI aliases: `--out_h5` |
+| `out_dir` | string | no | `J_wannier_tensor` | Advanced native-kernel option.<br>CLI aliases: `--out_dir` |
+| `out_name` | string | no | `J_wannier_tensor.txt` | Advanced native-kernel option.<br>CLI aliases: `--out_name` |
+| `out_h5` | string | no | `J_wannier_tensor.h5` | Advanced native-kernel option.<br>CLI aliases: `--out_h5` |
 
 ### `calculation='j', ltensor=.true.`
 
@@ -388,22 +395,22 @@ physical kernel convention and is dispatched before numerical integration.
 
 #### `input_format='epr'`
 
-Native engine: `slw.exchange.engine`; parity kernel:
-`slw.exchange.legacy.reference.compute_J_epr_tensor`.
+Native engine: `slw.exchange.engine`; numerical kernel:
+`slw.exchange.kernels.j_tensor_epr`.
 
 | Namelist key | Type | Parser required | Parser default | Meaning / CLI aliases |
 |---|---|---:|---|---|
 | `epr_up` | string | yes | — | Spin-up EPR HDF5<br>CLI aliases: `--epr_up` |
 | `epr_dn` | string | yes | — | Spin-down EPR HDF5<br>CLI aliases: `--epr_dn` |
 | `efermi` | float | yes | — | Fermi energy in eV<br>CLI aliases: `--efermi` |
-| `kmesh` | int[3] | yes | — | Compatibility input retained by the backend.<br>CLI aliases: `--kmesh` |
+| `kmesh` | int[3] | yes | — | Advanced native-kernel option.<br>CLI aliases: `--kmesh` |
 | `mag_atoms` | list[int] | yes | — | Magnetic atom indices<br>CLI aliases: `--mag_atoms` |
-| `mag_atoms_base` | enum {0, 1} | no | `0` | Compatibility input retained by the backend.<br>CLI aliases: `--mag_atoms_base` |
+| `mag_atoms_base` | enum {0, 1} | no | `0` | Advanced native-kernel option.<br>CLI aliases: `--mag_atoms_base` |
 | `slices` | string | yes | — | Manual local orbital slices, e.g. '0:0:5,1:5:10'<br>CLI aliases: `--slices` |
 | `hr_unit` | enum {ry, ev, ha} | no | `ry` | EPR hopping unit<br>CLI aliases: `--hr_unit` |
 | `kernel` | enum {tb2j, direct} | no | `tb2j` | tb2j: TB2J-like Pauli A-tensor mapping. direct: raw D_i^a G D_j^b G trace.<br>CLI aliases: `--kernel` |
 | `axes` | string | no | `xyz` | Tensor axes to compute, subset of xyz<br>CLI aliases: `--axes` |
-| `spin_direction` | float[3] | no | `[0.0, 0.0, 1.0]` | Compatibility input retained by the backend.<br>CLI aliases: `--spin_direction` |
+| `spin_direction` | float[3] | no | `[0.0, 0.0, 1.0]` | Advanced native-kernel option.<br>CLI aliases: `--spin_direction` |
 | `soc` | string | no | `''` | Generic model SOC specs, e.g. 'Te:p:0.5;Cr:d:0.05'. Groups are inferred from --win.<br>CLI aliases: `--soc` |
 | `win` | string | no | none / runtime | wannier90 .win file used to infer p/d SOC orbital groups<br>CLI aliases: `--win` |
 | `soc_element` | string | no | `''` | Element for compatibility --lambda_te p-SOC mode<br>CLI aliases: `--soc_element` |
@@ -412,38 +419,38 @@ Native engine: `slw.exchange.engine`; parity kernel:
 | `soc_groups_base` | enum {0, 1} | no | `0` | Index base for --soc_p_groups<br>CLI aliases: `--soc_groups_base`, `--soc_p_groups_base` |
 | `p_order` | string | no | `pz,px,py` | p orbital order inside each SOC group<br>CLI aliases: `--p_order` |
 | `d_order` | string | no | `dz2,dxz,dyz,dx2-y2,dxy` | d orbital order inside each SOC group<br>CLI aliases: `--d_order` |
-| `n_shells` | int | no | `10` | Compatibility input retained by the backend.<br>CLI aliases: `--n_shells` |
-| `d_max` | float | no | `20.0` | Compatibility input retained by the backend.<br>CLI aliases: `--d_max` |
+| `n_shells` | int | no | `10` | Advanced native-kernel option.<br>CLI aliases: `--n_shells` |
+| `d_max` | float | no | `20.0` | Advanced native-kernel option.<br>CLI aliases: `--d_max` |
 | `all_bonds` | boolean | no | .true. | Keep directed bonds<br>CLI aliases: `--all_bonds`, `--canonical_bonds` |
-| `nn_only` | boolean | no | .false. | Compatibility input retained by the backend.<br>CLI aliases: `--nn_only` |
+| `nn_only` | boolean | no | .false. | Advanced native-kernel option.<br>CLI aliases: `--nn_only` |
 | `atom_labels` | string | no | `''` | Comma-separated atom labels<br>CLI aliases: `--atom_labels` |
-| `species_labels` | list[string] | no | none / runtime | Compatibility input retained by the backend.<br>CLI aliases: `--species_labels` |
-| `no_symmetry` | boolean | no | .false. | Compatibility input retained by the backend.<br>CLI aliases: `--no_symmetry` |
-| `orbit_grouping` | enum {spglib, shell} | no | `spglib` | Compatibility input retained by the backend.<br>CLI aliases: `--orbit_grouping` |
-| `symprec` | float | no | `0.0001` | Compatibility input retained by the backend.<br>CLI aliases: `--symprec` |
-| `angle_tolerance` | float | no | `-1.0` | Compatibility input retained by the backend.<br>CLI aliases: `--angle_tolerance` |
-| `debug_orbits` | boolean | no | .false. | Compatibility input retained by the backend.<br>CLI aliases: `--debug_orbits` |
-| `debug_orbit_shell` | int | no | none / runtime | Compatibility input retained by the backend.<br>CLI aliases: `--debug_orbit_shell` |
-| `debug_epr_positions` | boolean | no | .false. | Compatibility input retained by the backend.<br>CLI aliases: `--debug_epr_positions` |
-| `integrator` | enum {contour, cfr_ozaki, cfr_pole} | no | `contour` | Compatibility input retained by the backend.<br>CLI aliases: `--integrator` |
-| `emin` | float | no | `-25.0` | Compatibility input retained by the backend.<br>CLI aliases: `--emin` |
-| `empoints` | int | no | `500` | Compatibility input retained by the backend.<br>CLI aliases: `--empoints` |
-| `cfr_beta` | float | no | `1000.0` | Compatibility input retained by the backend.<br>CLI aliases: `--cfr_beta` |
-| `nproc` | int | no | `1` | Parallelize over energy chunks<br>CLI aliases: `--nproc` |
+| `species_labels` | list[string] | no | none / runtime | Advanced native-kernel option.<br>CLI aliases: `--species_labels` |
+| `no_symmetry` | boolean | no | .false. | Advanced native-kernel option.<br>CLI aliases: `--no_symmetry` |
+| `orbit_grouping` | enum {spglib, shell} | no | `spglib` | Advanced native-kernel option.<br>CLI aliases: `--orbit_grouping` |
+| `symprec` | float | no | `0.0001` | Advanced native-kernel option.<br>CLI aliases: `--symprec` |
+| `angle_tolerance` | float | no | `-1.0` | Advanced native-kernel option.<br>CLI aliases: `--angle_tolerance` |
+| `debug_orbits` | boolean | no | .false. | Advanced native-kernel option.<br>CLI aliases: `--debug_orbits` |
+| `debug_orbit_shell` | int | no | none / runtime | Advanced native-kernel option.<br>CLI aliases: `--debug_orbit_shell` |
+| `debug_epr_positions` | boolean | no | .false. | Advanced native-kernel option.<br>CLI aliases: `--debug_epr_positions` |
+| `integrator` | enum {contour, cfr_ozaki, cfr_pole} | no | `contour` | Advanced native-kernel option.<br>CLI aliases: `--integrator` |
+| `emin` | float | no | `-25.0` | Advanced native-kernel option.<br>CLI aliases: `--emin` |
+| `empoints` | int | no | `500` | Advanced native-kernel option.<br>CLI aliases: `--empoints` |
+| `cfr_beta` | float | no | `1000.0` | Advanced native-kernel option.<br>CLI aliases: `--cfr_beta` |
+| `nproc` | int | no | `1` | Serial local energy-worker processes; must be 1 per MPI rank<br>CLI aliases: `--nproc` |
 | `collinear_override` | boolean | no | .false. | Override J_zz with (J_xx+J_yy)/2 in collinear calculations<br>CLI aliases: `--collinear_override` |
 | `spin_magnitude` | float | no | `1.0` | Spin magnitude S to scale J by 1/S^2<br>CLI aliases: `--spin_magnitude` |
 | `d_subspace` | string | no | `''` | Target low-energy subspace for dynamic SOC downfolding<br>CLI aliases: `--d_subspace` |
 | `soc_active` | string | no | `''` | SOC-active ligand subspace for dynamic SOC downfolding<br>CLI aliases: `--soc_active` |
 | `lambda_soc` | float | no | none / runtime | Atomic SOC lambda in eV for dynamic SOC downfolding<br>CLI aliases: `--lambda_soc` |
 | `dynamic_soc` | boolean | no | .false. | Perform dynamic ligand SOC downfolding inside the energy loop<br>CLI aliases: `--dynamic_soc` |
-| `out_dir` | string | no | `J_epr_tensor` | Compatibility input retained by the backend.<br>CLI aliases: `--out_dir` |
-| `out_name` | string | no | `J_epr_tensor.txt` | Compatibility input retained by the backend.<br>CLI aliases: `--out_name` |
-| `out_h5` | string | no | `J_epr_tensor.h5` | Compatibility input retained by the backend.<br>CLI aliases: `--out_h5` |
+| `out_dir` | string | no | `J_epr_tensor` | Advanced native-kernel option.<br>CLI aliases: `--out_dir` |
+| `out_name` | string | no | `J_epr_tensor.txt` | Advanced native-kernel option.<br>CLI aliases: `--out_name` |
+| `out_h5` | string | no | `J_epr_tensor.h5` | Advanced native-kernel option.<br>CLI aliases: `--out_h5` |
 
 #### `input_format='wannier'`
 
-Native engine: `slw.exchange.engine`; parity kernel:
-`slw.exchange.legacy.reference.compute_J_wannier_tensor`.
+Native engine: `slw.exchange.engine`; numerical kernel:
+`slw.exchange.kernels.j_wannier`.
 
 | Namelist key | Type | Parser required | Parser default | Meaning / CLI aliases |
 |---|---|---:|---|---|
@@ -457,46 +464,46 @@ Native engine: `slw.exchange.engine`; parity kernel:
 | `ref_epr_up` | string | no | none / runtime | Optional reference EPR up HDF5 for H(k) scale/gauge diagnostics<br>CLI aliases: `--ref_epr_up` |
 | `ref_epr_dn` | string | no | none / runtime | Optional reference EPR down HDF5 for H(k) scale/gauge diagnostics<br>CLI aliases: `--ref_epr_dn` |
 | `ref_hr_unit` | enum {ev, ry, ha} | no | `ry` | Reference EPR hopping unit<br>CLI aliases: `--ref_hr_unit` |
-| `kmesh` | int[3] | yes | — | Compatibility input retained by the backend.<br>CLI aliases: `--kmesh` |
+| `kmesh` | int[3] | yes | — | Advanced native-kernel option.<br>CLI aliases: `--kmesh` |
 | `mag_atoms` | list[int] | yes | — | Magnetic atom indices<br>CLI aliases: `--mag_atoms` |
-| `mag_atoms_base` | enum {0, 1} | no | `0` | Compatibility input retained by the backend.<br>CLI aliases: `--mag_atoms_base` |
+| `mag_atoms_base` | enum {0, 1} | no | `0` | Advanced native-kernel option.<br>CLI aliases: `--mag_atoms_base` |
 | `slices` | string | no | `''` | Manual local orbital slices, e.g. '0:0:5,1:5:10'<br>CLI aliases: `--slices` |
 | `apply_degeneracy` | boolean | no | .true. | Divide HR blocks by Wannier90 degeneracy before H(k) construction; standard Wannier90 needs this<br>CLI aliases: `--apply_degeneracy`, `--no-apply_degeneracy` |
 | `kernel` | enum {scalar, direct, tb2j} | no | `tb2j` | scalar is the SOC-free collinear LKAG reference; tb2j/direct use spinor tensor kernels<br>CLI aliases: `--kernel` |
 | `axes` | string | no | `xyz` | Tensor axes to compute, subset of xyz<br>CLI aliases: `--axes` |
-| `spin_direction` | float[3] | no | `[0.0, 0.0, 1.0]` | Compatibility input retained by the backend.<br>CLI aliases: `--spin_direction` |
+| `spin_direction` | float[3] | no | `[0.0, 0.0, 1.0]` | Advanced native-kernel option.<br>CLI aliases: `--spin_direction` |
 | `soc` | string | no | `''` | Model SOC specs inferred from --win, e.g. 'Te:p:0.5;Cr:d:0.05'<br>CLI aliases: `--soc` |
 | `win` | string | no | none / runtime | Wannier90 .win file; inferred only when the working directory contains exactly one candidate<br>CLI aliases: `--win` |
 | `mag_subspace` | string | no | `''` | Infer magnetic local slices from .win projections, e.g. 'Cr:d;Cr:d' or 'Cr:d'<br>CLI aliases: `--mag_subspace` |
 | `soc_element` | string | no | `''` | Element for compatibility --lambda_te p-SOC mode<br>CLI aliases: `--soc_element` |
-| `lambda_te` | float | no | `0.0` | Compatibility input retained by the backend.<br>CLI aliases: `--lambda_te` |
-| `soc_p_groups` | string | no | `''` | Compatibility input retained by the backend.<br>CLI aliases: `--soc_p_groups` |
-| `soc_groups_base` | enum {0, 1} | no | `0` | Compatibility input retained by the backend.<br>CLI aliases: `--soc_groups_base`, `--soc_p_groups_base` |
-| `p_order` | string | no | `pz,px,py` | Compatibility input retained by the backend.<br>CLI aliases: `--p_order` |
-| `d_order` | string | no | `dz2,dxz,dyz,dx2-y2,dxy` | Compatibility input retained by the backend.<br>CLI aliases: `--d_order` |
+| `lambda_te` | float | no | `0.0` | Advanced native-kernel option.<br>CLI aliases: `--lambda_te` |
+| `soc_p_groups` | string | no | `''` | Advanced native-kernel option.<br>CLI aliases: `--soc_p_groups` |
+| `soc_groups_base` | enum {0, 1} | no | `0` | Advanced native-kernel option.<br>CLI aliases: `--soc_groups_base`, `--soc_p_groups_base` |
+| `p_order` | string | no | `pz,px,py` | Advanced native-kernel option.<br>CLI aliases: `--p_order` |
+| `d_order` | string | no | `dz2,dxz,dyz,dx2-y2,dxy` | Advanced native-kernel option.<br>CLI aliases: `--d_order` |
 | `intersite_soc` | boolean | no | .false. | Add downfolded intersite SOC correction to the selected d subspace<br>CLI aliases: `--intersite_soc` |
 | `d_subspace` | string | no | `''` | Target low-energy subspace for --intersite_soc<br>CLI aliases: `--d_subspace` |
 | `soc_active` | string | no | `''` | SOC-active ligand subspace for --intersite_soc<br>CLI aliases: `--soc_active` |
 | `lambda_soc` | float | no | none / runtime | Atomic SOC lambda in eV for --intersite_soc<br>CLI aliases: `--lambda_soc` |
 | `e0` | float | no | `0.0` | Downfolding energy E0 in eV for --intersite_soc<br>CLI aliases: `--e0` |
 | `eta` | float | no | `0.0` | Downfolding broadening in eV for --intersite_soc<br>CLI aliases: `--eta` |
-| `hermitianize_soc` | boolean | no | .true. | Compatibility input retained by the backend.<br>CLI aliases: `--hermitianize_soc`, `--no-hermitianize_soc` |
-| `n_shells` | int | no | `10` | Compatibility input retained by the backend.<br>CLI aliases: `--n_shells` |
-| `d_max` | float | no | `20.0` | Compatibility input retained by the backend.<br>CLI aliases: `--d_max` |
+| `hermitianize_soc` | boolean | no | .true. | Advanced native-kernel option.<br>CLI aliases: `--hermitianize_soc`, `--no-hermitianize_soc` |
+| `n_shells` | int | no | `10` | Advanced native-kernel option.<br>CLI aliases: `--n_shells` |
+| `d_max` | float | no | `20.0` | Advanced native-kernel option.<br>CLI aliases: `--d_max` |
 | `all_bonds` | boolean | no | .true. | Keep directed bonds; default matches compute_J_epr_tensor<br>CLI aliases: `--all_bonds`, `--canonical_bonds` |
-| `nn_only` | boolean | no | .false. | Compatibility input retained by the backend.<br>CLI aliases: `--nn_only` |
-| `orbit_grouping` | enum {none, distance, shell} | no | `distance` | Compatibility input retained by the backend.<br>CLI aliases: `--orbit_grouping` |
-| `integrator` | enum {contour, cfr_ozaki, cfr_pole} | no | `contour` | Compatibility input retained by the backend.<br>CLI aliases: `--integrator` |
-| `emin` | float | no | `-25.0` | Compatibility input retained by the backend.<br>CLI aliases: `--emin` |
-| `empoints` | int | no | `500` | Compatibility input retained by the backend.<br>CLI aliases: `--empoints` |
-| `cfr_beta` | float | no | `1000.0` | Compatibility input retained by the backend.<br>CLI aliases: `--cfr_beta` |
-| `nproc` | int | no | `1` | Compatibility input retained by the backend.<br>CLI aliases: `--nproc` |
+| `nn_only` | boolean | no | .false. | Advanced native-kernel option.<br>CLI aliases: `--nn_only` |
+| `orbit_grouping` | enum {none, distance, shell} | no | `distance` | Advanced native-kernel option.<br>CLI aliases: `--orbit_grouping` |
+| `integrator` | enum {contour, cfr_ozaki, cfr_pole} | no | `contour` | Advanced native-kernel option.<br>CLI aliases: `--integrator` |
+| `emin` | float | no | `-25.0` | Advanced native-kernel option.<br>CLI aliases: `--emin` |
+| `empoints` | int | no | `500` | Advanced native-kernel option.<br>CLI aliases: `--empoints` |
+| `cfr_beta` | float | no | `1000.0` | Advanced native-kernel option.<br>CLI aliases: `--cfr_beta` |
+| `nproc` | int | no | `1` | Serial local energy-worker processes; must be 1 per MPI rank<br>CLI aliases: `--nproc` |
 | `collinear_override` | boolean | no | .false. | Override J_zz with (J_xx+J_yy)/2 in collinear calculations<br>CLI aliases: `--collinear_override` |
 | `spin_magnitude` | float | no | `1.0` | Spin magnitude S to scale J by 1/S^2<br>CLI aliases: `--spin_magnitude` |
 | `dynamic_soc` | boolean | no | .false. | Perform dynamic ligand SOC downfolding inside the energy loop<br>CLI aliases: `--dynamic_soc` |
-| `out_dir` | string | no | `J_wannier_tensor` | Compatibility input retained by the backend.<br>CLI aliases: `--out_dir` |
-| `out_name` | string | no | `J_wannier_tensor.txt` | Compatibility input retained by the backend.<br>CLI aliases: `--out_name` |
-| `out_h5` | string | no | `J_wannier_tensor.h5` | Compatibility input retained by the backend.<br>CLI aliases: `--out_h5` |
+| `out_dir` | string | no | `J_wannier_tensor` | Advanced native-kernel option.<br>CLI aliases: `--out_dir` |
+| `out_name` | string | no | `J_wannier_tensor.txt` | Advanced native-kernel option.<br>CLI aliases: `--out_name` |
+| `out_h5` | string | no | `J_wannier_tensor.h5` | Advanced native-kernel option.<br>CLI aliases: `--out_h5` |
 
 ### `calculation='dj', ltensor=.false.`
 
@@ -512,37 +519,37 @@ explicit for production work.
 contains displacement metadata and target/bond datasets shaped `(nRp, 3)` in
 meV/A.
 
-Native engine: `slw.exchange.engine`; parity kernel:
-`slw.exchange.legacy.reference.compute_dJ_epr_kspace`.
+Native engine: `slw.exchange.engine`; numerical kernel:
+`slw.exchange.kernels.dj_epr`.
 
 | Namelist key | Type | Parser required | Parser default | Meaning / CLI aliases |
 |---|---|---:|---|---|
-| `epr_up` | string | yes | — | Compatibility input retained by the backend.<br>CLI aliases: `--epr_up` |
-| `epr_dn` | string | yes | — | Compatibility input retained by the backend.<br>CLI aliases: `--epr_dn` |
-| `hr_unit` | enum {ev, ry, ha} | no | `ry` | Compatibility input retained by the backend.<br>CLI aliases: `--hr_unit` |
-| `eph_unit` | enum {ev, ry, ha} | no | `ry` | Compatibility input retained by the backend.<br>CLI aliases: `--eph_unit` |
-| `atom_labels` | string | no | `''` | Compatibility input retained by the backend.<br>CLI aliases: `--atom_labels` |
+| `epr_up` | string | yes | — | Advanced native-kernel option.<br>CLI aliases: `--epr_up` |
+| `epr_dn` | string | yes | — | Advanced native-kernel option.<br>CLI aliases: `--epr_dn` |
+| `hr_unit` | enum {ev, ry, ha} | no | `ry` | Advanced native-kernel option.<br>CLI aliases: `--hr_unit` |
+| `eph_unit` | enum {ev, ry, ha} | no | `ry` | Advanced native-kernel option.<br>CLI aliases: `--eph_unit` |
+| `atom_labels` | string | no | `''` | Advanced native-kernel option.<br>CLI aliases: `--atom_labels` |
 | `species_labels` | string | no | `''` | Comma-separated species for spglib orbit grouping, e.g. Mn,Mn,Te,Te.<br>CLI aliases: `--species_labels` |
 | `targets` | string | no | `all` | Comma labels or 0-based indices; default all<br>CLI aliases: `--targets` |
-| `axes` | string | no | `x,y,z` | Compatibility input retained by the backend.<br>CLI aliases: `--axes` |
-| `mag_atoms` | list[int] | yes | — | Compatibility input retained by the backend.<br>CLI aliases: `--mag_atoms` |
-| `mag_atoms_base` | enum {0, 1} | no | `0` | Compatibility input retained by the backend.<br>CLI aliases: `--mag_atoms_base` |
+| `axes` | string | no | `x,y,z` | Advanced native-kernel option.<br>CLI aliases: `--axes` |
+| `mag_atoms` | list[int] | yes | — | Advanced native-kernel option.<br>CLI aliases: `--mag_atoms` |
+| `mag_atoms_base` | enum {0, 1} | no | `0` | Advanced native-kernel option.<br>CLI aliases: `--mag_atoms_base` |
 | `slices` | string | yes | — | Local orbital slices, e.g. '0:0:5,1:5:10'<br>CLI aliases: `--slices` |
-| `efermi` | float | yes | — | Compatibility input retained by the backend.<br>CLI aliases: `--efermi` |
-| `kmesh` | int[3] | yes | — | Compatibility input retained by the backend.<br>CLI aliases: `--kmesh` |
+| `efermi` | float | yes | — | Advanced native-kernel option.<br>CLI aliases: `--efermi` |
+| `kmesh` | int[3] | yes | — | Advanced native-kernel option.<br>CLI aliases: `--kmesh` |
 | `qmesh` | int[3] | no | none / runtime | Output q mesh; default EPR basic_data/qc_dim<br>CLI aliases: `--qmesh` |
-| `rp_idx` | int[3] | no | `[0, 0, 0]` | Compatibility input retained by the backend.<br>CLI aliases: `--rp_idx` |
+| `rp_idx` | int[3] | no | `[0, 0, 0]` | Advanced native-kernel option.<br>CLI aliases: `--rp_idx` |
 | `g_transform` | enum {kq, k_only_rp} | no | `kq` | kq: FT ep_hop over Re and Rp; k_only_rp: keep selected Rp real-space and FT only Re<br>CLI aliases: `--g_transform` |
-| `n_shells` | int | no | `1` | Compatibility input retained by the backend.<br>CLI aliases: `--n_shells` |
-| `d_max` | float | no | `20.0` | Compatibility input retained by the backend.<br>CLI aliases: `--d_max` |
-| `emin` | float | no | `-25.0` | Compatibility input retained by the backend.<br>CLI aliases: `--emin` |
-| `empoints` | int | no | `100` | Compatibility input retained by the backend.<br>CLI aliases: `--empoints` |
-| `integrator` | enum {contour, cfr, cfr_ozaki} | no | `contour` | Compatibility input retained by the backend.<br>CLI aliases: `--integrator` |
-| `cfr_beta` | float | no | `400.0` | Compatibility input retained by the backend.<br>CLI aliases: `--cfr_beta` |
-| `nproc` | int | no | `1` | Compatibility input retained by the backend.<br>CLI aliases: `--nproc` |
+| `n_shells` | int | no | `1` | Advanced native-kernel option.<br>CLI aliases: `--n_shells` |
+| `d_max` | float | no | `20.0` | Advanced native-kernel option.<br>CLI aliases: `--d_max` |
+| `emin` | float | no | `-25.0` | Advanced native-kernel option.<br>CLI aliases: `--emin` |
+| `empoints` | int | no | `100` | Advanced native-kernel option.<br>CLI aliases: `--empoints` |
+| `integrator` | enum {contour, cfr, cfr_ozaki} | no | `contour` | Advanced native-kernel option.<br>CLI aliases: `--integrator` |
+| `cfr_beta` | float | no | `400.0` | Advanced native-kernel option.<br>CLI aliases: `--cfr_beta` |
+| `nproc` | int | no | `1` | Serial local energy-worker processes; must be 1 per MPI rank<br>CLI aliases: `--nproc` |
 | `omp_threads` | int | no | `1` | BLAS/OpenMP threads per energy worker process<br>CLI aliases: `--omp_threads` |
 | `precache_workers` | int | no | `1` | Thread workers for independent g(k,q) pre-cache entries<br>CLI aliases: `--precache_workers` |
-| `rotation_mode` | enum {none} | no | `none` | Compatibility input retained by the backend.<br>CLI aliases: `--rotation_mode` |
+| `rotation_mode` | enum {none} | no | `none` | Advanced native-kernel option.<br>CLI aliases: `--rotation_mode` |
 | `ddelta_mode` | enum {off, local, onsite} | no | `off` | Include derivative of local exchange splitting Delta. off: legacy dG-only; local: use full local block of g_up-g_dn; onsite: use only electron Re=(0,0,0) onsite derivative.<br>CLI aliases: `--ddelta_mode` |
 | `symprec` | float | no | `0.0001` | spglib symmetry tolerance for orbit grouping.<br>CLI aliases: `--symprec` |
 | `angle_tolerance` | float | no | `-1.0` | spglib angle tolerance in degrees; -1 uses spglib default.<br>CLI aliases: `--angle_tolerance` |
@@ -550,10 +557,10 @@ Native engine: `slw.exchange.engine`; parity kernel:
 | `debug_orbits` | boolean | no | .false. | Print spglib operation and bond-mapping diagnostics.<br>CLI aliases: `--debug_orbits` |
 | `debug_orbit_shell` | int | no | none / runtime | Restrict --debug_orbits bond diagnostics to one shell.<br>CLI aliases: `--debug_orbit_shell` |
 | `debug_epr_positions` | boolean | no | .false. | Print EPR tau and Wannier-center position diagnostics.<br>CLI aliases: `--debug_epr_positions` |
-| `no_symmetry_orbits` | boolean | no | .false. | Compatibility input retained by the backend.<br>CLI aliases: `--no_symmetry_orbits` |
-| `out_dir` | string | no | `dJ_epr_kspace` | Compatibility input retained by the backend.<br>CLI aliases: `--out_dir` |
-| `out_name` | string | no | `dJ_epr_kspace.txt` | Compatibility input retained by the backend.<br>CLI aliases: `--out_name` |
-| `out_h5` | string | no | `dJr.h5` | Compatibility input retained by the backend.<br>CLI aliases: `--out_h5` |
+| `no_symmetry_orbits` | boolean | no | .false. | Advanced native-kernel option.<br>CLI aliases: `--no_symmetry_orbits` |
+| `out_dir` | string | no | `dJ_epr_kspace` | Advanced native-kernel option.<br>CLI aliases: `--out_dir` |
+| `out_name` | string | no | `dJ_epr_kspace.txt` | Advanced native-kernel option.<br>CLI aliases: `--out_name` |
+| `out_h5` | string | no | `dJr.h5` | Advanced native-kernel option.<br>CLI aliases: `--out_h5` |
 
 ### `calculation='dj', ltensor=.true.`
 
@@ -572,10 +579,10 @@ isotropic, symmetric-anisotropic, and DMI derivatives. Serial checkpoints
 update the same file and mark completion in its attributes; rank 0 writes the
 same final schema under MPI.
 
-Native engine: `slw.exchange.engine`; parity kernels:
-`slw.exchange.legacy.reference.compute_dJ_epr_tensor` and
-`slw.exchange.legacy.reference.compute_dJ_epr_tensor_mpi`. Under MPI, `nproc` must be
-one per rank; use `numba_threads` and `blas_threads` for rank-local work.
+Native engine: `slw.exchange.engine`; serial and MPI numerical kernels:
+`slw.exchange.kernels.dj_tensor_epr` and
+`slw.exchange.kernels.dj_tensor_mpi`. Under MPI, `nproc` must be one per rank;
+use `numba_threads` and `blas_threads` for rank-local work.
 
 | Namelist key | Type | Parser required | Parser default | Meaning / CLI aliases |
 |---|---|---:|---|---|
@@ -588,39 +595,39 @@ one per rank; use `numba_threads` and `blas_threads` for rank-local work.
 | `centres` | string | no | none / runtime | Optional Wannier90 centres.xyz for spinor ordering diagnostics<br>CLI aliases: `--centres` |
 | `mag_subspace` | string | no | `''` | Infer magnetic local slices from .win projections, e.g. 'Mn:d'<br>CLI aliases: `--mag_subspace` |
 | `apply_degeneracy` | boolean | no | .true. | Divide spinor_hr blocks by Wannier90 degeneracy before H(k)<br>CLI aliases: `--apply_degeneracy`, `--no-apply_degeneracy` |
-| `hr_unit` | string | no | `ry` | Compatibility input retained by the backend.<br>CLI aliases: `--hr_unit` |
-| `eph_unit` | string | no | `ry` | Compatibility input retained by the backend.<br>CLI aliases: `--eph_unit` |
-| `efermi` | float | yes | — | Compatibility input retained by the backend.<br>CLI aliases: `--efermi` |
-| `kmesh` | int[3] | yes | — | Compatibility input retained by the backend.<br>CLI aliases: `--kmesh` |
-| `qmesh` | int[3] | no | none / runtime | Compatibility input retained by the backend.<br>CLI aliases: `--qmesh` |
-| `n_shells` | int | no | `10` | Compatibility input retained by the backend.<br>CLI aliases: `--n_shells` |
-| `d_max` | float | no | `20.0` | Compatibility input retained by the backend.<br>CLI aliases: `--d_max` |
-| `mag_atoms` | list[int] | yes | — | Compatibility input retained by the backend.<br>CLI aliases: `--mag_atoms` |
-| `mag_atoms_base` | enum {0, 1} | no | `0` | Compatibility input retained by the backend.<br>CLI aliases: `--mag_atoms_base` |
-| `targets` | list[int] | no | none / runtime | Compatibility input retained by the backend.<br>CLI aliases: `--targets` |
-| `disp_axes` | string | no | `xyz` | Compatibility input retained by the backend.<br>CLI aliases: `--disp_axes` |
-| `tensor_axes` | string | no | `xyz` | Compatibility input retained by the backend.<br>CLI aliases: `--tensor_axes` |
-| `spin_direction` | float[3] | no | `[0.0, 0.0, 1.0]` | Compatibility input retained by the backend.<br>CLI aliases: `--spin_direction` |
+| `hr_unit` | string | no | `ry` | Advanced native-kernel option.<br>CLI aliases: `--hr_unit` |
+| `eph_unit` | string | no | `ry` | Advanced native-kernel option.<br>CLI aliases: `--eph_unit` |
+| `efermi` | float | yes | — | Advanced native-kernel option.<br>CLI aliases: `--efermi` |
+| `kmesh` | int[3] | yes | — | Advanced native-kernel option.<br>CLI aliases: `--kmesh` |
+| `qmesh` | int[3] | no | none / runtime | Advanced native-kernel option.<br>CLI aliases: `--qmesh` |
+| `n_shells` | int | no | `10` | Advanced native-kernel option.<br>CLI aliases: `--n_shells` |
+| `d_max` | float | no | `20.0` | Advanced native-kernel option.<br>CLI aliases: `--d_max` |
+| `mag_atoms` | list[int] | yes | — | Advanced native-kernel option.<br>CLI aliases: `--mag_atoms` |
+| `mag_atoms_base` | enum {0, 1} | no | `0` | Advanced native-kernel option.<br>CLI aliases: `--mag_atoms_base` |
+| `targets` | list[int] | no | none / runtime | Advanced native-kernel option.<br>CLI aliases: `--targets` |
+| `disp_axes` | string | no | `xyz` | Advanced native-kernel option.<br>CLI aliases: `--disp_axes` |
+| `tensor_axes` | string | no | `xyz` | Advanced native-kernel option.<br>CLI aliases: `--tensor_axes` |
+| `spin_direction` | float[3] | no | `[0.0, 0.0, 1.0]` | Advanced native-kernel option.<br>CLI aliases: `--spin_direction` |
 | `soc` | string | no | `''` | Generic model SOC specs inferred from --win, e.g. 'Te:p:0.5;Mn:d:0.05'<br>CLI aliases: `--soc` |
 | `soc_element` | string | no | `''` | Element for compatibility --lambda_te p-SOC mode<br>CLI aliases: `--soc_element` |
 | `lambda_te` | float | no | `0.0` | Compatibility model onsite p-SOC lambda in eV; prefer --soc<br>CLI aliases: `--lambda_te` |
 | `soc_p_groups` | string | no | `''` | Semicolon-separated p orbital groups, e.g. '10,11,12;25,26,27'<br>CLI aliases: `--soc_p_groups` |
 | `soc_groups_base` | enum {0, 1} | no | `0` | Index base for --soc_p_groups<br>CLI aliases: `--soc_groups_base`, `--soc_p_groups_base` |
-| `p_order` | string | no | `pz,px,py` | Compatibility input retained by the backend.<br>CLI aliases: `--p_order` |
-| `d_order` | string | no | `dz2,dxz,dyz,dx2-y2,dxy` | Compatibility input retained by the backend.<br>CLI aliases: `--d_order` |
+| `p_order` | string | no | `pz,px,py` | Advanced native-kernel option.<br>CLI aliases: `--p_order` |
+| `d_order` | string | no | `dz2,dxz,dyz,dx2-y2,dxy` | Advanced native-kernel option.<br>CLI aliases: `--d_order` |
 | `slices` | string | yes | — | Local orbital slices, e.g. '0:0:5,1:5:10'<br>CLI aliases: `--slices` |
-| `emin` | float | no | `-25.0` | Compatibility input retained by the backend.<br>CLI aliases: `--emin` |
-| `empoints` | int | no | `300` | Compatibility input retained by the backend.<br>CLI aliases: `--empoints` |
-| `integrator` | enum {contour, cfr} | no | `contour` | Compatibility input retained by the backend.<br>CLI aliases: `--integrator` |
-| `nproc` | int | no | `1` | Compatibility input retained by the backend.<br>CLI aliases: `--nproc` |
+| `emin` | float | no | `-25.0` | Advanced native-kernel option.<br>CLI aliases: `--emin` |
+| `empoints` | int | no | `300` | Advanced native-kernel option.<br>CLI aliases: `--empoints` |
+| `integrator` | enum {contour, cfr} | no | `contour` | Advanced native-kernel option.<br>CLI aliases: `--integrator` |
+| `nproc` | int | no | `1` | Serial local energy-worker processes; must be 1 per MPI rank<br>CLI aliases: `--nproc` |
 | `numba_threads` | int | no | `1` | Numba threads per process<br>CLI aliases: `--numba_threads` |
 | `blas_threads` | int | no | `1` | BLAS threads per process for matmul/einsum<br>CLI aliases: `--blas_threads` |
 | `progress_every` | int | no | `0` | Print per-worker progress every N energy points; 0 disables<br>CLI aliases: `--progress_every` |
 | `verbose_worker_init` | int | no | `0` | Print one worker-init line per local energy worker<br>CLI aliases: `--verbose_worker_init` |
 | `checkpoint` | int | no | `1` | Write partial HDF5 after each completed target/axis; 0 disables<br>CLI aliases: `--checkpoint` |
 | `onsite_deriv_projector` | boolean | no | .true. | Include onsite derivative of the local spinor exchange field dP_i/du. Convention: P=M.e=Delta/2 in the collinear limit, so dP=dDelta/2.<br>CLI aliases: `--onsite_deriv_exchange_field`, `--no-onsite_deriv_exchange_field`, `--onsite_deriv_projector`, `--no-onsite_deriv_projector` |
-| `out_dir` | string | no | `dJ_epr_tensor_analytic` | Compatibility input retained by the backend.<br>CLI aliases: `--out_dir` |
-| `out_h5` | string | no | `dJ_tensor_analytic.h5` | Compatibility input retained by the backend.<br>CLI aliases: `--out_h5` |
+| `out_dir` | string | no | `dJ_epr_tensor_analytic` | Advanced native-kernel option.<br>CLI aliases: `--out_dir` |
+| `out_h5` | string | no | `dJ_tensor_analytic.h5` | Advanced native-kernel option.<br>CLI aliases: `--out_h5` |
 
 ## `slw_magph.x`
 
@@ -629,12 +636,24 @@ The backend paths shown below are quarantined implementation details. Historical
 `slw.magph.<module>` commands are not preserved or re-exported; use this stage
 executable for all active magph drivers.
 
+> **Current-registry boundary:** `calculation='lifetime'` is the first native
+> magph command. It uses the strict FM/AFM, unit, phase, and `J_iso` screening
+> contract in [MAGPH_DESIGN.md](MAGPH_DESIGN.md), with automatic external-k MPI
+> distribution. The other calculations in this section remain quarantined
+> compatibility backends.
+
+> **Legacy absolute-unit warning:** the compatibility vertex uses an amu
+> zero-point prefactor with qe2pert polarizations normalized by masses in
+> electron-mass atomic units. Absolute compatibility `spectral`, scattering,
+> and archived lifetime magnitudes must not be used as native parity references. See
+> [MAGPH_DESIGN.md](MAGPH_DESIGN.md) for the corrected SI-validated contract.
+
 | `calculation` | Backend source | MPI | Purpose |
 |---|---|---:|---|
 | `hybrid` | default | no | Build and diagonalize the hybrid magnon-phonon Hamiltonian |
 | `berry` | default | no | Compute hybrid-band Berry curvature on a reciprocal-space plane |
 | `spectral` | default | yes | Run the MPI-aware magnon-phonon spectral solver |
-| `lifetime` | default | yes | Compute MPI-distributed magnon lifetimes |
+| `lifetime` | native | yes | Compute native MPI-distributed magnon lifetimes |
 | `scattering_kbz` | default | no | Compute fixed-phonon-q scattering over the magnon Brillouin zone |
 | `scattering_qbz` | default | no | Compute fixed-magnon scattering over the phonon Brillouin zone |
 | `rotational_coupling` | default | no | Analyze rotational and chiral magnon-phonon coupling |
@@ -793,28 +812,53 @@ Backend: `slw.magph.legacy.reference.solver_mpi`; MPI backend:
 
 ### `calculation='lifetime'`
 
-**Runtime requirements:** The frontend requires compatibility `input_file`.
-`manifest` must be given directly or through that file. Execute mode needs
-structure from `POSCAR=`, `structure_file=`, or embedded cards; target mesh,
-S/T/eta, spin, ASR, and vertex controls currently come from that file.
-`mode='execute'` runs the kernel.
+**Runtime requirements:** Static canonical exchange HDF5, scalar exchange
+derivative HDF5, and a schema-v3 phonon cache are required. The exchange and
+derivative bond maps, units, directed mates, real-space/Fourier conventions,
+derivative ASR, phonon mass normalization, and q mesh are screened before any
+LSWT calculation. `J_iso` is admitted only with compatible `dJ_iso/du` and is
+promoted internally to `J_iso I` without granting tensor capabilities. FM
+supports any positive number of magnetic sublattices; the initial AFM route is
+restricted to exactly two collinear opposite sublattices.
 
-**Outputs:** Runtime JSON and lifetime NPZ containing energy, linewidth/rate/lifetime, self-energy, meshes, symmetry, and provenance.
+**MPI:** `execution='auto'` uses every discovered MPI rank and distributes a
+balanced contiguous block of external k points to each rank. q points, phonon
+modes, and channel contractions remain vectorized and chunked within a rank.
+Only rank zero assembles and writes the scientific output. Collective Python
+failures are exchanged before the next gather.
 
-Backend: `slw.magph.legacy.reference.lifetime_mpi_dynamic`; MPI backend:
-`slw.magph.legacy.reference.lifetime_mpi_dynamic`.
+**Outputs:** One atomic, no-clobber-by-default NPZ containing fractional k
+points, physical magnon energies, complex on-shell self-energy, HWHM, FWHM,
+rate in `ps^-1`, lifetime in `ps`, validity flags, and JSON provenance. The
+default path is `${savedir}/${prefix}.lifetime.npz`.
 
-| Namelist key | Type | Parser required | Parser default | Meaning / CLI aliases |
+Backend: `slw.magph.engine:prepare_run`.
+
+| Namelist key | Type | Required | Default | Meaning |
 |---|---|---:|---|---|
-| `workdir` | str | no | none / runtime | Workflow root directory (default: current directory)<br>CLI aliases: `--workdir` |
-| `input_file` | str | no | none / runtime | Legacy-style input file (e.g. input.in)<br>CLI aliases: `--input_file` |
-| `manifest` | str | no | none / runtime | Manifest from `slw_magph.x` with `calculation='prepare_lifetime'`<br>CLI aliases: `--manifest` |
-| `mode` | enum {validate, plan, execute} | no | `plan` | validate: contract check, plan: add memory estimate, execute: run lifetime kernel<br>CLI aliases: `--mode` |
-| `kernel_source` | enum {kernels, kernels_lifetime} | no | none / runtime | Kernel backend selection (default: kernels)<br>CLI aliases: `--kernel_source` |
-| `k_tasks` | int | no | none / runtime | Number of external k tasks for runtime planning<br>CLI aliases: `--k_tasks` |
-| `progress_interval` | int | no | none / runtime | Print execute progress every N k-points (default: input file or 1)<br>CLI aliases: `--progress_interval` |
-| `out_dir` | str | no | none / runtime | Output directory for runtime metadata<br>CLI aliases: `--out_dir` |
-| `out_name` | str | no | `magph_lifetime_runtime.json` | Output metadata filename<br>CLI aliases: `--out_name` |
+| `exchange_h5` | path | yes | — | Canonical static scalar-exchange HDF5 with explicit Hamiltonian/bond provenance. |
+| `derivative_h5` | path | yes | — | Scalar `dJ/du` HDF5 with periodic `Rp`, q mesh, units, phase, and mate provenance. |
+| `phonon_cache` | path | yes | — | Native-compatible schema-v3 phonon cache. |
+| `magnetic_order` | enum {fm, collinear_afm} | yes | — | Explicit magnetic model; it is never inferred from the sign of J. |
+| `spin_magnitudes` | float or float list | yes | — | Positive spin magnitude broadcast from a scalar or supplied per magnetic site. |
+| `spin_pattern` | float list | conditional | FM all +1; AFM +1,-1 | Explicit collinear signs when overriding the canonical pattern. |
+| `quantization_axis` | float[3] | yes | — | Nonzero Cartesian quantization axis. |
+| `kmesh` | int[3] | yes | — | Positive uniform external-k mesh. |
+| `kshift` | float[3] | yes | — | Explicit grid-unit shift; required to avoid hidden Gamma/Goldstone policy. |
+| `temperature_k` | float | yes | — | Non-negative temperature in kelvin. |
+| `broadening_mev` | float | yes | — | Positive retarded broadening in meV. |
+| `frequency_floor_mev` | float | no | none | Explicit positive phonon floor; required if the cache contains exact zero modes. |
+| `asr_policy` | enum {fail, report, project} | no | fail | Derivative acoustic-sum-rule policy. Projection is recorded in provenance. |
+| `metric_energy_tolerance_mev` | float | no | 0 | Explicit signed-BdG energy tolerance. |
+| `negative_tolerance_mev` | float | no | 0 | Roundoff tolerance for slightly negative HWHM only. |
+| `q_chunk_size` | int | no | full q axis | q chunk for `dJ/du` to phonon-mode contraction. |
+| `bond_chunk_size` | int | no | all bonds | Bond chunk for mode coupling. |
+| `vertex_q_chunk_size` | int | no | full q axis | q chunk for band-basis vertex construction. |
+| `self_energy_q_chunk_size` | int | no | full q axis | q chunk for self-energy contraction. |
+| `channel_chunk_size` | int | no | all channels | External-channel chunk for on-shell self-energy. |
+| `require_complete_targets` | boolean | no | .true. | Require `dJ/du` targets for every phonon atom. |
+| `output` | path | no | `${savedir}/${prefix}.lifetime.npz` | Native lifetime NPZ. |
+| `overwrite` | boolean | no | .false. | Allow atomic replacement of an existing output. |
 
 ### `calculation='scattering_kbz'`
 
@@ -1720,8 +1764,8 @@ Backend: `slw.magph.legacy.plot_coupling_kbz`.
 The stage namelist is the new outer interface, but three retained paths still
 consume a second flat `key = value` file:
 
-- `magph/spectral` and `magph/lifetime` require `input_file` in the first
-  migration step.
+- `magph/spectral` still requires `input_file` in the compatibility path;
+  native `magph/lifetime` does not read a nested input file.
 - `magph/prepare_lifetime` and `magph/hybrid` may use the same file as an
   alternative to direct options.
 - `post/magnon_plot` consumes its own `plot.in` file through `config`.

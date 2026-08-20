@@ -5,13 +5,13 @@ engine: numerical helpers, diagnostics, post-processing tools, SOC builders,
 and the old calculation drivers. Nothing here is part of the public
 `slw.exchange` API.
 
-Production exchange calculations enter `slw.exchange.engine`. The six drivers
-temporarily used for numerical parity are isolated under `reference/` and are
-called only through `reference/adapter.py`; their argparse `main()` paths are
-not used by `slw_exchange.x`. Retained `slw_post.x`, EPC, and SOC workflows may
-still import specific legacy helpers until native replacements exist.
+Production exchange calculations enter `slw.exchange.engine` and dispatch only
+to `slw.exchange.kernels`. Wrappers under `reference/` delegate from archived
+tools toward native kernels; the dependency never points from the public
+engine back into this directory. Retained `slw_post.x` diagnostics may still
+enter specific archived modules until native replacements exist.
 
 Historical package-root module paths and compatibility shims are intentionally
-not preserved. Once a kernel has a synthetic regression test and a native
-implementation, its legacy copy can be removed without changing the public
-input format.
+not preserved. The public scalar/tensor J and dJ kernels have generated
+regression fixtures and serial/MPI parity tests, so archive removal will not
+change the public input format.

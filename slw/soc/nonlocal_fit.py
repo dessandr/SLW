@@ -18,16 +18,15 @@ from dataclasses import dataclass
 import numpy as np
 from scipy.optimize import least_squares
 
-from slw.core.constants import BOHR_TO_ANG
 from slw.core.cli_paths import resolve_path, resolve_workdir
+from slw.core.constants import BOHR_TO_ANG
 from slw.core.wannier_io import read_wannier_hr, write_wannier_hr
+from slw.exchange.kernels.spinor import atomic_soc_block_diagonal
 from slw.soc.band_splitting import (
     compute_alignment_shift,
-    infer_seed,
     parse_band_selection,
     read_kpoints,
 )
-from slw.exchange.legacy.spinor_model import atomic_soc_block_diagonal
 
 
 @dataclass(frozen=True)

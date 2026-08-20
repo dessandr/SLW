@@ -14,10 +14,10 @@ from typing import Any
 from .model import (
     ExchangeCalculation,
     ExchangeFiles,
+    ExchangeOptions,
     ExchangeOutput,
     ExchangeRequest,
     ExchangeSource,
-    LegacyOptions,
     OrbitalSlice,
     TensorKernel,
 )
@@ -226,7 +226,7 @@ _DJ_TENSOR_OPTIONS = {
 
 @dataclass(frozen=True)
 class _OptionSpec:
-    """Declarative validation rule for one retained advanced option."""
+    """Declarative validation rule for one advanced numerical option."""
 
     kind: str
     choices: tuple[Any, ...] = ()
@@ -1069,8 +1069,8 @@ def build_exchange_request(
 
     Validation is deliberately structural and does not touch the filesystem,
     so this function is also suitable for ``--dry-run`` and MPI rank-0 input
-    handling. Backend-specific tuning values are accepted only from an
-    explicit compatibility allowlist and are kept in ``legacy_options``.
+    handling. Kernel-specific tuning values are accepted only from an
+    explicit per-mode allowlist and are kept in ``options``.
     """
 
     values = _normalized_parameters(parameters)
@@ -1125,7 +1125,7 @@ def build_exchange_request(
         ltensor=ltensor,
         source=source,
     )
-    legacy = dict(values)
+    options = dict(values)
 
     return ExchangeRequest(
         calculation=mode,
@@ -1139,7 +1139,7 @@ def build_exchange_request(
         slices=slices,
         files=files,
         output=output,
-        legacy_options=LegacyOptions.from_mapping(legacy),
+        options=ExchangeOptions.from_mapping(options),
     )
 
 

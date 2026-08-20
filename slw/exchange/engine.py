@@ -23,8 +23,8 @@ from slw.cli.native import NativeExecutionPlan
 from slw.cli.schema import RunConfig
 
 from .config import ExchangeInputError, build_exchange_request
-from .legacy.reference.adapter import ReferenceArtifacts
-from .legacy.reference.adapter import execute as execute_reference
+from .kernels.dispatch import KernelArtifacts
+from .kernels.dispatch import execute as execute_kernel
 from .model import ExchangeCalculation, ExchangeRequest
 
 _IMPORTANT_BACKEND_MESSAGES = (
@@ -55,7 +55,7 @@ class ExchangeRunResult:
 
 
 class _BackendOutput(io.TextIOBase):
-    """Turn retained kernel prints into stable rank-aware log lines."""
+    """Turn native-kernel prints into stable rank-aware log lines."""
 
     def __init__(self, logger: RunLogger) -> None:
         super().__init__()
@@ -101,7 +101,8 @@ def _mode_label(request: ExchangeRequest) -> str:
 
 
 def _mpi_capable(request: ExchangeRequest) -> bool:
-    return request.calculation is ExchangeCalculation.DJ and request.ltensor
+    del request
+    return True
 
 
 def _parallel_policy(
@@ -115,11 +116,6 @@ def _parallel_policy(
         if context.comm is None:
             raise ExchangeInputError(
                 "execution='mpi' requires mpi4py, even for a one-rank run"
-            )
-        if not capable:
-            raise ExchangeInputError(
-                "MPI exchange execution is currently available only for "
-                "calculation='dj', ltensor=.true."
             )
         return True, None
 
@@ -144,15 +140,15 @@ def _validate_runtime(request: ExchangeRequest, *, all_ranks: bool) -> None:
     ):
         raise ExchangeInputError("tensor dJ currently supports tensor_kernel='tb2j' only")
     if all_ranks:
-        nproc = int(request.legacy_options.as_dict().get("nproc", 1))
+        nproc = int(request.options.as_dict().get("nproc", 1))
         if nproc != 1:
             raise ExchangeInputError(
-                "MPI tensor dJ requires nproc=1 per rank to avoid nested process "
+                "MPI exchange requires nproc=1 per rank to avoid nested process "
                 "oversubscription; use numba_threads/blas_threads for rank-local work"
             )
 
 
-def _check_artifacts(artifacts: ReferenceArtifacts) -> None:
+def _check_artifacts(artifacts: KernelArtifacts) -> None:
     missing = [path for path in artifacts.paths if not Path(path).is_file()]
     if missing:
         rendered = ", ".join(missing)
@@ -175,7 +171,7 @@ def _execute(
         timers=timers,
     )
     output = _BackendOutput(logger)
-    artifacts: ReferenceArtifacts
+    artifacts: KernelArtifacts
 
     with timers.phase("total"):
         logger.info("Exchange calculation")
@@ -186,17 +182,14 @@ def _execute(
         )
         if request.ltensor:
             logger.info(f"tensor kernel = {request.tensor_kernel.value}")
-        logger.high(
-            "numerical parity path = quarantined reference kernel; "
-            "native setup and dispatch are active"
-        )
+        logger.high("numerical backend = native exchange kernels")
         with logger.phase(
             "exchange_kernel",
             label=f"Running {_mode_label(request)} kernel",
         ):
             try:
                 with contextlib.redirect_stdout(cast(TextIO, output)):
-                    artifacts = execute_reference(
+                    artifacts = execute_kernel(
                         request,
                         mpi=all_ranks,
                         comm=context.comm if all_ranks else None,
@@ -254,10 +247,10 @@ def run_exchange(
 ) -> ExchangeRunResult:
     """Run a validated request without entering any command-line parser.
 
-    Under MPI this function is collective for every exchange mode. Tensor dJ
-    runs on all selected ranks; serial-only modes calculate on rank zero and
-    broadcast the result or failure to the other ranks. Pass an explicit
-    size-one ``MPIContext`` to opt out of launch discovery.
+    Under MPI this function is collective for every exchange mode. Static J
+    and scalar dJ distribute energy points, while tensor dJ distributes
+    target-axis tasks. Pass an explicit size-one ``MPIContext`` to opt out of
+    launch discovery.
     """
 
     mpi = context if context is not None else MPIContext.discover()
