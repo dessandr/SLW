@@ -8,7 +8,11 @@
 /
 
 &parallel
-  execution = 'auto'
+  execution = 'auto',
+  workers_per_rank = 1,
+  threads_per_worker = 1,
+  numba_threads = 1,
+  blas_threads = 1
 /
 
 &exchange
@@ -34,8 +38,5 @@
   integrator = 'contour',
   ! Small smoke-test value; increase and converge for production.
   empoints = 32,
-  nproc = 1,
-  numba_threads = 1,
-  blas_threads = 1,
   checkpoint = 1
 /

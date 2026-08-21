@@ -5,6 +5,13 @@
   verbosity = 'high'
 /
 
+&parallel
+  execution = 'auto',
+  ! Compatibility hybrid maps this to both phonon and LSWT local pools.
+  workers_per_rank = 8,
+  threads_per_worker = 1
+/
+
 &magph
   j_tensor_h5 = '${savedir}/sample.j_tensor.h5',
   dj_tensor_h5 = '${savedir}/sample.dj_tensor.h5',
@@ -16,6 +23,5 @@
   kmesh = 4, 4, 4,
   qpath = 'G 0 0 0 X 0.5 0 0',
   path_points = 101,
-  hybrid_nproc = 8,
   show = .false.
 /

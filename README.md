@@ -99,12 +99,17 @@ only to `slw.exchange.kernels`; archived wrappers are not entered by
 All four exchange modes participate in MPI when `execution='auto'` discovers
 more than one rank. Scalar/tensor J and scalar dJ split the energy integration;
 tensor dJ splits target/displacement-axis tasks. Rank 0 alone writes the final
-products. Use `nproc=1` per MPI rank; serial runs may raise `nproc` for local
-multiprocessing. Scalar dJ additionally supports hybrid MPI with `nproc>1`:
+products. Use `workers_per_rank=1` in `&parallel` per MPI rank; serial runs may
+raise it for local multiprocessing. Scalar dJ additionally supports hybrid MPI
+with `workers_per_rank>1`:
 each rank creates one POSIX shared-memory EPC cache and clean local worker
 processes attach to it. For a multi-node run, using one rank per node avoids
-replicating that cache within a node; bind at least `nproc*omp_threads` cores
-to each rank. Other exchange modes still require `nproc=1` under MPI.
+replicating that cache within a node; bind at least
+`workers_per_rank*threads_per_worker` cores to each rank. Other exchange modes
+still require `workers_per_rank=1` under MPI. The same canonical `&parallel`
+names control native magph lifetime and are translated at retained magph
+backend boundaries; backend-specific `nproc` and chunk spellings are not part
+of the public namelist.
 
 Historical magph modules are likewise quarantined under `slw.magph.legacy`.
 The retained compatibility drivers live in `slw.magph.legacy.reference`;

@@ -47,7 +47,7 @@ Common naming used in those retained rows:
 | `kmesh`, `qmesh`, `mesh`, `kpoints` | Reciprocal-space sampling; integer arrays are mesh dimensions and float arrays are fractional coordinates unless stated otherwise. |
 | `*_unit`, `*_mev`, `*_ang` | Unit selection, energy in meV, or length/tolerance in angstrom. |
 | `*_tol`, `*_tolerance`, `symprec`, `threshold` | Numerical or symmetry acceptance threshold. |
-| `nproc`, `workers`, `*_chunk`, `blocks` | Local process/thread parallelism or vectorized work partitioning. |
+| `workers`, `*_chunk`, `blocks` | Retained backend spelling for local parallelism or vectorized work partitioning. Public QE-style inputs use the canonical `&parallel` keys below. |
 | `s`, `spin_s`, `temperature_k`, `eta_mev` | Spin magnitude, temperature in kelvin, and broadening in meV. |
 | `dj_asr`, `*_asr_*` | Exchange-derivative acoustic-sum-rule mode or tolerance. |
 | `cmap`, `vmin`, `vmax`, `dpi`, `fig_*`, `panel_*` | Plot color and layout controls. |
@@ -70,6 +70,22 @@ Common naming used in those retained rows:
 | Key | Type | Required | Default | Meaning |
 |---|---|---:|---|---|
 | `execution` | enum `{auto, serial, mpi}` | no | `'auto'` | `auto` selects a registered MPI backend only in a multi-rank world; serial backends run on rank 0 only. `mpi` rejects calculations without MPI support. |
+| `workers_per_rank` | int | no | `1` | Local process workers created by each MPI rank. Native magph lifetime currently requires one; compatibility hybrid and phonon preparation translate this to their local pools. |
+| `threads_per_worker` | int | no | `1` | Rank/worker compute threads. This sets the OpenMP limit and is the default for BLAS and Numba unless a safer algorithm-specific limit or an explicit override applies. |
+| `precache_workers` | int | no | `workers_per_rank` | Scalar-exchange-derivative cache construction threads. Other calculations reject it. |
+| `blas_threads` | int | no | algorithm-specific | Explicit BLAS threads per rank/worker. Nested Numba exchange and magph kernels default to one to prevent oversubscription. |
+| `numba_threads` | int | no | `threads_per_worker` | Explicit Numba threads per rank. Only calculations with a Numba-parallel kernel consume it directly. |
+| `q_chunk_size` | int | no | full local q range | q block for mode-coupling or retained rotational kernels. |
+| `bond_chunk_size` | int | no | all bonds | Bond block for mode-coupling, scattering, or retained rotational kernels. |
+| `vertex_q_chunk_size` | int | no | full local q range | q block for band-basis vertex assembly or retained q-BZ scattering. |
+| `self_energy_q_chunk_size` | int | no | full local q range | q block accumulated into native self-energy. |
+| `channel_chunk_size` | int | no | all external channels | External-channel block for native on-shell self-energy. |
+
+All integer resource and chunk values must be positive. Historical spellings
+such as `nproc`, `omp_threads`, `phonon_nproc`, `hybrid_nproc`, `num_threads`,
+`q_chunk`, and `vertex_q_chunk` are rejected in public namelists with the
+canonical replacement. Physical integration controls such as `integrator`,
+`empoints`, and `g_kernel` remain in the stage group.
 
 ### Path placeholders
 
@@ -237,13 +253,16 @@ override those paths.
 With `execution='auto'`, a launch containing more than one rank uses MPI for
 every mode. Scalar/tensor J and scalar dJ partition the contour or pole energy
 mesh; tensor dJ partitions target/displacement-axis tasks. Rank 0 writes the
-final HDF5/text products after the collective reduction. Set `nproc=1` under
-MPI for every mode except scalar dJ. Scalar dJ supports a hybrid route where
+final HDF5/text products after the collective reduction. Set
+`workers_per_rank=1` under MPI for every mode except scalar dJ. Scalar dJ
+supports a hybrid route where
 each rank builds one EPC cache, publishes its arrays in POSIX shared memory,
-and runs `nproc` clean local worker processes. The launcher affinity assigned
-to each rank must contain at least `nproc*omp_threads` CPUs, and the node-local
+and runs `workers_per_rank` clean local worker processes. The launcher affinity
+assigned to each rank must contain at least
+`workers_per_rank*threads_per_worker` CPUs, and the node-local
 POSIX shared-memory filesystem must be large enough for that rank's cache. In
-a serial launch, `nproc>1` uses the copy-on-write local multiprocessing path.
+a serial launch, `workers_per_rank>1` uses the copy-on-write local
+multiprocessing path.
 
 | Native namelist key | Type | Required | Default | Meaning |
 |---|---|---:|---|---|
@@ -349,7 +368,6 @@ Native engine: `slw.exchange.engine`; numerical kernel:
 | `empoints` | int | no | `500` | Advanced native-kernel option.<br>CLI aliases: `--empoints` |
 | `integrator` | enum {contour, cfr, cfr_ozaki} | no | `contour` | Advanced native-kernel option.<br>CLI aliases: `--integrator` |
 | `cfr_beta` | float | no | `400.0` | Advanced native-kernel option.<br>CLI aliases: `--cfr_beta` |
-| `nproc` | int | no | `1` | Serial local energy-worker processes; must be 1 per MPI rank<br>CLI aliases: `--nproc` |
 | `symprec` | float | no | `0.0001` | spglib symmetry tolerance for orbit grouping.<br>CLI aliases: `--symprec` |
 | `angle_tolerance` | float | no | `-1.0` | spglib angle tolerance in degrees; -1 uses spglib default.<br>CLI aliases: `--angle_tolerance` |
 | `orbit_grouping` | enum {spglib, shell} | no | `spglib` | Orbit grouping mode. shell groups all bonds with the same shell index and distance.<br>CLI aliases: `--orbit_grouping` |
@@ -398,7 +416,6 @@ Frontend-fixed values: `kernel='scalar'`. Supplying a conflicting value is an er
 | `emin` | float | no | `-25.0` | Advanced native-kernel option.<br>CLI aliases: `--emin` |
 | `empoints` | int | no | `500` | Advanced native-kernel option.<br>CLI aliases: `--empoints` |
 | `cfr_beta` | float | no | `1000.0` | Advanced native-kernel option.<br>CLI aliases: `--cfr_beta` |
-| `nproc` | int | no | `1` | Serial local energy-worker processes; must be 1 per MPI rank<br>CLI aliases: `--nproc` |
 | `collinear_override` | boolean | no | .false. | Override J_zz with (J_xx+J_yy)/2 in collinear calculations<br>CLI aliases: `--collinear_override` |
 | `spin_magnitude` | float | no | `1.0` | Spin magnitude S to scale J by 1/S^2<br>CLI aliases: `--spin_magnitude` |
 | `out_dir` | string | no | `J_wannier_tensor` | Advanced native-kernel option.<br>CLI aliases: `--out_dir` |
@@ -459,7 +476,6 @@ Native engine: `slw.exchange.engine`; numerical kernel:
 | `emin` | float | no | `-25.0` | Advanced native-kernel option.<br>CLI aliases: `--emin` |
 | `empoints` | int | no | `500` | Advanced native-kernel option.<br>CLI aliases: `--empoints` |
 | `cfr_beta` | float | no | `1000.0` | Advanced native-kernel option.<br>CLI aliases: `--cfr_beta` |
-| `nproc` | int | no | `1` | Serial local energy-worker processes; must be 1 per MPI rank<br>CLI aliases: `--nproc` |
 | `collinear_override` | boolean | no | .false. | Override J_zz with (J_xx+J_yy)/2 in collinear calculations<br>CLI aliases: `--collinear_override` |
 | `spin_magnitude` | float | no | `1.0` | Spin magnitude S to scale J by 1/S^2<br>CLI aliases: `--spin_magnitude` |
 | `out_dir` | string | no | `J_epr_tensor` | Advanced native-kernel option.<br>CLI aliases: `--out_dir` |
@@ -501,7 +517,6 @@ Native engine: `slw.exchange.engine`; numerical kernel:
 | `emin` | float | no | `-25.0` | Advanced native-kernel option.<br>CLI aliases: `--emin` |
 | `empoints` | int | no | `500` | Advanced native-kernel option.<br>CLI aliases: `--empoints` |
 | `cfr_beta` | float | no | `1000.0` | Advanced native-kernel option.<br>CLI aliases: `--cfr_beta` |
-| `nproc` | int | no | `1` | Serial local energy-worker processes; must be 1 per MPI rank<br>CLI aliases: `--nproc` |
 | `collinear_override` | boolean | no | .false. | Override J_zz with (J_xx+J_yy)/2 in collinear calculations<br>CLI aliases: `--collinear_override` |
 | `spin_magnitude` | float | no | `1.0` | Spin magnitude S to scale J by 1/S^2<br>CLI aliases: `--spin_magnitude` |
 | `out_dir` | string | no | `J_wannier_tensor` | Advanced native-kernel option.<br>CLI aliases: `--out_dir` |
@@ -556,9 +571,6 @@ Native engine: `slw.exchange.engine`; numerical kernel:
 | `empoints` | int | no | `100` | Advanced native-kernel option.<br>CLI aliases: `--empoints` |
 | `integrator` | enum {contour, cfr, cfr_ozaki} | no | `contour` | Advanced native-kernel option.<br>CLI aliases: `--integrator` |
 | `cfr_beta` | float | no | `400.0` | Advanced native-kernel option.<br>CLI aliases: `--cfr_beta` |
-| `nproc` | int | no | `1` | Local energy-worker processes per rank. Under MPI, scalar dJ publishes its cache once per rank through POSIX shared memory; one rank per node minimizes cache replication.<br>CLI aliases: `--nproc` |
-| `omp_threads` | int | no | `1` | BLAS/OpenMP threads per local energy worker. `nproc*omp_threads` must not exceed the CPU affinity assigned to one rank.<br>CLI aliases: `--omp_threads` |
-| `precache_workers` | int | no | `1` | Threads used before integration for independent g(k,q) cache entries. `precache_workers*omp_threads` must fit the rank affinity.<br>CLI aliases: `--precache_workers` |
 | `rotation_mode` | enum {none} | no | `none` | Advanced native-kernel option.<br>CLI aliases: `--rotation_mode` |
 | `ddelta_mode` | enum {off, local, onsite} | no | `off` | Include derivative of local exchange splitting Delta. off: legacy dG-only; local: use full local block of g_up-g_dn; onsite: use only electron Re=(0,0,0) onsite derivative.<br>CLI aliases: `--ddelta_mode` |
 | `symprec` | float | no | `0.0001` | spglib symmetry tolerance for orbit grouping.<br>CLI aliases: `--symprec` |
@@ -591,8 +603,8 @@ same final schema under MPI.
 
 Native engine: `slw.exchange.engine`; serial and MPI numerical kernels:
 `slw.exchange.kernels.dj_tensor_epr` and
-`slw.exchange.kernels.dj_tensor_mpi`. Under MPI, `nproc` must be one per rank;
-use `numba_threads` and `blas_threads` for rank-local work.
+`slw.exchange.kernels.dj_tensor_mpi`. Under MPI, `workers_per_rank` must be
+one; use `numba_threads` and `blas_threads` in `&parallel` for rank-local work.
 
 | Namelist key | Type | Parser required | Parser default | Meaning / CLI aliases |
 |---|---|---:|---|---|
@@ -621,9 +633,6 @@ use `numba_threads` and `blas_threads` for rank-local work.
 | `emin` | float | no | `-25.0` | Advanced native-kernel option.<br>CLI aliases: `--emin` |
 | `empoints` | int | no | `300` | Advanced native-kernel option.<br>CLI aliases: `--empoints` |
 | `integrator` | enum {contour, cfr} | no | `contour` | Advanced native-kernel option.<br>CLI aliases: `--integrator` |
-| `nproc` | int | no | `1` | Serial local energy-worker processes; must be 1 per MPI rank<br>CLI aliases: `--nproc` |
-| `numba_threads` | int | no | `1` | Numba threads per process<br>CLI aliases: `--numba_threads` |
-| `blas_threads` | int | no | `1` | BLAS threads per process for matmul/einsum<br>CLI aliases: `--blas_threads` |
 | `progress_every` | int | no | `0` | Print per-worker progress every N energy points; 0 disables<br>CLI aliases: `--progress_every` |
 | `verbose_worker_init` | int | no | `0` | Print one worker-init line per local energy worker<br>CLI aliases: `--verbose_worker_init` |
 | `checkpoint` | int | no | `1` | Write partial HDF5 after each completed target/axis; 0 disables<br>CLI aliases: `--checkpoint` |
@@ -649,6 +658,14 @@ executable for all active magph drivers.
 > electron-mass atomic units. Absolute compatibility `spectral`, scattering,
 > and archived lifetime magnitudes must not be used as native parity references. See
 > [MAGPH_DESIGN.md](MAGPH_DESIGN.md) for the corrected SI-validated contract.
+
+The outer QE-style interface uses only the common `&parallel` names. At the
+quarantine boundary, `workers_per_rank` maps to the hybrid/phonon local pools,
+`numba_threads` maps to scattering and rotational kernels, and the canonical
+q/bond chunk fields map to the corresponding retained driver arguments.
+Unsupported resource requests fail instead of being silently ignored. In
+particular, native lifetime distributes external k points with MPI and requires
+`workers_per_rank=1`; use threads and chunking for its rank-local work.
 
 | `calculation` | Backend source | MPI | Purpose |
 |---|---|---:|---|
@@ -689,8 +706,6 @@ Backend: `slw.magph.legacy.reference.hybrid`.
 | `phonon_cache_out` | string | no | none / runtime | Write qpath/qmesh phonon cache built from --epr_phonon<br>CLI aliases: `--phonon_cache_out` |
 | `phonon_cache_compressed` | boolean | no | none / runtime | Compress --phonon_cache_out; use --no-phonon_cache_compressed for faster writes<br>CLI aliases: `--phonon_cache_compressed`, `--no-phonon_cache_compressed` |
 | `phonon_qmesh` | int[3] | no | none / runtime | Compatibility input retained by the backend.<br>CLI aliases: `--phonon_qmesh` |
-| `phonon_nproc` | int | no | none / runtime | Worker processes when building phonon cache from --epr_phonon<br>CLI aliases: `--phonon_nproc` |
-| `hybrid_nproc` | int | no | none / runtime | Worker processes for bare magnon LSWT along the hybrid path<br>CLI aliases: `--hybrid_nproc` |
 | `j_tensor_h5` | string | no | none / runtime | static exchange tensor HDF5 from compute_J_epr_tensor<br>CLI aliases: `--J_tensor_h5`, `--j_tensor_h5` |
 | `structure` | string | no | none / runtime | POSCAR/QE input with structure; optional if J tensor HDF5 stores lattice/tau<br>CLI aliases: `--structure` |
 | `component` | enum {dmi, iso, aniso, full} | no | none / runtime | Compatibility input retained by the backend.<br>CLI aliases: `--component` |
@@ -861,14 +876,16 @@ Backend: `slw.magph.engine:prepare_run`.
 | `asr_policy` | enum {fail, report, project} | no | fail | Derivative acoustic-sum-rule policy. Projection is recorded in provenance. |
 | `metric_energy_tolerance_mev` | float | no | 0 | Explicit signed-BdG energy tolerance. |
 | `negative_tolerance_mev` | float | no | 0 | Roundoff tolerance for slightly negative HWHM only. |
-| `q_chunk_size` | int | no | rank-local q axis | q chunk inside each rank's distributed `dJ/du` to phonon-mode contraction. |
-| `bond_chunk_size` | int | no | all bonds | Bond chunk for mode coupling. |
-| `vertex_q_chunk_size` | int | no | full q axis | Upper bound for the streamed band-basis vertex q block. |
-| `self_energy_q_chunk_size` | int | no | full q axis | Upper bound for the streamed self-energy q block; the smaller of this and `vertex_q_chunk_size` is used. |
-| `channel_chunk_size` | int | no | all channels | External-channel chunk for on-shell self-energy. |
 | `require_complete_targets` | boolean | no | .true. | Require `dJ/du` targets for every phonon atom. |
 | `output` | path | no | `${savedir}/${prefix}.lifetime.npz` | Native lifetime NPZ. |
 | `overwrite` | boolean | no | .false. | Allow atomic replacement of an existing output. |
+
+Native lifetime resource controls are all in `&parallel`. It requires
+`workers_per_rank=1`, distributes external k points over MPI ranks, and uses
+`threads_per_worker` plus the q/bond/vertex/self-energy/channel chunk fields
+listed in the common table above for rank-local vectorized work. Its native
+kernels are NumPy-vectorized, so an explicit `numba_threads` is rejected;
+`blas_threads` controls their dense linear algebra.
 
 ### `calculation='scattering_kbz'`
 
@@ -902,8 +919,6 @@ Backend: `slw.magph.legacy.reference.plot_scattering_kbz`.
 | `phonon_floor_mev` | float | no | `0.001` | Compatibility input retained by the backend.<br>CLI aliases: `--phonon-floor-mev` |
 | `dj_asr` | enum {none, check, project} | no | `check` | Compatibility input retained by the backend.<br>CLI aliases: `--dJ-asr` |
 | `dj_asr_tolerance` | float | no | `1e-08` | Compatibility input retained by the backend.<br>CLI aliases: `--dJ-asr-tolerance` |
-| `vertex_bond_chunk` | int | no | `64` | Compatibility input retained by the backend.<br>CLI aliases: `--vertex-bond-chunk` |
-| `nproc` | int | no | none / runtime | Number of Numba threads; default uses Numba's configured maximum<br>CLI aliases: `--nproc` |
 | `initial_mode` | list[int] | no | none / runtime | Initial magnon modes to plot; default plots all<br>CLI aliases: `--initial-mode` |
 | `mode_base` | enum {0, 1} | no | `1` | Compatibility input retained by the backend.<br>CLI aliases: `--mode-base` |
 | `data_output` | string | no | none / runtime | Output NPZ; default is OUTPUT with suffix .npz<br>CLI aliases: `--data-output` |
@@ -957,9 +972,6 @@ Backend: `slw.magph.legacy.reference.plot_scattering_qbz`.
 | `phonon_floor_mev` | float | no | `0.001` | Compatibility input retained by the backend.<br>CLI aliases: `--phonon-floor-mev` |
 | `dj_asr` | enum {none, check, project} | no | `check` | Compatibility input retained by the backend.<br>CLI aliases: `--dJ-asr` |
 | `dj_asr_tolerance` | float | no | `1e-08` | Compatibility input retained by the backend.<br>CLI aliases: `--dJ-asr-tolerance` |
-| `vertex_q_chunk` | int | no | `32` | Compatibility input retained by the backend.<br>CLI aliases: `--vertex-q-chunk` |
-| `vertex_bond_chunk` | int | no | `64` | Compatibility input retained by the backend.<br>CLI aliases: `--vertex-bond-chunk` |
-| `nproc` | int | no | none / runtime | Number of Numba threads<br>CLI aliases: `--nproc` |
 | `initial_mode` | list[int] | no | none / runtime | Initial magnon modes to plot; default plots all<br>CLI aliases: `--initial-mode` |
 | `mode_base` | enum {0, 1} | no | `1` | Compatibility input retained by the backend.<br>CLI aliases: `--mode-base` |
 | `data_output` | string | no | none / runtime | Output NPZ; default is OUTPUT with suffix .npz<br>CLI aliases: `--data-output` |
@@ -1032,9 +1044,6 @@ Backend: `slw.magph.legacy.reference.analyze_rotational_coupling`.
 | `metric_energy_tol_mev` | float | no | `1e-08` | Compatibility input retained by the backend.<br>CLI aliases: `--metric-energy-tol-mev` |
 | `goldstone_node_policy` | enum {fail, omit} | no | `fail` | Fail on a defective/near-exact internal Goldstone quadrature node, or explicitly omit it while preserving the original q normalization<br>CLI aliases: `--goldstone-node-policy` |
 | `goldstone_energy_tol_mev` | float | no | `1e-08` | Metric-positive magnon-energy threshold for Goldstone-node detection<br>CLI aliases: `--goldstone-energy-tol-mev` |
-| `q_chunk` | int | no | `256` | Compatibility input retained by the backend.<br>CLI aliases: `--q-chunk` |
-| `bond_chunk` | int | no | `64` | Compatibility input retained by the backend.<br>CLI aliases: `--bond-chunk` |
-| `num_threads` | int | no | none / runtime | Numba worker threads; defaults to the environment setting<br>CLI aliases: `--num-threads` |
 | `output` | string | yes | — | Output NPZ path<br>CLI aliases: `--output` |
 | `summary_json` | string | no | none / runtime | Compatibility input retained by the backend.<br>CLI aliases: `--summary-json` |
 | `save_vertices` | boolean | no | .false. | Explicitly store potentially huge component Lambda and g arrays<br>CLI aliases: `--save-vertices` |
@@ -1055,7 +1064,8 @@ Backend: `slw.magph.legacy.reference.analyze_rotational_coupling`.
 
 **Runtime requirements:** Requires the rotational inputs plus two-component
 plane `kmesh`, fixed `kz`, and `output`. With more than one rank,
-`num_threads` must be explicit, `save_vertices` is forbidden, and only
+`numba_threads` is supplied from `&parallel` (defaulting to
+`threads_per_worker`), `save_vertices` is forbidden, and only
 `goldstone_node_policy='fail'` is accepted. Output, summary, and work
 directories must be distinct. The calculation is restartable.
 
@@ -1099,9 +1109,6 @@ Backend: `slw.magph.legacy.reference.run_chirality_plane_mpi`; MPI backend:
 | `metric_energy_tol_mev` | float | no | `1e-08` | Compatibility input retained by the backend.<br>CLI aliases: `--metric-energy-tol-mev` |
 | `goldstone_node_policy` | enum {fail, omit} | no | `fail` | Fail on a defective/near-exact internal Goldstone quadrature node, or explicitly omit it while preserving the original q normalization<br>CLI aliases: `--goldstone-node-policy` |
 | `goldstone_energy_tol_mev` | float | no | `1e-08` | Metric-positive magnon-energy threshold for Goldstone-node detection<br>CLI aliases: `--goldstone-energy-tol-mev` |
-| `q_chunk` | int | no | `256` | Compatibility input retained by the backend.<br>CLI aliases: `--q-chunk` |
-| `bond_chunk` | int | no | `64` | Compatibility input retained by the backend.<br>CLI aliases: `--bond-chunk` |
-| `num_threads` | int | no | none / runtime | Numba worker threads; defaults to the environment setting<br>CLI aliases: `--num-threads` |
 | `save_vertices` | boolean | no | .false. | Explicitly store potentially huge component Lambda and g arrays<br>CLI aliases: `--save-vertices` |
 | `allow_active_static_soc_diagnostic` | boolean | no | .false. | Allow a scalar-trace diagnostic with SOC metadata in static J; the output is marked invalid for exact SOC-off symmetry claims<br>CLI aliases: `--allow-active-static-soc-diagnostic` |
 | `allow_unsafe_tensor_trace` | boolean | no | .false. | Allow diagnostic trace(dJ_tensor_r)/3 when no scalar dJ dataset exists<br>CLI aliases: `--allow-unsafe-tensor-trace` |
@@ -1122,7 +1129,6 @@ Backend: `slw.magph.legacy.reference.run_chirality_plane_mpi`; MPI backend:
 | `summary_json` | string | no | none / runtime | Merged JSON report (default: output suffix changed to .json)<br>CLI aliases: `--summary-json` |
 | `work_dir` | string | no | none / runtime | Checkpoint directory (default: OUTPUT stem plus .parts)<br>CLI aliases: `--work-dir` |
 | `resume` | boolean | no | .true. | Reuse matching complete shards (default: true)<br>CLI aliases: `--resume`, `--no-resume` |
-| `blas_threads` | int | no | `1` | BLAS threads per MPI rank; keep at one with Numba q threads<br>CLI aliases: `--blas-threads` |
 | `dry_run` | boolean | no | .false. | Validate inputs/configuration and print the MPI/block layout only<br>CLI aliases: `--dry-run` |
 | `reference_seconds_per_k` | float | no | none / runtime | Optional measured seconds/k used only for a wall-time estimate<br>CLI aliases: `--reference-seconds-per-k` |
 
@@ -1157,7 +1163,6 @@ Backend: `slw.magph.legacy.reference.prepare_lifetime`.
 | `calculation_mode` | enum {cache, reuse, from_scratch, recompute} | no | none / runtime | Compatibility input retained by the backend.<br>CLI aliases: `--calculation_mode` |
 | `phonon_qmesh` | int[3] | no | none / runtime | q mesh for --epr_phonon; default EPR basic_data/qc_dim<br>CLI aliases: `--phonon_qmesh` |
 | `phonon_qshift` | parsed string[3] | no | none / runtime | Uniform q-mesh shift in grid-index units for --epr_phonon; components are canonicalized modulo integers (default: 0 0 0)<br>CLI aliases: `--phonon_qshift` |
-| `phonon_nproc` | int | no | none / runtime | Worker processes for phonon q-point diagonalization<br>CLI aliases: `--phonon_nproc` |
 | `phonon_cache_compressed` | boolean | no | none / runtime | Write phonon cache with np.savez_compressed; use --no-phonon_cache_compressed for faster writes<br>CLI aliases: `--phonon_cache_compressed`, `--no-phonon_cache_compressed` |
 | `rp_idx` | int[3] | no | `[0, 0, 0]` | Rp index for the FM/legacy compatibility tuple; AFM atomic-gauge vertices use every Rp<br>CLI aliases: `--rp_idx` |
 
@@ -1782,6 +1787,11 @@ consume a second flat `key = value` file:
 
 The magph compatibility parser accepts `#` comments and the following principal
 keys. Values in this nested file are not Fortran namelist syntax.
+
+The old resource names listed here are valid only inside that explicitly
+supplied nested compatibility file. New outer stage inputs must put resources
+in `&parallel`; command-line values translated from the outer group override
+the corresponding retained-driver defaults.
 
 | Area | Compatibility keys |
 |---|---|

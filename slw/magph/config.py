@@ -18,9 +18,7 @@ class MagphInputError(ValueError):
 
 _LIFETIME_KEYS = {
     "asr_policy",
-    "bond_chunk_size",
     "broadening_mev",
-    "channel_chunk_size",
     "derivative_h5",
     "exchange_h5",
     "frequency_floor_mev",
@@ -33,14 +31,11 @@ _LIFETIME_KEYS = {
     "output",
     "overwrite",
     "phonon_cache",
-    "q_chunk_size",
     "quantization_axis",
     "require_complete_targets",
-    "self_energy_q_chunk_size",
     "spin_magnitudes",
     "spin_pattern",
     "temperature_k",
-    "vertex_q_chunk_size",
 }
 
 
@@ -103,15 +98,6 @@ def _finite_scalar(
     return result
 
 
-def _optional_positive_integer(value: Any, *, name: str) -> int | None:
-    if value is None:
-        return None
-    raw = _finite_scalar(value, name=name, positive=True)
-    if not raw.is_integer():
-        raise MagphInputError(f"{name} must be a positive integer")
-    return int(raw)
-
-
 def _boolean(value: Any, *, name: str) -> bool:
     if isinstance(value, bool):
         return value
@@ -149,11 +135,6 @@ class MagphLifetimeRequest:
     asr_policy: DerivativeASRPolicy
     metric_energy_tolerance_mev: float
     negative_tolerance_mev: float
-    q_chunk_size: int | None
-    bond_chunk_size: int | None
-    vertex_q_chunk_size: int | None
-    self_energy_q_chunk_size: int | None
-    channel_chunk_size: int | None
     require_complete_targets: bool
     overwrite: bool
 
@@ -270,22 +251,6 @@ def build_lifetime_request(
             values.get("negative_tolerance_mev", 0.0),
             name="negative_tolerance_mev",
             nonnegative=True,
-        ),
-        q_chunk_size=_optional_positive_integer(
-            values.get("q_chunk_size"), name="q_chunk_size"
-        ),
-        bond_chunk_size=_optional_positive_integer(
-            values.get("bond_chunk_size"), name="bond_chunk_size"
-        ),
-        vertex_q_chunk_size=_optional_positive_integer(
-            values.get("vertex_q_chunk_size"), name="vertex_q_chunk_size"
-        ),
-        self_energy_q_chunk_size=_optional_positive_integer(
-            values.get("self_energy_q_chunk_size"),
-            name="self_energy_q_chunk_size",
-        ),
-        channel_chunk_size=_optional_positive_integer(
-            values.get("channel_chunk_size"), name="channel_chunk_size"
         ),
         require_complete_targets=_boolean(
             values.get("require_complete_targets", True),

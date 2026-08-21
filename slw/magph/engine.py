@@ -14,7 +14,7 @@ import numpy as np
 from slw.cli.logging import RunLogger, TimerBook
 from slw.cli.mpi import MPIContext
 from slw.cli.native import NativeExecutionPlan
-from slw.cli.schema import RunConfig
+from slw.cli.schema import ParallelConfig, RunConfig
 
 from .config import MagphInputError, MagphLifetimeRequest, build_lifetime_request
 from .coupling import build_mode_resolved_isotropic_derivative_distributed
@@ -34,6 +34,21 @@ class MagphRunResult:
     mpi_size: int
     k_point_count: int
     magnetic_site_count: int
+
+
+def _validate_parallel(parallel: ParallelConfig) -> None:
+    if parallel.workers_per_rank != 1:
+        raise MagphInputError(
+            "native lifetime currently requires &parallel workers_per_rank=1; "
+            "use MPI ranks over external k and threads_per_worker within each rank"
+        )
+    if parallel.precache_workers is not None:
+        raise MagphInputError("native lifetime does not use &parallel precache_workers")
+    if parallel.numba_threads is not None:
+        raise MagphInputError(
+            "native lifetime does not use &parallel numba_threads; "
+            "use threads_per_worker or blas_threads for vectorized contractions"
+        )
 
 
 def _rank_failure(rank: int, stage: str, exc: BaseException) -> RankFailure:
@@ -136,6 +151,7 @@ def _cache_storage(coupling: Any, magnon_cache: Any) -> tuple[int, int]:
 def _output_metadata(
     request: MagphLifetimeRequest,
     *,
+    parallel: ParallelConfig,
     exchange: Any,
     exchange_report: Any,
     derivative: Any,
@@ -183,11 +199,16 @@ def _output_metadata(
         "metric_energy_tolerance_mev": request.metric_energy_tolerance_mev,
         "require_complete_targets": request.require_complete_targets,
         "chunk_sizes": {
-            "mode_q": request.q_chunk_size,
-            "mode_bond": request.bond_chunk_size,
-            "vertex_q": request.vertex_q_chunk_size,
-            "self_energy_q": request.self_energy_q_chunk_size,
-            "self_energy_channel": request.channel_chunk_size,
+            "mode_q": parallel.q_chunk_size,
+            "mode_bond": parallel.bond_chunk_size,
+            "vertex_q": parallel.vertex_q_chunk_size,
+            "self_energy_q": parallel.self_energy_q_chunk_size,
+            "self_energy_channel": parallel.channel_chunk_size,
+        },
+        "parallel": {
+            "workers_per_rank": parallel.workers_per_rank,
+            "threads_per_worker": parallel.threads_per_worker,
+            "blas_threads": parallel.effective_blas_threads,
         },
         "algorithm": {
             "coupling": "mpi_q_distributed_cache",
@@ -217,12 +238,15 @@ def run_lifetime(
     request: MagphLifetimeRequest,
     *,
     context: MPIContext | None = None,
+    parallel: ParallelConfig | None = None,
     program: str = "slw_magph.x",
     verbosity: str = "normal",
 ) -> MagphRunResult:
     """Run the complete native lifetime route, discovering MPI by default."""
 
     mpi = MPIContext.discover() if context is None else context
+    runtime = ParallelConfig() if parallel is None else parallel
+    _validate_parallel(runtime)
     if mpi.size > 1:
         request = mpi.bcast(request if mpi.is_root else None, root=0)
         if request is None:  # pragma: no cover - communicator contract guard
@@ -261,8 +285,8 @@ def run_lifetime(
                 phonons,
                 zero_point,
                 require_complete_targets=request.require_complete_targets,
-                q_chunk_size=request.q_chunk_size,
-                bond_chunk_size=request.bond_chunk_size,
+                q_chunk_size=runtime.q_chunk_size,
+                bond_chunk_size=runtime.bond_chunk_size,
                 context=mpi,
             )
         union_mesh = tuple(
@@ -341,9 +365,9 @@ def run_lifetime(
                 broadening_mev=request.broadening_mev,
                 metric_energy_tolerance_mev=request.metric_energy_tolerance_mev,
                 negative_tolerance_mev=request.negative_tolerance_mev,
-                vertex_q_chunk_size=request.vertex_q_chunk_size,
-                self_energy_q_chunk_size=request.self_energy_q_chunk_size,
-                channel_chunk_size=request.channel_chunk_size,
+                vertex_q_chunk_size=runtime.vertex_q_chunk_size,
+                self_energy_q_chunk_size=runtime.self_energy_q_chunk_size,
+                channel_chunk_size=runtime.channel_chunk_size,
                 magnon_cache=magnon_cache,
                 context=mpi,
                 progress=report_progress,
@@ -356,6 +380,7 @@ def run_lifetime(
                     raise RuntimeError("rank zero did not receive the lifetime grid")
                 metadata = _output_metadata(
                     request,
+                    parallel=runtime,
                     exchange=exchange,
                     exchange_report=exchange_report,
                     derivative=derivative,
@@ -429,6 +454,7 @@ def prepare_run(
         raise MagphInputError(
             f"native magph engine does not implement {requested_name!r}"
         )
+    _validate_parallel(config.parallel)
     request = build_lifetime_request(
         parameters,
         prefix=config.control.prefix,
@@ -441,6 +467,7 @@ def prepare_run(
         run_lifetime(
             request,
             context=execution_context,
+            parallel=config.parallel,
             program=program,
             verbosity=config.control.verbosity,
         )
@@ -455,6 +482,8 @@ def prepare_run(
             ("magnetic order", request.magnetic_order.value),
             ("k-point mesh", " x ".join(map(str, request.kmesh))),
             ("k-grid shift", ", ".join(map(str, request.kshift))),
+            ("workers/rank", config.parallel.workers_per_rank),
+            ("threads/worker", config.parallel.threads_per_worker),
             ("output", request.output),
         ),
     )
@@ -481,8 +510,9 @@ def format_help(
         "  kshift            = explicit three-component grid-unit shift\n"
         "  temperature_k     = non-negative temperature\n"
         "  broadening_mev    = positive retarded broadening\n\n"
-        "Optional: spin_pattern, frequency_floor_mev, asr_policy, output,\n"
-        "overwrite, and q/bond/vertex/self-energy/channel chunk sizes.\n"
+        "Optional &magph: spin_pattern, frequency_floor_mev, asr_policy,\n"
+        "output, and overwrite. Put worker/thread and q/bond/vertex/\n"
+        "self-energy/channel chunk controls in &parallel.\n"
         "MPI is selected automatically under mpirun; external k points are\n"
         "distributed across ranks and q/mode contractions stay vectorized.\n"
     )

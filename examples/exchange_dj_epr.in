@@ -8,7 +8,11 @@
 /
 
 &parallel
-  execution = 'auto'
+  execution = 'auto',
+  ! One rank-local EPC cache is shared by these worker processes.
+  workers_per_rank = 1,
+  threads_per_worker = 1,
+  precache_workers = 1
 /
 
 &exchange
@@ -34,10 +38,5 @@
   n_shells = 1,
   integrator = 'contour',
   ! Small smoke-test value; increase and converge for production.
-  empoints = 32,
-  ! Portable MPI default. For one rank per node, nproc may be raised to the
-  ! cores bound to that rank; the EPC cache is then shared by local workers.
-  nproc = 1,
-  omp_threads = 1,
-  precache_workers = 1
+  empoints = 32
 /

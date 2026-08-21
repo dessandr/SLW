@@ -332,7 +332,12 @@ input file:
   outdir = './slw-tmp'
 /
 &parallel
-  execution = 'auto'
+  execution = 'auto',
+  workers_per_rank = 1,
+  threads_per_worker = 4,
+  q_chunk_size = 64,
+  vertex_q_chunk_size = 64,
+  self_energy_q_chunk_size = 64
 /
 &magph
   exchange_h5 = './input/J.h5',
@@ -346,9 +351,6 @@ input file:
   kshift = 0.5, 0.5, 0.5,
   temperature_k = 300.0,
   broadening_mev = 0.2,
-  q_chunk_size = 64,
-  vertex_q_chunk_size = 64,
-  self_energy_q_chunk_size = 64,
   output = '${savedir}/sample.lifetime.npz'
 /
 ```

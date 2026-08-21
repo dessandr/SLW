@@ -29,11 +29,13 @@ Rank 0 alone reads and validates the input and broadcasts the normalized
 configuration. A calculation with an MPI implementation runs on every rank. A
 serial-only calculation launched under MPI runs only on rank 0, preventing
 ranks from racing to overwrite the same output. Exchange is MPI-capable in all
-four modes. Scalar dJ may combine MPI with `nproc>1`; its rank-local workers
+four modes. Scalar dJ may combine MPI with `workers_per_rank>1`; its rank-local workers
 attach to one POSIX shared-memory EPC cache and require at least
-`nproc*omp_threads` CPUs in that rank's launcher affinity. Other exchange modes
-require `nproc=1` per MPI rank. Backend-local worker settings must be sized to
-avoid oversubscription.
+`workers_per_rank*threads_per_worker` CPUs in that rank's launcher affinity.
+Other exchange modes require `workers_per_rank=1` per MPI rank. The same
+`&parallel` resource names are used by magph; retained backend spellings are
+translated internally. Backend-local worker settings must be sized to avoid
+oversubscription.
 
 ## Input layout
 
@@ -49,7 +51,9 @@ group or its generic alias `&input`:
 /
 
 &parallel
-  execution = 'auto'
+  execution = 'auto',
+  workers_per_rank = 1,
+  threads_per_worker = 4
 /
 
 &exchange

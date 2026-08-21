@@ -83,6 +83,14 @@ class RunnerTests(unittest.TestCase):
           prefix = 'sample',
           outdir = './scratch'
         /
+        &parallel
+          workers_per_rank = 1,
+          threads_per_worker = 2,
+          q_chunk_size = 16,
+          bond_chunk_size = 8,
+          vertex_q_chunk_size = 8,
+          self_energy_q_chunk_size = 8
+        /
         &magph
           exchange_h5 = 'J.h5',
           derivative_h5 = 'dJ.h5',
@@ -114,6 +122,88 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(code, 0, stderr.getvalue())
         self.assertIn("slw.magph.engine (native lifetime)", stdout.getvalue())
         self.assertIn("execution       = rank-0 serial", stdout.getvalue())
+        self.assertIn("workers/rank    = 1", stdout.getvalue())
+        self.assertIn("threads/worker  = 2", stdout.getvalue())
+
+    def test_legacy_hybrid_maps_common_worker_controls(self):
+        input_text = """
+        &control
+          calculation = 'hybrid',
+          verbosity = 'high'
+        /
+        &parallel
+          workers_per_rank = 4,
+          threads_per_worker = 2
+        /
+        &magph
+          j_tensor_h5 = 'J.h5',
+          dj_tensor_h5 = 'dJ.h5',
+          phonon_cache = 'phonon.npz',
+          s = 2.5,
+          spin_direction = 0.0, 0.0, 1.0,
+          kmesh = 4, 4, 2,
+          output = 'hybrid.npz'
+        /
+        """
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            previous = sys.stdin
+            sys.stdin = io.StringIO(input_text)
+            try:
+                code = run_stage("magph", ["--dry-run"])
+            finally:
+                sys.stdin = previous
+        self.assertEqual(code, 0, stderr.getvalue())
+        self.assertIn("workers/rank    = 4", stdout.getvalue())
+        self.assertIn("threads/worker  = 2", stdout.getvalue())
+        self.assertIn("--phonon_nproc 4", stdout.getvalue())
+        self.assertIn("--hybrid_nproc 4", stdout.getvalue())
+
+    def test_legacy_magph_rejects_unused_worker_pool(self):
+        input_text = """
+        &control calculation = 'berry' /
+        &parallel workers_per_rank = 4 /
+        &magph output = 'berry.npz' /
+        """
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            previous = sys.stdin
+            sys.stdin = io.StringIO(input_text)
+            try:
+                code = run_stage("magph", ["--dry-run"])
+            finally:
+                sys.stdin = previous
+        self.assertEqual(code, 2)
+        self.assertIn("workers_per_rank", stderr.getvalue())
+
+    def test_native_lifetime_rejects_unused_numba_override(self):
+        input_text = """
+        &control calculation = 'lifetime' /
+        &parallel numba_threads = 4 /
+        &magph
+          exchange_h5 = 'J.h5',
+          derivative_h5 = 'dJ.h5',
+          phonon_cache = 'phonon.npz',
+          magnetic_order = 'fm',
+          spin_magnitudes = 2.5,
+          quantization_axis = 0.0, 0.0, 1.0,
+          kmesh = 2, 2, 2,
+          kshift = 0.5, 0.5, 0.5,
+          temperature_k = 300.0,
+          broadening_mev = 0.2
+        /
+        """
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            previous = sys.stdin
+            sys.stdin = io.StringIO(input_text)
+            try:
+                code = run_stage("magph", ["--dry-run"])
+            finally:
+                sys.stdin = previous
+        self.assertEqual(code, 2)
+        self.assertIn("does not use &parallel numba_threads", stderr.getvalue())
 
 
 if __name__ == "__main__":

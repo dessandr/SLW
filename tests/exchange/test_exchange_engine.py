@@ -32,10 +32,10 @@ def _parameters(*, ltensor=False, source="epr"):
     return values
 
 
-def _run_config(calculation, parameters, *, execution="auto"):
+def _run_config(calculation, parameters, *, execution="auto", **parallel):
     groups = {
         "control": {"calculation": calculation, "prefix": "toy", "outdir": "out"},
-        "parallel": {"execution": execution},
+        "parallel": {"execution": execution, **parallel},
         "exchange": dict(parameters),
     }
     return parse_run_config(groups, stage="exchange", cwd="/")
@@ -85,8 +85,13 @@ class ExchangeEngineTests(unittest.TestCase):
         self.assertIsNone(scalar.warning)
 
     def test_scalar_dj_accepts_rank_local_workers_under_mpi(self):
-        parameters = {**_parameters(), "nproc": 4, "omp_threads": 2}
-        config = _run_config("dj", parameters)
+        parameters = _parameters()
+        config = _run_config(
+            "dj",
+            parameters,
+            workers_per_rank=4,
+            threads_per_worker=2,
+        )
         plan = prepare_run(
             calculation="dj",
             requested_name="dj",
@@ -97,14 +102,17 @@ class ExchangeEngineTests(unittest.TestCase):
         )
 
         self.assertTrue(plan.all_ranks)
-        self.assertIn(("local workers/rank", 4), plan.summary)
+        self.assertIn(("workers/rank", 4), plan.summary)
         self.assertIn(("threads/worker", 2), plan.summary)
 
-        tensor_parameters = {
-            key: value for key, value in parameters.items() if key != "omp_threads"
-        }
+        tensor_parameters = dict(parameters)
         tensor_parameters["ltensor"] = True
-        tensor_config = _run_config("dj", tensor_parameters)
+        tensor_config = _run_config(
+            "dj",
+            tensor_parameters,
+            workers_per_rank=4,
+            threads_per_worker=2,
+        )
         with self.assertRaisesRegex(ValueError, "requires nproc=1 per rank"):
             prepare_run(
                 calculation="dj",

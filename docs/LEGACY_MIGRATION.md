@@ -36,4 +36,7 @@ scalar dJ distribute contour/pole energy points; tensor dJ distributes
 target-axis tasks. Collective phases agree serializable errors before entering
 the next collective. A requested multi-rank run must not silently degrade to
 rank-zero serial execution. Scalar dJ may use shared-memory local workers with
-`nproc>1` per rank; other exchange modes require `nproc=1` per MPI rank.
+`workers_per_rank>1` in `&parallel`; other exchange modes require
+`workers_per_rank=1` per MPI rank. Historical backend resource names are
+translated only at the quarantine boundary and are not accepted by the public
+stage namelist.

@@ -59,6 +59,65 @@ class NamelistTests(unittest.TestCase):
         with self.assertRaisesRegex(NamelistError, "defined in both"):
             parse_run_config(groups, stage="epr")
 
+    def test_parallel_resources_are_typed_and_stage_settings_are_rejected(self):
+        groups = loads(
+            """
+            &control calculation = 'dj' /
+            &parallel
+              execution = 'auto',
+              workers_per_rank = 4,
+              threads_per_worker = 2,
+              precache_workers = 3,
+              q_chunk_size = 64
+            /
+            &exchange input_format = 'epr' /
+            """
+        )
+        config = parse_run_config(groups, stage="exchange")
+        self.assertEqual(config.parallel.workers_per_rank, 4)
+        self.assertEqual(config.parallel.threads_per_worker, 2)
+        self.assertEqual(config.parallel.precache_workers, 3)
+        self.assertEqual(config.parallel.q_chunk_size, 64)
+
+        for stage, key in (
+            ("exchange", "nproc"),
+            ("magph", "q_chunk_size"),
+            ("magph", "vertex_q_chunk"),
+        ):
+            with (
+                self.subTest(stage=stage, key=key),
+                self.assertRaisesRegex(NamelistError, "belong in &parallel"),
+            ):
+                parse_run_config(
+                    {
+                        "control": {"calculation": "dj"},
+                        stage: {key: 2},
+                    },
+                    stage=stage,
+                )
+
+    def test_deprecated_parallel_names_fail_with_canonical_replacement(self):
+        with self.assertRaisesRegex(NamelistError, "nproc->workers_per_rank"):
+            parse_run_config(
+                {
+                    "control": {"calculation": "dj"},
+                    "parallel": {"nproc": 4},
+                    "exchange": {},
+                },
+                stage="exchange",
+            )
+        with self.assertRaisesRegex(
+            NamelistError, "vertex_q_chunk->vertex_q_chunk_size"
+        ):
+            parse_run_config(
+                {
+                    "control": {"calculation": "scattering_qbz"},
+                    "parallel": {"vertex_q_chunk": 32},
+                    "magph": {},
+                },
+                stage="magph",
+            )
+
     def test_atomic_soc_card_is_parsed_for_exchange(self):
         groups = loads(
             """
@@ -82,9 +141,7 @@ class NamelistTests(unittest.TestCase):
         )
 
     def test_soc_card_is_exchange_only_and_fails_closed(self):
-        groups = loads(
-            "&control calculation='gkq' /\nSOC (atomic)\nLAMBDA Te-p 0.5\n"
-        )
+        groups = loads("&control calculation='gkq' /\nSOC (atomic)\nLAMBDA Te-p 0.5\n")
         with self.assertRaisesRegex(NamelistError, "unexpected namelist group"):
             parse_run_config(groups, stage="epr")
         for body in (

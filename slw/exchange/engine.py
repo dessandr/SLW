@@ -41,6 +41,13 @@ _IMPORTANT_BACKEND_MESSAGES = (
     "done",
 )
 _BACKEND_PREFIX = re.compile(r"^(?:\[[^]]+\])+\s*")
+_STAGE_PARALLEL_ALIASES = {
+    "nproc",
+    "omp_threads",
+    "precache_workers",
+    "blas_threads",
+    "numba_threads",
+}
 
 
 @dataclass(frozen=True)
@@ -322,9 +329,68 @@ def prepare_run(
 ) -> NativeExecutionPlan:
     """Validate one native exchange input and return an executable plan."""
 
+    misplaced = sorted(set(parameters) & _STAGE_PARALLEL_ALIASES)
+    if misplaced:
+        raise ExchangeInputError(
+            "parallel setting(s) must be supplied through &parallel: "
+            + ", ".join(misplaced)
+        )
+    request_name = (
+        requested_name if requested_name in {"j_tensor", "dj_tensor"} else calculation
+    )
     request = build_exchange_request(
-        requested_name if requested_name in {"j_tensor", "dj_tensor"} else calculation,
+        request_name,
         parameters,
+        prefix=config.control.prefix,
+        savedir=config.control.savedir,
+    )
+    parallel = config.parallel
+    chunk_settings = {
+        "q_chunk_size": parallel.q_chunk_size,
+        "bond_chunk_size": parallel.bond_chunk_size,
+        "vertex_q_chunk_size": parallel.vertex_q_chunk_size,
+        "self_energy_q_chunk_size": parallel.self_energy_q_chunk_size,
+        "channel_chunk_size": parallel.channel_chunk_size,
+    }
+    unused_chunks = [
+        name for name, value in chunk_settings.items() if value is not None
+    ]
+    if unused_chunks:
+        raise ExchangeInputError(
+            "exchange does not use these &parallel chunk settings: "
+            + ", ".join(unused_chunks)
+        )
+    if parallel.precache_workers is not None and not (
+        request.calculation is ExchangeCalculation.DJ and not request.ltensor
+    ):
+        raise ExchangeInputError(
+            "&parallel precache_workers is supported only by scalar dJ/du"
+        )
+    if parallel.numba_threads is not None and not (
+        request.calculation is ExchangeCalculation.DJ and request.ltensor
+    ):
+        raise ExchangeInputError(
+            "&parallel numba_threads is supported only by tensor dJ/du"
+        )
+
+    kernel_parallel: dict[str, Any] = {
+        "nproc": parallel.workers_per_rank,
+    }
+    if request.calculation is ExchangeCalculation.DJ and not request.ltensor:
+        kernel_parallel.update(
+            omp_threads=parallel.threads_per_worker,
+            precache_workers=parallel.effective_precache_workers,
+        )
+    elif request.calculation is ExchangeCalculation.DJ and request.ltensor:
+        kernel_parallel.update(
+            numba_threads=parallel.effective_numba_threads,
+            blas_threads=(
+                1 if parallel.blas_threads is None else parallel.blas_threads
+            ),
+        )
+    request = build_exchange_request(
+        request_name,
+        {**parameters, **kernel_parallel},
         prefix=config.control.prefix,
         savedir=config.control.savedir,
     )
@@ -345,10 +411,18 @@ def prepare_run(
         options = request.options.as_dict()
         summary_items.extend(
             (
-                ("local workers/rank", int(options.get("nproc", 1))),
+                ("workers/rank", int(options.get("nproc", 1))),
                 ("threads/worker", int(options.get("omp_threads", 1))),
                 ("precache workers", int(options.get("precache_workers", 1))),
                 ("GgG kernel", str(options.get("g_kernel", "direct"))),
+            )
+        )
+    elif request.calculation is ExchangeCalculation.DJ and request.ltensor:
+        options = request.options.as_dict()
+        summary_items.extend(
+            (
+                ("Numba threads", int(options.get("numba_threads", 1))),
+                ("BLAS threads", int(options.get("blas_threads", 1))),
             )
         )
     summary = tuple(summary_items)

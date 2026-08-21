@@ -12,6 +12,8 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+from threadpoolctl import threadpool_limits
+
 from slw import __version__
 
 from .adapter import (
@@ -158,9 +160,7 @@ def _execution_plan(
     if requested == "serial":
         warning = None
         if context.size > 1:
-            warning = (
-                "serial execution requested under MPI; only rank 0 will calculate"
-            )
+            warning = "serial execution requested under MPI; only rank 0 will calculate"
         return ExecutionPlan(
             module=backend.module,
             all_ranks=False,
@@ -171,14 +171,14 @@ def _execution_plan(
         return ExecutionPlan(module=backend.mpi_module, all_ranks=True)
     warning = None
     if context.size > 1:
-        warning = (
-            "this calculation has no MPI backend; only rank 0 will calculate"
-        )
+        warning = "this calculation has no MPI backend; only rank 0 will calculate"
     return ExecutionPlan(module=backend.module, all_ranks=False, warning=warning)
 
 
 @contextlib.contextmanager
 def _workflow_environment(config: RunConfig, context: MPIContext):
+    blas_threads = _runtime_blas_threads(config)
+    numba_threads = config.parallel.effective_numba_threads
     updates = {
         "SLW_PREFIX": config.control.prefix,
         "SLW_OUTDIR": config.control.outdir,
@@ -186,16 +186,152 @@ def _workflow_environment(config: RunConfig, context: MPIContext):
         "SLW_MPI_RANK": str(context.rank),
         "SLW_MPI_SIZE": str(context.size),
     }
+    manage_compute_threads = config.stage in {"exchange", "magph"}
+    if manage_compute_threads:
+        updates.update(
+            {
+                "OMP_NUM_THREADS": str(config.parallel.threads_per_worker),
+                "MKL_NUM_THREADS": str(blas_threads),
+                "OPENBLAS_NUM_THREADS": str(blas_threads),
+                "NUMEXPR_NUM_THREADS": str(blas_threads),
+                "NUMBA_NUM_THREADS": str(numba_threads),
+            }
+        )
     previous = {name: os.environ.get(name) for name in updates}
     os.environ.update(updates)
     try:
-        yield
+        if manage_compute_threads:
+            with threadpool_limits(limits=blas_threads):
+                yield
+        else:
+            yield
     finally:
         for name, value in previous.items():
             if value is None:
                 os.environ.pop(name, None)
             else:
                 os.environ[name] = value
+
+
+def _runtime_blas_threads(config: RunConfig) -> int:
+    """Resolve a safe rank-local BLAS limit for the selected algorithm."""
+    explicit = config.parallel.blas_threads
+    if explicit is not None:
+        return explicit
+    calculation = config.control.calculation
+    if config.stage == "exchange":
+        ltensor = config.parameters.get("ltensor", False)
+        if calculation == "dj_tensor" or (calculation == "dj" and bool(ltensor)):
+            return 1
+    if config.stage == "magph" and calculation in {
+        "scattering_kbz",
+        "scattering_qbz",
+        "rotational_coupling",
+        "chirality_plane",
+    }:
+        return 1
+    return config.parallel.threads_per_worker
+
+
+def _uses_numba_threads(config: RunConfig) -> bool:
+    calculation = config.control.calculation
+    if config.stage == "exchange":
+        return calculation in {"j_tensor", "dj_tensor"} or bool(
+            config.parameters.get("ltensor", False)
+        )
+    return config.stage == "magph" and calculation not in {
+        "lifetime",
+        "prepare_lifetime",
+    }
+
+
+def _reject_unused_parallel_settings(
+    calculation: str,
+    config: RunConfig,
+) -> None:
+    parallel = config.parallel
+    unsupported: list[str] = []
+    if parallel.precache_workers is not None:
+        unsupported.append("precache_workers")
+    if parallel.workers_per_rank != 1 and calculation not in {
+        "hybrid",
+        "prepare_lifetime",
+    }:
+        unsupported.append("workers_per_rank")
+
+    optional_chunks = {
+        "q_chunk_size": parallel.q_chunk_size,
+        "bond_chunk_size": parallel.bond_chunk_size,
+        "vertex_q_chunk_size": parallel.vertex_q_chunk_size,
+        "self_energy_q_chunk_size": parallel.self_energy_q_chunk_size,
+        "channel_chunk_size": parallel.channel_chunk_size,
+    }
+    accepted_chunks = {
+        "scattering_kbz": {"bond_chunk_size"},
+        "scattering_qbz": {"bond_chunk_size", "vertex_q_chunk_size"},
+        "rotational_coupling": {"q_chunk_size", "bond_chunk_size"},
+        "chirality_plane": {"q_chunk_size", "bond_chunk_size"},
+    }.get(calculation, set())
+    unsupported.extend(
+        name
+        for name, value in optional_chunks.items()
+        if value is not None and name not in accepted_chunks
+    )
+    if unsupported:
+        rendered = ", ".join(sorted(set(unsupported)))
+        raise ArgumentAdapterError(
+            f"&parallel setting(s) are not used by magph calculation "
+            f"{calculation!r}: {rendered}"
+        )
+
+
+def _legacy_parallel_parameters(
+    stage: str,
+    calculation: str,
+    parameters: dict[str, object],
+    config: RunConfig,
+) -> dict[str, object]:
+    """Translate common execution controls at the retained-driver boundary."""
+    if stage != "magph":
+        return parameters
+    _reject_unused_parallel_settings(calculation, config)
+    result = dict(parameters)
+    parallel = config.parallel
+    workers = parallel.workers_per_rank
+    numba_threads = parallel.effective_numba_threads
+
+    if calculation == "hybrid":
+        result["phonon_nproc"] = workers
+        result["hybrid_nproc"] = workers
+    elif calculation in {"scattering_kbz", "scattering_qbz"}:
+        result["nproc"] = numba_threads
+    elif calculation in {"rotational_coupling", "chirality_plane"}:
+        result["num_threads"] = numba_threads
+        q_chunk = parallel.q_chunk_size
+        bond_chunk = parallel.bond_chunk_size
+        if q_chunk is not None:
+            result["q_chunk"] = q_chunk
+        if bond_chunk is not None:
+            result["bond_chunk"] = bond_chunk
+        if calculation == "chirality_plane":
+            result["blas_threads"] = _runtime_blas_threads(config)
+    elif calculation == "prepare_lifetime":
+        result["phonon_nproc"] = workers
+
+    if calculation in {"scattering_kbz", "scattering_qbz"}:
+        q_chunk = (
+            parallel.vertex_q_chunk_size
+            if parallel.vertex_q_chunk_size is not None
+            else parallel.q_chunk_size
+        )
+        bond_chunk = (
+            parallel.bond_chunk_size if parallel.bond_chunk_size is not None else None
+        )
+        if q_chunk is not None and calculation == "scattering_qbz":
+            result["vertex_q_chunk"] = q_chunk
+        if bond_chunk is not None:
+            result["vertex_bond_chunk"] = bond_chunk
+    return result
 
 
 def _invoke_root_only(
@@ -413,9 +549,15 @@ def _run(stage: str, argv: Sequence[str] | None) -> int:
         )
         legacy_parser = parser_for(plan.module)
         legacy_parser.prog = f"slw_{stage}.x ({resolved.action.name} backend)"
+        legacy_parameters = _legacy_parallel_parameters(
+            stage,
+            resolved.action.name,
+            dict(resolved.parameters),
+            config,
+        )
         legacy_argv = arguments_from_parameters(
             legacy_parser,
-            resolved.parameters,
+            legacy_parameters,
         )
         backend_label = plan.module
         all_ranks = plan.all_ranks
@@ -434,10 +576,24 @@ def _run(stage: str, argv: Sequence[str] | None) -> int:
         )
         _print_setting("backend", backend_label)
         _print_setting("execution", "MPI" if all_ranks else "rank-0 serial")
+        if stage in {"exchange", "magph"}:
+            _print_setting("workers/rank", config.parallel.workers_per_rank)
+            _print_setting("threads/worker", config.parallel.threads_per_worker)
+            _print_setting("BLAS threads", _runtime_blas_threads(config))
+            if _uses_numba_threads(config):
+                _print_setting("Numba threads", config.parallel.effective_numba_threads)
         if resolved.action.requires_source:
             _print_setting("input format", resolved.source)
         if native_plan is not None:
+            common_parallel_labels = {
+                "workers/rank",
+                "threads/worker",
+                "BLAS threads",
+                "Numba threads",
+            }
             for key, value in native_plan.summary:
+                if key in common_parallel_labels:
+                    continue
                 _print_setting(key, value)
         if warning:
             print(f"     WARNING: {warning}")
@@ -449,7 +605,9 @@ def _run(stage: str, argv: Sequence[str] | None) -> int:
 
     if dry_run:
         if context.is_root:
-            print("Input and calculation parameters validated; calculation was not run.")
+            print(
+                "Input and calculation parameters validated; calculation was not run."
+            )
             print_footer(sys.stdout, program=program)
         return 0
 

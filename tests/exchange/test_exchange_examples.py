@@ -43,7 +43,8 @@ def test_exchange_examples_validate_without_scientific_io(
     assert request.calculation.value == calculation
     assert request.ltensor is ltensor
     assert request.source.value == source
-    assert request.options["nproc"] == 1
+    assert config.parallel.workers_per_rank == 1
+    assert config.parallel.threads_per_worker == 1
     assert not Path(config.control.savedir).exists()
 
     if filename.endswith("wannier_soc.in"):

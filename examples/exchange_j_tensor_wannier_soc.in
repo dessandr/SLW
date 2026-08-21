@@ -8,7 +8,9 @@
 /
 
 &parallel
-  execution = 'auto'
+  execution = 'auto',
+  workers_per_rank = 1,
+  threads_per_worker = 1
 /
 
 &exchange
@@ -31,8 +33,7 @@
   n_shells = 1,
   all_bonds = .true.,
   integrator = 'contour',
-  empoints = 64,
-  nproc = 1
+  empoints = 64
 /
 
 ! Remove this card when the supplied spinor HR needs no additional SOC.

@@ -8,7 +8,9 @@
 /
 
 &parallel
-  execution = 'auto'
+  execution = 'auto',
+  workers_per_rank = 1,
+  threads_per_worker = 1
 /
 
 &exchange
@@ -29,6 +31,5 @@
   all_bonds = .true.,
   integrator = 'contour',
   ! Small smoke-test value; perform an empoints convergence study.
-  empoints = 64,
-  nproc = 1
+  empoints = 64
 /

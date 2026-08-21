@@ -8,7 +8,9 @@
 /
 
 &parallel
-  execution = 'auto'
+  execution = 'auto',
+  workers_per_rank = 1,
+  threads_per_worker = 1
 /
 
 &exchange
@@ -25,7 +27,5 @@
   n_shells = 1,
   integrator = 'contour',
   ! Small smoke-test value; perform an empoints convergence study.
-  empoints = 64,
-  ! MPI requires one local process per rank.
-  nproc = 1
+  empoints = 64
 /
