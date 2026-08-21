@@ -53,6 +53,8 @@ _J_SCALAR_EPR_OPTIONS = {
     "symprec",
     "angle_tolerance",
     "orbit_grouping",
+    "orbit_symmetry",
+    "orbit_symmetry_tolerance_mev",
     "debug_orbits",
     "debug_orbit_shell",
     "debug_epr_positions",
@@ -218,12 +220,7 @@ _ADVANCED_OPTION_SPECS: dict[str, _OptionSpec] = {
             "onsite_deriv_projector",
         )
     },
-    **{
-        name: _OptionSpec("str")
-        for name in (
-            "atom_labels",
-        )
-    },
+    **{name: _OptionSpec("str") for name in ("atom_labels",)},
     "debug_out": _OptionSpec("str", allow_empty=False),
     "debug_bond": _OptionSpec("int_csv_vector", length=5, allow_empty=True),
     **{
@@ -238,23 +235,16 @@ _ADVANCED_OPTION_SPECS: dict[str, _OptionSpec] = {
             "precache_workers",
         )
     },
-    **{
-        name: _OptionSpec("int", minimum=0.0)
-        for name in ("checkpoint", "progress_every", "verbose_worker_init")
-    },
+    **{name: _OptionSpec("int", minimum=0.0) for name in ("checkpoint", "progress_every", "verbose_worker_init")},
     "debug_orbit_shell": _OptionSpec("int", minimum=0.0, allow_none=True),
     "debug_shell": _OptionSpec("int", minimum=0.0, allow_none=True),
-    **{
-        name: _OptionSpec("float")
-        for name in ("angle_tolerance", "emin")
-    },
+    **{name: _OptionSpec("float") for name in ("angle_tolerance", "emin")},
     "cfr_beta": _OptionSpec("float", minimum=0.0, strict_minimum=True),
     "d_max": _OptionSpec("float", minimum=0.0, strict_minimum=True),
     "spin_magnitude": _OptionSpec("float", minimum=0.0, strict_minimum=True),
     "symprec": _OptionSpec("float", minimum=0.0, strict_minimum=True),
-    "qmesh": _OptionSpec(
-        "int_vector", length=3, minimum=0.0, strict_minimum=True, allow_none=True
-    ),
+    "orbit_symmetry_tolerance_mev": _OptionSpec("float", minimum=0.0),
+    "qmesh": _OptionSpec("int_vector", length=3, minimum=0.0, strict_minimum=True, allow_none=True),
     "rp_idx": _OptionSpec("int_vector", length=3),
     "spin_direction": _OptionSpec("float_vector", length=3, nonzero=True),
     "axes": _OptionSpec("axes"),
@@ -268,6 +258,7 @@ _ADVANCED_OPTION_SPECS: dict[str, _OptionSpec] = {
     "g_transform": _OptionSpec("choice", choices=("kq", "k_only_rp")),
     "g_kernel": _OptionSpec("choice", choices=("direct", "spectral")),
     "rotation_mode": _OptionSpec("choice", choices=("none",)),
+    "orbit_symmetry": _OptionSpec("choice", choices=("report", "project", "fail")),
     "ref_epr_up": _OptionSpec("path", allow_none=True),
     "ref_epr_dn": _OptionSpec("path", allow_none=True),
 }
@@ -320,21 +311,15 @@ def _mode_option_specs(
         orbit_groupings = ("none", "distance", "shell")
     else:
         orbit_groupings = ("spglib", "shell")
-    specs["orbit_grouping"] = _OptionSpec(
-        "choice", choices=orbit_groupings
-    )
+    specs["orbit_grouping"] = _OptionSpec("choice", choices=orbit_groupings)
 
     if calculation is ExchangeCalculation.DJ and ltensor:
-        specs["targets"] = _OptionSpec(
-            "int_vector", minimum=0.0, allow_none=True
-        )
+        specs["targets"] = _OptionSpec("int_vector", minimum=0.0, allow_none=True)
     else:
         specs["targets"] = _OptionSpec("str", allow_empty=False)
 
     if calculation is ExchangeCalculation.J and ltensor:
-        specs["species_labels"] = _OptionSpec(
-            "string_list", allow_none=True
-        )
+        specs["species_labels"] = _OptionSpec("string_list", allow_none=True)
     else:
         specs["species_labels"] = _OptionSpec("str", allow_none=True)
     return specs
@@ -351,9 +336,7 @@ def _checked_number(value: Any, *, name: str, integral: bool) -> int | float:
     try:
         result = float(value)
     except (TypeError, ValueError) as exc:
-        raise ExchangeInputError(
-            f"{name} must be a finite real number, got {value!r}"
-        ) from exc
+        raise ExchangeInputError(f"{name} must be a finite real number, got {value!r}") from exc
     if not math.isfinite(result):
         raise ExchangeInputError(f"{name} must be finite, got {value!r}")
     return result
@@ -371,9 +354,7 @@ def _check_bound(value: float, spec: _OptionSpec, *, name: str) -> None:
 def _validated_vector(value: Any, spec: _OptionSpec, *, name: str) -> tuple[Any, ...]:
     items = _items(value)
     if spec.length is not None and len(items) != spec.length:
-        raise ExchangeInputError(
-            f"{name} must contain exactly {spec.length} values, got {items!r}"
-        )
+        raise ExchangeInputError(f"{name} must contain exactly {spec.length} values, got {items!r}")
     if spec.length is None and not items:
         raise ExchangeInputError(f"{name} must contain at least one value")
     integral = spec.kind == "int_vector"
@@ -416,9 +397,7 @@ def _validated_option(value: Any, spec: _OptionSpec, *, name: str) -> Any:
     if spec.kind == "axes":
         if not isinstance(value, str):
             raise ExchangeInputError(f"{name} must be a string containing x, y, and/or z")
-        axes_value = "".join(
-            char for char in value.strip().lower() if char not in {",", " ", "\t"}
-        )
+        axes_value = "".join(char for char in value.strip().lower() if char not in {",", " ", "\t"})
         if not axes_value or any(char not in "xyz" for char in axes_value):
             raise ExchangeInputError(f"{name} must contain only x, y, and/or z")
         if len(set(axes_value)) != len(axes_value):
@@ -455,9 +434,7 @@ def _validated_option(value: Any, spec: _OptionSpec, *, name: str) -> Any:
             return ""
         fields = [item.strip() for item in text.replace(":", ",").split(",")]
         if spec.length is not None and len(fields) != spec.length:
-            raise ExchangeInputError(
-                f"{name} must contain exactly {spec.length} integers"
-            )
+            raise ExchangeInputError(f"{name} must contain exactly {spec.length} integers")
         try:
             integers = tuple(int(item) for item in fields)
         except ValueError as exc:
@@ -483,10 +460,7 @@ def _validate_advanced_options(
     specs = _mode_option_specs(calculation, ltensor, source)
     unsupported = sorted(allowed - set(specs))
     if unsupported:
-        raise ExchangeInputError(
-            "advanced option(s) lack a native validation schema and are unsupported: "
-            + ", ".join(unsupported)
-        )
+        raise ExchangeInputError("advanced option(s) lack a native validation schema and are unsupported: " + ", ".join(unsupported))
     for name in sorted(values):
         values[name] = _validated_option(values[name], specs[name], name=name)
 
@@ -503,11 +477,7 @@ def _enum_value(enum_type, value: Any, *, name: str):
 
 
 def _normalize_mode(calculation: Any, values: dict[str, Any]) -> tuple[ExchangeCalculation, bool]:
-    raw = (
-        calculation.value
-        if isinstance(calculation, ExchangeCalculation)
-        else str(calculation).strip().lower().replace("-", "_")
-    )
+    raw = calculation.value if isinstance(calculation, ExchangeCalculation) else str(calculation).strip().lower().replace("-", "_")
     aliases = {
         "j": (ExchangeCalculation.J, False),
         "j_tensor": (ExchangeCalculation.J, True),
@@ -517,18 +487,14 @@ def _normalize_mode(calculation: Any, values: dict[str, Any]) -> tuple[ExchangeC
     try:
         mode, alias_tensor = aliases[raw]
     except KeyError as exc:
-        raise ExchangeInputError(
-            "calculation must be j or dj (j_tensor/dj_tensor are compatibility aliases)"
-        ) from exc
+        raise ExchangeInputError("calculation must be j or dj (j_tensor/dj_tensor are compatibility aliases)") from exc
 
     duplicate = values.pop("calculation", None)
     if duplicate is not None:
         duplicate_values: dict[str, Any] = {}
         duplicate_mode, duplicate_tensor = _normalize_mode(duplicate, duplicate_values)
         if duplicate_mode != mode or duplicate_tensor != alias_tensor:
-            raise ExchangeInputError(
-                f"calculation argument {calculation!r} conflicts with parameter {duplicate!r}"
-            )
+            raise ExchangeInputError(f"calculation argument {calculation!r} conflicts with parameter {duplicate!r}")
 
     explicit = values.pop("ltensor", None)
     if explicit is None:
@@ -554,9 +520,7 @@ def _source(values: dict[str, Any], calculation: ExchangeCalculation) -> Exchang
         selected = _enum_value(ExchangeSource, source, name="source")
     else:
         choices = "'epr' or 'wannier'" if calculation is ExchangeCalculation.J else "'epr'"
-        raise ExchangeInputError(
-            f"calculation={calculation.value!r} requires explicit input_format={choices}"
-        )
+        raise ExchangeInputError(f"calculation={calculation.value!r} requires explicit input_format={choices}")
     if calculation is ExchangeCalculation.DJ and selected is not ExchangeSource.EPR:
         raise ExchangeInputError("calculation='dj' supports only input_format='epr'")
     return selected
@@ -568,11 +532,7 @@ def _tensor_kernel(values: dict[str, Any], *, ltensor: bool) -> TensorKernel:
     native = values.pop("tensor_kernel", None)
     legacy = values.pop("kernel", None)
     if not ltensor and (has_native or has_legacy):
-        names = " and ".join(
-            name
-            for name, present in (("tensor_kernel", has_native), ("kernel", has_legacy))
-            if present
-        )
+        names = " and ".join(name for name, present in (("tensor_kernel", has_native), ("kernel", has_legacy)) if present)
         raise ExchangeInputError(f"{names} is only valid when ltensor=true")
     if has_native and has_legacy:
         left = _enum_value(TensorKernel, native, name="tensor_kernel")
@@ -598,9 +558,7 @@ def _normalize_dj_tensor_aliases(values: dict[str, Any]) -> None:
     if canonical in values:
         canonical_value = _as_bool(values[canonical], name=canonical)
         if alias_value != canonical_value:
-            raise ExchangeInputError(
-                f"{alias} and {canonical} specify different boolean values"
-            )
+            raise ExchangeInputError(f"{alias} and {canonical} specify different boolean values")
     values[canonical] = alias_value
 
 
@@ -648,11 +606,7 @@ def _magnetic_atoms(values: dict[str, Any]) -> tuple[tuple[int, ...], int]:
     if not raw:
         raise ExchangeInputError("mag_atoms must contain at least one atom index")
     base_raw = values.pop("mag_atoms_base", 0)
-    if (
-        isinstance(base_raw, bool)
-        or not isinstance(base_raw, Integral)
-        or int(base_raw) not in (0, 1)
-    ):
+    if isinstance(base_raw, bool) or not isinstance(base_raw, Integral) or int(base_raw) not in (0, 1):
         raise ExchangeInputError("mag_atoms_base must be 0 or 1")
     atoms = []
     for item in raw:
@@ -660,9 +614,7 @@ def _magnetic_atoms(values: dict[str, Any]) -> tuple[tuple[int, ...], int]:
             raise ExchangeInputError(f"mag_atoms must contain integers, got {item!r}")
         atom = int(item) - int(base_raw)
         if atom < 0:
-            raise ExchangeInputError(
-                f"mag_atoms contains an invalid index after base conversion: {item!r}"
-            )
+            raise ExchangeInputError(f"mag_atoms contains an invalid index after base conversion: {item!r}")
         atoms.append(atom)
     if len(set(atoms)) != len(atoms):
         raise ExchangeInputError("mag_atoms contains duplicate atom indices")
@@ -675,9 +627,7 @@ def _one_slice(item: Any) -> OrbitalSlice:
     elif isinstance(item, str):
         fields = item.strip().split(":")
         if len(fields) != 3:
-            raise ExchangeInputError(
-                f"slice {item!r} must have site:start:stop syntax"
-            )
+            raise ExchangeInputError(f"slice {item!r} must have site:start:stop syntax")
         try:
             result = OrbitalSlice(*(int(field.strip()) for field in fields))
         except ValueError as exc:
@@ -686,18 +636,13 @@ def _one_slice(item: Any) -> OrbitalSlice:
         fields = list(item)
         if len(fields) != 3:
             raise ExchangeInputError(f"slice entry must contain site, start, stop: {item!r}")
-        if any(
-            isinstance(field, bool) or not isinstance(field, Integral)
-            for field in fields
-        ):
+        if any(isinstance(field, bool) or not isinstance(field, Integral) for field in fields):
             raise ExchangeInputError(f"slice entry must contain integers: {item!r}")
         result = OrbitalSlice(int(fields[0]), int(fields[1]), int(fields[2]))
     else:
         raise ExchangeInputError(f"unsupported slices entry: {item!r}")
     if result.site < 0 or result.start < 0 or result.stop <= result.start:
-        raise ExchangeInputError(
-            f"invalid slice {result.site}:{result.start}:{result.stop}; require site>=0 and 0<=start<stop"
-        )
+        raise ExchangeInputError(f"invalid slice {result.site}:{result.start}:{result.stop}; require site>=0 and 0<=start<stop")
     return result
 
 
@@ -726,11 +671,7 @@ def _orbital_slices(values: dict[str, Any]) -> tuple[OrbitalSlice, ...]:
     by_start = sorted(parsed, key=lambda item: (item.start, item.stop))
     for left, right in pairwise(by_start):
         if right.start < left.stop:
-            raise ExchangeInputError(
-                "orbital slices overlap: "
-                f"{left.site}:{left.start}:{left.stop} and "
-                f"{right.site}:{right.start}:{right.stop}"
-            )
+            raise ExchangeInputError(f"orbital slices overlap: {left.site}:{left.start}:{left.stop} and {right.site}:{right.start}:{right.stop}")
     return parsed
 
 
@@ -742,14 +683,9 @@ def _validate_site_contract(
     ltensor: bool,
     source: ExchangeSource,
 ) -> None:
-    needs_two_sites = source is ExchangeSource.EPR and not (
-        calculation is ExchangeCalculation.DJ and ltensor
-    )
+    needs_two_sites = source is ExchangeSource.EPR and not (calculation is ExchangeCalculation.DJ and ltensor)
     if needs_two_sites and len(mag_atoms) < 2:
-        raise ExchangeInputError(
-            f"{calculation.value} EPR {'tensor' if ltensor else 'scalar'} "
-            "requires mag_atoms to contain at least two atoms"
-        )
+        raise ExchangeInputError(f"{calculation.value} EPR {'tensor' if ltensor else 'scalar'} requires mag_atoms to contain at least two atoms")
 
     keys = {item.site for item in slices}
     local_keys = set(range(len(mag_atoms)))
@@ -763,10 +699,7 @@ def _validate_site_contract(
             )
         return
     if not local_keys <= keys:
-        raise ExchangeInputError(
-            "slices must cover zero-based local magnetic-site keys "
-            f"{sorted(local_keys)}; got {sorted(keys)}"
-        )
+        raise ExchangeInputError(f"slices must cover zero-based local magnetic-site keys {sorted(local_keys)}; got {sorted(keys)}")
 
 
 def _optional_path(values: dict[str, Any], name: str) -> str | None:
@@ -810,17 +743,9 @@ def _input_files(
             if not ltensor and files.win is not None:
                 raise ExchangeInputError("scalar EPR J does not accept win")
         elif not ltensor:
-            irrelevant = [
-                name
-                for name in ("spinor_hr", "win", "centres")
-                if getattr(files, name) is not None
-            ]
+            irrelevant = [name for name in ("spinor_hr", "win", "centres") if getattr(files, name) is not None]
             if irrelevant:
-                raise ExchangeInputError(
-                    "scalar dJ does not accept "
-                    + ", ".join(irrelevant)
-                    + "; spinor inputs require ltensor=true"
-                )
+                raise ExchangeInputError("scalar dJ does not accept " + ", ".join(irrelevant) + "; spinor inputs require ltensor=true")
         elif files.centres is not None and files.spinor_hr is None:
             raise ExchangeInputError("tensor dJ centres requires spinor_hr")
     else:
@@ -830,13 +755,9 @@ def _input_files(
             raise ExchangeInputError("dJ requires EPR electron-phonon input")
         if ltensor:
             if files.spinor_hr is not None and collinear_any:
-                raise ExchangeInputError(
-                    "Wannier tensor J requires either spinor_hr or the up_hr/dn_hr pair, not both"
-                )
+                raise ExchangeInputError("Wannier tensor J requires either spinor_hr or the up_hr/dn_hr pair, not both")
             if files.spinor_hr is None and not collinear_complete:
-                raise ExchangeInputError(
-                    "Wannier tensor J requires spinor_hr or both up_hr and dn_hr"
-                )
+                raise ExchangeInputError("Wannier tensor J requires spinor_hr or both up_hr and dn_hr")
         else:
             if files.spinor_hr is not None:
                 raise ExchangeInputError("scalar Wannier J requires collinear up_hr and dn_hr")
@@ -851,24 +772,18 @@ def _has_value(value: Any) -> bool:
     return value is not None and (not isinstance(value, str) or bool(value.strip()))
 
 
-def _spinor_groupby(
-    values: dict[str, Any], files: ExchangeFiles
-) -> SpinorGroupBy | None:
+def _spinor_groupby(values: dict[str, Any], files: ExchangeFiles) -> SpinorGroupBy | None:
     raw = values.pop("groupby", None)
     if files.spinor_hr is None:
         if raw is not None:
             raise ExchangeInputError("groupby is valid only with spinor_hr")
         return None
     if raw is None:
-        raise ExchangeInputError(
-            "spinor_hr requires explicit groupby='spin' or groupby='orbital'"
-        )
+        raise ExchangeInputError("spinor_hr requires explicit groupby='spin' or groupby='orbital'")
     try:
         return SpinorGroupBy(str(raw).strip().lower())
     except ValueError as exc:
-        raise ExchangeInputError(
-            f"groupby must be spin or orbital, got {raw!r}"
-        ) from exc
+        raise ExchangeInputError(f"groupby must be spin or orbital, got {raw!r}") from exc
 
 
 def _atomic_soc(
@@ -888,25 +803,17 @@ def _atomic_soc(
         raise ExchangeInputError("SOC card payload must be a mapping")
     mode = str(raw.get("mode", "")).strip().lower()
     if mode != "atomic":
-        raise ExchangeInputError(
-            f"unsupported SOC card mode {mode!r}; only atomic is supported"
-        )
+        raise ExchangeInputError(f"unsupported SOC card mode {mode!r}; only atomic is supported")
     entries = raw.get("entries")
-    if not isinstance(entries, Sequence) or isinstance(
-        entries, (str, bytes, bytearray)
-    ):
+    if not isinstance(entries, Sequence) or isinstance(entries, (str, bytes, bytearray)):
         raise ExchangeInputError("SOC (atomic) entries must be a sequence")
     manifolds: list[AtomicSOCManifold] = []
     for index, entry in enumerate(entries, start=1):
         if not isinstance(entry, Mapping):
-            raise ExchangeInputError(
-                f"SOC (atomic) entry {index} must contain selector and lambda_ev"
-            )
+            raise ExchangeInputError(f"SOC (atomic) entry {index} must contain selector and lambda_ev")
         unknown = sorted(set(entry) - {"selector", "lambda_ev"})
         if unknown or "selector" not in entry or "lambda_ev" not in entry:
-            raise ExchangeInputError(
-                f"SOC (atomic) entry {index} must contain only selector and lambda_ev"
-            )
+            raise ExchangeInputError(f"SOC (atomic) entry {index} must contain only selector and lambda_ev")
         try:
             manifolds.append(
                 AtomicSOCManifold(
@@ -930,21 +837,22 @@ def _validate_advanced_combinations(
     ltensor: bool,
     source: ExchangeSource,
 ) -> None:
+    if calculation is ExchangeCalculation.J and not ltensor and source is ExchangeSource.EPR:
+        orbit_policy = values.get("orbit_symmetry")
+        if orbit_policy in {"project", "fail"} and (bool(values.get("no_symmetry_orbits", False)) or values.get("orbit_grouping", "spglib") != "spglib"):
+            raise ExchangeInputError(f"orbit_symmetry={orbit_policy!r} requires orbit_grouping='spglib' with no_symmetry_orbits=false")
+
     if calculation is ExchangeCalculation.J and source is ExchangeSource.WANNIER:
         ref_up = _has_value(values.get("ref_epr_up"))
         ref_dn = _has_value(values.get("ref_epr_dn"))
         if ref_up != ref_dn:
-            raise ExchangeInputError(
-                "ref_epr_up and ref_epr_dn must be provided together"
-            )
+            raise ExchangeInputError("ref_epr_up and ref_epr_dn must be provided together")
 
     # Spinor layout and SOC-card dependencies are normalized before the
     # advanced numerical options reach this compatibility bridge.
 
 
-def _normalize_tensor_dj_targets(
-    values: dict[str, Any], *, atom_index_base: int
-) -> None:
+def _normalize_tensor_dj_targets(values: dict[str, Any], *, atom_index_base: int) -> None:
     if "targets" not in values or values["targets"] is None:
         return
     raw = _items(values["targets"])
@@ -954,9 +862,7 @@ def _normalize_tensor_dj_targets(
             raise ExchangeInputError("tensor dJ targets must contain integers")
         target = int(item) - atom_index_base
         if target < 0:
-            raise ExchangeInputError(
-                f"tensor dJ targets contains an invalid index: {item!r}"
-            )
+            raise ExchangeInputError(f"tensor dJ targets contains an invalid index: {item!r}")
         normalized.append(target)
     if len(set(normalized)) != len(normalized):
         raise ExchangeInputError("tensor dJ targets contains duplicate atom indices")
@@ -987,9 +893,7 @@ def _output(
     try:
         directory_value = savedir if raw_directory in (None, "") else os.fspath(raw_directory)
     except TypeError as exc:
-        raise ExchangeInputError(
-            f"out_dir must be a filesystem path, got {raw_directory!r}"
-        ) from exc
+        raise ExchangeInputError(f"out_dir must be a filesystem path, got {raw_directory!r}") from exc
     directory = Path(directory_value).expanduser()
     stem = f"{prefix}.{mode_name}"
 
@@ -1024,11 +928,7 @@ def _allowed_options(
     if calculation is ExchangeCalculation.DJ:
         return set(_DJ_TENSOR_OPTIONS if ltensor else _DJ_SCALAR_OPTIONS)
     if ltensor:
-        return set(
-            _J_TENSOR_EPR_OPTIONS
-            if source is ExchangeSource.EPR
-            else _J_TENSOR_WANNIER_OPTIONS
-        )
+        return set(_J_TENSOR_EPR_OPTIONS if source is ExchangeSource.EPR else _J_TENSOR_WANNIER_OPTIONS)
     if source is ExchangeSource.EPR:
         return set(_J_SCALAR_EPR_OPTIONS)
     return set(_J_SCALAR_WANNIER_OPTIONS)
@@ -1083,9 +983,7 @@ def build_exchange_request(
     unknown = sorted(set(values) - allowed)
     if unknown:
         raise ExchangeInputError(
-            "unknown or unsupported option(s) for "
-            f"calculation={mode.value!r}, ltensor={ltensor}, "
-            f"input_format={source.value!r}: {', '.join(unknown)}"
+            f"unknown or unsupported option(s) for calculation={mode.value!r}, ltensor={ltensor}, input_format={source.value!r}: {', '.join(unknown)}"
         )
     _validate_advanced_options(
         values,

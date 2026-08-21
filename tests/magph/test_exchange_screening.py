@@ -7,7 +7,11 @@ import h5py
 import numpy as np
 import pytest
 
-from slw.exchange.kernels.j_epr import _write_h5
+from slw.exchange.kernels.j_epr import (
+    _apply_orbit_symmetry,
+    _OrbitGrouping,
+    _write_h5,
+)
 from slw.exchange.kernels.j_tensor_epr import (
     _write_tensor_h5 as _write_epr_tensor_h5,
 )
@@ -168,9 +172,7 @@ def test_full_tensor_is_retained_and_checked_with_transpose_reciprocity(
     assert model.representation is ExchangeRepresentation.TENSOR
     assert model.source_dataset == "J_tensor_r"
     np.testing.assert_allclose(model.tensor_mev, tensors)
-    np.testing.assert_allclose(
-        model.isotropic_mev, np.trace(tensors, axis1=1, axis2=2) / 3.0
-    )
+    np.testing.assert_allclose(model.isotropic_mev, np.trace(tensors, axis1=1, axis2=2) / 3.0)
     assert not report.promoted_isotropic
     assert report.supports(ExchangeCapability.FULL_TENSOR_STATIC_EXCHANGE)
     assert not report.supports(ExchangeCapability.ISOTROPIC_STATIC_EXCHANGE)
@@ -323,9 +325,7 @@ def test_each_energy_dataset_requires_its_own_or_file_level_unit(
     missing = tmp_path / "sibling_unit_is_not_inherited.h5"
     with h5py.File(missing, "w") as handle:
         _write_bonds(handle, [0, 1], [1, 0], [(0, 0, 0), (0, 0, 0)])
-        primary = handle.create_group("J_r").create_dataset(
-            "value", data=[0.001, 0.001]
-        )
+        primary = handle.create_group("J_r").create_dataset("value", data=[0.001, 0.001])
         primary.attrs["unit"] = "eV"
         handle.create_dataset("J_iso_r", data=[1.0, 1.0])
 
@@ -335,9 +335,7 @@ def test_each_energy_dataset_requires_its_own_or_file_level_unit(
     mixed = tmp_path / "mixed_explicit_units.h5"
     with h5py.File(mixed, "w") as handle:
         _write_bonds(handle, [0, 1], [1, 0], [(0, 0, 0), (0, 0, 0)])
-        primary = handle.create_group("J_r").create_dataset(
-            "value", data=[0.001, 0.001]
-        )
+        primary = handle.create_group("J_r").create_dataset("value", data=[0.001, 0.001])
         primary.attrs["unit"] = "eV"
         alias = handle.create_dataset("J_iso_r", data=[1.0, 1.0])
         alias.attrs["unit"] = "meV"
@@ -477,9 +475,7 @@ def test_tensor_axes_are_explicit_and_reordered_to_xyz(tmp_path: Path) -> None:
     missing = tmp_path / "missing_axes.h5"
     with h5py.File(missing, "w") as handle:
         _write_bonds(handle, [0, 1], [1, 0], [(0, 0, 0), (0, 0, 0)])
-        dataset = handle.create_dataset(
-            "J_tensor_r", data=np.stack((np.eye(3), np.eye(3)))
-        )
+        dataset = handle.create_dataset("J_tensor_r", data=np.stack((np.eye(3), np.eye(3))))
         dataset.attrs["unit"] = "meV"
     with pytest.raises(ValueError, match="requires explicit tensor axes"):
         load_exchange_h5(missing)
@@ -514,14 +510,10 @@ def test_scalar_lifted_tensor_does_not_gain_full_tensor_capability(
             [(0, 0, 0), (0, 0, 0)],
             kernel_family="scalar",
         )
-        tensor = handle.create_dataset(
-            "J_tensor_r", data=np.stack((2.0 * np.eye(3), 2.0 * np.eye(3)))
-        )
+        tensor = handle.create_dataset("J_tensor_r", data=np.stack((2.0 * np.eye(3), 2.0 * np.eye(3))))
         tensor.attrs["unit"] = "meV"
         tensor.attrs["tensor_axis_order"] = "x,y,z"
-        handle["basic_data"].create_dataset(
-            "tensor_mode", data=np.bytes_("isotropic_from_scalar_collinear")
-        )
+        handle["basic_data"].create_dataset("tensor_mode", data=np.bytes_("isotropic_from_scalar_collinear"))
 
     model, report = load_exchange_h5(path)
     assert model.representation is ExchangeRepresentation.ISOTROPIC
@@ -570,9 +562,7 @@ def test_spin_operator_convention_requires_matching_spin_magnitude(
     _two_site_scalar(path, 1.0)
     with h5py.File(path, "r+") as handle:
         del handle["basic_data/spin_normalization"]
-        handle["basic_data"].create_dataset(
-            "spin_normalization", data=np.bytes_("spin_operator")
-        )
+        handle["basic_data"].create_dataset("spin_normalization", data=np.bytes_("spin_operator"))
         handle["basic_data/source_spin_magnitude"][...] = 2.5
 
     model, _ = load_exchange_h5(path)
@@ -628,6 +618,93 @@ def test_native_exchange_scalar_writer_emits_screenable_convention(
     assert model.convention.kernel_family == "scalar_lkag"
     assert model.convention.directed_bond_weight == 0.5
     assert report.supports(ExchangeCapability.ISOTROPIC_STATIC_EXCHANGE)
+
+
+def test_projected_scalar_writer_preserves_raw_values_and_passes_strict_screening(
+    tmp_path: Path,
+) -> None:
+    epr = tmp_path / "source_epr.h5"
+    with h5py.File(epr, "w"):
+        pass
+    output = tmp_path / "projected_j.h5"
+    args = SimpleNamespace(
+        kmesh=(1, 1, 1),
+        efermi=0.0,
+        hr_unit="ry",
+        integrator="contour",
+        empoints=4,
+        nproc=1,
+        epr_up=str(epr),
+    )
+    pair_meta = [
+        {
+            "gi": 2,
+            "gj": 7,
+            "li": 0,
+            "lj": 1,
+            "R": (0, 0, 0),
+            "dist": 1.0,
+            "shell": 1,
+        },
+        {
+            "gi": 7,
+            "gj": 2,
+            "li": 1,
+            "lj": 0,
+            "R": (0, 0, 0),
+            "dist": 1.0,
+            "shell": 1,
+        },
+    ]
+    orbit = [
+        {"i": 2, "j": 7, "R": (0, 0, 0), "distance": 1.0, "shell_idx": 1},
+        {"i": 7, "j": 2, "R": (0, 0, 0), "distance": 1.0, "shell_idx": 1},
+    ]
+    grouping = _OrbitGrouping(
+        [orbit],
+        source="spglib",
+        spacegroup="test #1",
+        n_operations=2,
+        species_source="test",
+    )
+    raw = np.asarray([3.0, 3.0 + 2.0e-7])
+    symmetry = _apply_orbit_symmetry(
+        pair_meta,
+        raw,
+        grouping,
+        policy="project",
+    )
+    _write_h5(
+        str(output),
+        args,
+        ["A", "B"],
+        pair_meta,
+        symmetry.values_mev,
+        grouping.orbits,
+        0.0,
+        1,
+        4,
+        {"n_chunks": 1},
+        raw_j_mev=symmetry.raw_values_mev,
+        orbit_symmetry=symmetry,
+        orbit_grouping=grouping,
+    )
+
+    with h5py.File(output) as handle:
+        np.testing.assert_array_equal(handle["J_r/value_raw"], raw)
+        canonical = np.asarray(handle["J_r/value"])
+        assert canonical[0] == canonical[1]
+        np.testing.assert_allclose(canonical, [3.0 + 1.0e-7] * 2)
+        np.testing.assert_array_equal(handle["J_r/J_r_b1"][()], handle["J_r/J_r_b2"][()])
+        assert handle["basic_data/orbit_symmetry_policy"].asstr()[()] == "project"
+        assert bool(handle["basic_data/orbit_symmetry_applied"][()])
+        assert handle["symmetry/orbit_label"].asstr()[0] == "1a"
+        assert handle["symmetry/grouping_source"].asstr()[()] == "spglib"
+
+    model, report = load_exchange_h5(output, reciprocity_atol_mev=0.0, rtol=0.0)
+    assert report.max_reciprocity_error_mev == 0.0
+    assert model.isotropic_mev[0] == model.isotropic_mev[1]
+    np.testing.assert_allclose(model.isotropic_mev, [3.0 + 1.0e-7] * 2)
 
 
 @pytest.mark.parametrize(

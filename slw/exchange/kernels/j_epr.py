@@ -8,6 +8,7 @@ import os
 import re
 import sys
 import time
+from dataclasses import dataclass
 
 import h5py
 import numpy as np
@@ -29,6 +30,29 @@ from slw.exchange.kernels.lkag import (
 from slw.exchange.kernels.parallel import collective_sum, partition_sequence, rank_size
 
 _WORKER_STATIC = None
+
+
+@dataclass(frozen=True)
+class _OrbitGrouping:
+    orbits: list[list[dict]]
+    source: str
+    spacegroup: str = ""
+    n_operations: int = 0
+    species_source: str = ""
+
+
+@dataclass(frozen=True)
+class _OrbitSymmetryResult:
+    values_mev: np.ndarray
+    raw_values_mev: np.ndarray
+    labels: tuple[str, ...]
+    sizes: np.ndarray
+    means_raw_mev: np.ndarray
+    std_raw_mev: np.ndarray
+    max_abs_deviation_raw_mev: np.ndarray
+    policy: str
+    tolerance_mev: float
+    applied: bool
 
 
 def _read_epr_positions_and_symops(epr_path):
@@ -72,7 +96,12 @@ def _read_epr_spglib_cell(epr_path, labels=None, species_labels=None):
 
         numbers = _species_numbers_from_labels(species_labels, nat)
         source = "species_labels" if numbers is not None else None
-        for key in ("basic_data/atomic_numbers", "basic_data/atomic_number", "basic_data/zatom", "basic_data/ityp"):
+        for key in (
+            "basic_data/atomic_numbers",
+            "basic_data/atomic_number",
+            "basic_data/zatom",
+            "basic_data/ityp",
+        ):
             if numbers is None and key in h5:
                 arr = np.asarray(h5[key]).reshape(-1)
                 if arr.size == nat:
@@ -116,7 +145,7 @@ def _mirror_key(key):
     return (j, i, tuple(-int(x) for x in r))
 
 
-def _group_orbits_epr(
+def _group_orbits_epr_with_provenance(
     epr_path,
     neighbours,
     *,
@@ -130,16 +159,16 @@ def _group_orbits_epr(
     debug_orbit_shell=None,
     debug_epr_positions=False,
 ):
-    """Group directed bonds into symmetry orbits using EPR crystal rotations.
+    """Group directed bonds and retain the exact grouping provenance.
 
     If EPR does not provide usable rotations, fall back to distance/pair grouping.
     The fallback still preserves every bond in the detailed list.
     """
 
     if not use_symmetry:
-        return _group_orbits_fallback(neighbours)
+        return _OrbitGrouping(_group_orbits_fallback(neighbours), source="symmetry_disabled")
     if orbit_grouping == "shell":
-        return _group_orbits_shell(neighbours)
+        return _OrbitGrouping(_group_orbits_shell(neighbours), source="shell_distance")
 
     spglib_orbits = _group_orbits_epr_spglib(
         epr_path,
@@ -157,7 +186,7 @@ def _group_orbits_epr(
 
     pos, rotations = _read_epr_positions_and_symops(epr_path)
     if rotations is None or len(rotations) == 0:
-        return _group_orbits_fallback(neighbours)
+        return _OrbitGrouping(_group_orbits_fallback(neighbours), source="distance_pair_fallback")
 
     key_to_idx = {(int(n["i"]), int(n["j"]), tuple(int(x) for x in n["R"])): idx for idx, n in enumerate(neighbours)}
 
@@ -195,13 +224,26 @@ def _group_orbits_epr(
                 v = pos[j] + r - pos[i]
                 vp = rot @ v
                 rp = np.round(vp - (pos[jp] - pos[ip])).astype(np.int64)
-                for cand in ((ip, jp, tuple(int(x) for x in rp)), _mirror_key((ip, jp, tuple(int(x) for x in rp)))):
+                for cand in (
+                    (ip, jp, tuple(int(x) for x in rp)),
+                    _mirror_key((ip, jp, tuple(int(x) for x in rp))),
+                ):
                     target = key_to_idx.get(cand)
                     if target is not None and target not in used:
                         used.add(target)
                         stack.append(target)
         orbits.append(current)
-    return orbits
+    return _OrbitGrouping(
+        orbits,
+        source="epr_symop",
+        n_operations=len(rotations),
+    )
+
+
+def _group_orbits_epr(*args, **kwargs):
+    """Compatibility helper returning only the grouped bonds."""
+
+    return _group_orbits_epr_with_provenance(*args, **kwargs).orbits
 
 
 def _group_orbits_epr_spglib(
@@ -317,10 +359,26 @@ def _group_orbits_epr_spglib(
                         used.add(target)
                         stack.append(target)
         orbits.append(current)
-    return orbits
+    return _OrbitGrouping(
+        orbits,
+        source="spglib",
+        spacegroup=spg,
+        n_operations=len(rotations),
+        species_source=str(species_source or ""),
+    )
 
 
-def _debug_spglib_orbit_maps(neighbours, pos, rotations, translations, key_to_idx, apply_op, *, labels=None, shell=None):
+def _debug_spglib_orbit_maps(
+    neighbours,
+    pos,
+    rotations,
+    translations,
+    key_to_idx,
+    apply_op,
+    *,
+    labels=None,
+    shell=None,
+):
     if shell is None:
         selected = list(neighbours)
         shell_txt = "all"
@@ -367,10 +425,7 @@ def _debug_spglib_orbit_maps(neighbours, pos, rotations, translations, key_to_id
                 continue
             seen.add(key)
             unique_hits.append((iop, key, mode))
-        hit_txt = ", ".join(
-            f"op{iop}->{_format_bond(key[0], key[1], key[2], labels=labels)}:{mode}"
-            for iop, key, mode in unique_hits
-        )
+        hit_txt = ", ".join(f"op{iop}->{_format_bond(key[0], key[1], key[2], labels=labels)}:{mode}" for iop, key, mode in unique_hits)
         if not hit_txt:
             hit_txt = "none"
         print(f"[J-epr-kspace][orbit-debug] {src_label} key={src} hits={hit_txt}")
@@ -436,7 +491,7 @@ def _split_chunks(seq, n_chunks):
     i0 = 0
     for ic in range(n_chunks):
         sz = base + (1 if ic < rem else 0)
-        chunks.append(seq[i0:i0 + sz])
+        chunks.append(seq[i0 : i0 + sz])
         i0 += sz
     return chunks
 
@@ -497,7 +552,12 @@ def _compute_j_direct(hk_up, hk_dn, slices, pair_meta, kpts, energy_mesh, efermi
     nproc = max(1, int(nproc))
     if nproc <= 1 or len(energy_mesh) < 2:
         j_acc, trace_acc = _compute_j_chunk(energy_mesh, kdata, slices, pair_meta, phase, kweights)
-        return 1000.0 * np.imag(j_acc) / (4.0 * np.pi), trace_acc, kdata, {"n_chunks": 1, "nproc": 1}
+        return (
+            1000.0 * np.imag(j_acc) / (4.0 * np.pi),
+            trace_acc,
+            kdata,
+            {"n_chunks": 1, "nproc": 1},
+        )
 
     chunks = _split_chunks(energy_mesh, nproc)
     static_payload = {
@@ -604,6 +664,86 @@ def _orbit_label_map(pair_meta, orbits):
     return orbit_label_by_key
 
 
+def _apply_orbit_symmetry(
+    pair_meta,
+    raw_values_mev,
+    grouping,
+    *,
+    policy="project",
+    tolerance_mev=1.0e-8,
+):
+    """Apply one scalar value per validated bond orbit.
+
+    Projection is intentionally restricted to a successful spglib grouping.
+    Shell/distance and EPR-symop fallbacks remain useful diagnostics, but they
+    are not authoritative enough to alter the numerical result.
+    """
+
+    policy = str(policy).strip().lower()
+    if policy not in {"report", "project", "fail"}:
+        raise ValueError(f"orbit_symmetry must be one of report, project, or fail; got {policy!r}")
+    tolerance_mev = float(tolerance_mev)
+    if not np.isfinite(tolerance_mev) or tolerance_mev < 0.0:
+        raise ValueError("orbit_symmetry_tolerance_mev must be finite and non-negative")
+    raw = np.asarray(raw_values_mev, dtype=np.float64)
+    if raw.shape != (len(pair_meta),) or not np.all(np.isfinite(raw)):
+        raise ValueError("raw scalar J values must be a finite vector matching the bond list")
+    if policy in {"project", "fail"} and grouping.source != "spglib":
+        raise ValueError(f"orbit_symmetry={policy!r} requires a successful spglib grouping; the active grouping source is {grouping.source!r}")
+
+    label_by_key = _orbit_label_map(pair_meta, grouping.orbits)
+    bond_labels: list[str] = []
+    for item in pair_meta:
+        key = (int(item["gi"]), int(item["gj"]), tuple(int(x) for x in item["R"]))
+        label = label_by_key.get(key)
+        if label is None:
+            raise RuntimeError(f"bond {key!r} was not assigned to a symmetry orbit")
+        bond_labels.append(label)
+    labels = tuple(dict.fromkeys(bond_labels))
+    bond_label_array = np.asarray(bond_labels, dtype=object)
+
+    values = raw.copy()
+    sizes = np.empty(len(labels), dtype=np.int64)
+    means = np.empty(len(labels), dtype=np.float64)
+    stds = np.empty(len(labels), dtype=np.float64)
+    max_deviations = np.empty(len(labels), dtype=np.float64)
+    worst_label = ""
+    worst_deviation = -1.0
+    for index, label in enumerate(labels):
+        members = np.flatnonzero(bond_label_array == label)
+        orbit_values = raw[members]
+        mean = float(np.mean(orbit_values))
+        deviation = float(np.max(np.abs(orbit_values - mean)))
+        sizes[index] = int(members.size)
+        means[index] = mean
+        stds[index] = float(np.std(orbit_values))
+        max_deviations[index] = deviation
+        if policy == "project":
+            values[members] = mean
+        if deviation > worst_deviation:
+            worst_label = label
+            worst_deviation = deviation
+
+    if policy == "fail" and worst_deviation > tolerance_mev:
+        raise ValueError(
+            "scalar J violates the requested orbit-symmetry tolerance: "
+            f"orbit={worst_label} max_abs_deviation={worst_deviation:.6g} meV "
+            f"> tolerance={tolerance_mev:.6g} meV"
+        )
+    return _OrbitSymmetryResult(
+        values_mev=values,
+        raw_values_mev=raw.copy(),
+        labels=labels,
+        sizes=sizes,
+        means_raw_mev=means,
+        std_raw_mev=stds,
+        max_abs_deviation_raw_mev=max_deviations,
+        policy=policy,
+        tolerance_mev=tolerance_mev,
+        applied=policy == "project",
+    )
+
+
 def _copy_epr_structure_basic(h5_out, epr_path):
     """Copy canonical structure data from EPR basic_data when available."""
     basic = h5_out["basic_data"]
@@ -620,12 +760,32 @@ def _copy_epr_structure_basic(h5_out, epr_path):
             basic.create_dataset("tau_cart_ang", data=np.asarray(tau_cart_ang, dtype=np.float64))
 
 
-def _write_h5(path, args, labels, pair_meta, j_mev, orbits, elapsed, nk, nE, exe_info):
+def _write_h5(
+    path,
+    args,
+    labels,
+    pair_meta,
+    j_mev,
+    orbits,
+    elapsed,
+    nk,
+    nE,
+    exe_info,
+    *,
+    raw_j_mev=None,
+    orbit_symmetry=None,
+    orbit_grouping=None,
+):
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     str_dt = h5py.string_dtype(encoding="utf-8")
     orbit_label_by_key = _orbit_label_map(pair_meta, orbits)
+    canonical = np.asarray(j_mev, dtype=np.float64)
+    raw = canonical if raw_j_mev is None else np.asarray(raw_j_mev, dtype=np.float64)
+    if canonical.shape != raw.shape:
+        raise ValueError("canonical and raw scalar J vectors must have the same shape")
 
     with h5py.File(path, "w") as h5:
+
         def put_string(group, name, value):
             group.create_dataset(name, data=np.array(str(value), dtype=object), dtype=str_dt)
 
@@ -644,15 +804,34 @@ def _write_h5(path, args, labels, pair_meta, j_mev, orbits, elapsed, nk, nE, exe
         basic.create_dataset("directed_bond_weight", data=np.array(0.5, dtype=np.float64))
         put_string(basic, "hr_unit", args.hr_unit)
         put_string(basic, "integrator", args.integrator)
+        put_string(
+            basic,
+            "orbit_grouping_source",
+            orbit_grouping.source if orbit_grouping is not None else "unspecified",
+        )
+        put_string(
+            basic,
+            "orbit_symmetry_policy",
+            orbit_symmetry.policy if orbit_symmetry is not None else "report",
+        )
+        basic.create_dataset(
+            "orbit_symmetry_applied",
+            data=np.array(bool(orbit_symmetry.applied) if orbit_symmetry is not None else False),
+        )
+        basic.create_dataset(
+            "orbit_symmetry_tolerance_mev",
+            data=np.array(
+                float(orbit_symmetry.tolerance_mev) if orbit_symmetry is not None else 0.0,
+                dtype=np.float64,
+            ),
+        )
         basic.create_dataset("empoints", data=np.array(int(args.empoints), dtype=np.int64))
         basic.create_dataset("nproc", data=np.array(int(args.nproc), dtype=np.int64))
         basic.create_dataset("nk", data=np.array(int(nk), dtype=np.int64))
         basic.create_dataset("nE", data=np.array(int(nE), dtype=np.int64))
         basic.create_dataset("elapsed_s", data=np.array(float(elapsed), dtype=np.float64))
         basic.create_dataset("n_chunks", data=np.array(int(exe_info.get("n_chunks", 1)), dtype=np.int64))
-        basic.create_dataset(
-            "mpi_size", data=np.array(int(exe_info.get("mpi_size", 1)), dtype=np.int64)
-        )
+        basic.create_dataset("mpi_size", data=np.array(int(exe_info.get("mpi_size", 1)), dtype=np.int64))
         put_string(basic, "command", " ".join(sys.argv))
         _copy_epr_structure_basic(h5, args.epr_up)
 
@@ -662,7 +841,10 @@ def _write_h5(path, args, labels, pair_meta, j_mev, orbits, elapsed, nk, nE, exe
         bonds.create_dataset("mag_i_local", data=np.asarray([m["li"] for m in pair_meta], dtype=np.int64))
         bonds.create_dataset("mag_j_local", data=np.asarray([m["lj"] for m in pair_meta], dtype=np.int64))
         bonds.create_dataset("R", data=np.asarray([m["R"] for m in pair_meta], dtype=np.int64))
-        bonds.create_dataset("distance_ang", data=np.asarray([m["dist"] for m in pair_meta], dtype=np.float64))
+        bonds.create_dataset(
+            "distance_ang",
+            data=np.asarray([m["dist"] for m in pair_meta], dtype=np.float64),
+        )
         bonds.create_dataset("shell", data=np.asarray([m["shell"] for m in pair_meta], dtype=np.int64))
         orbit_labels = [orbit_label_by_key.get((m["gi"], m["gj"], tuple(m["R"])), "NA") for m in pair_meta]
         bonds.create_dataset("orbit_label", data=np.asarray(orbit_labels, dtype=object), dtype=str_dt)
@@ -671,30 +853,84 @@ def _write_h5(path, args, labels, pair_meta, j_mev, orbits, elapsed, nk, nE, exe
         grp = h5.create_group("J_r")
         grp.attrs["dataset_shape"] = "()"
         grp.attrs["meaning"] = "J_r_b{bond_1based} = J(R_bond)"
-        grp.create_dataset("value", data=np.asarray(j_mev, dtype=np.float64))
+        grp.create_dataset("value", data=canonical)
         grp["value"].attrs["unit"] = "meV"
-        grp["value"].attrs["meaning"] = "Dense vector of J_r_b* in bond order."
-        for ib, val in enumerate(np.asarray(j_mev, dtype=np.float64)):
+        grp["value"].attrs["meaning"] = "Canonical scalar J in bond order; spglib-orbit projected when enabled."
+        grp.create_dataset("value_raw", data=raw)
+        grp["value_raw"].attrs["unit"] = "meV"
+        grp["value_raw"].attrs["meaning"] = "Unprojected numerical LKAG integration result in bond order."
+        grp.create_dataset("projection_delta", data=canonical - raw)
+        grp["projection_delta"].attrs["unit"] = "meV"
+        for ib, val in enumerate(canonical):
             dset = grp.create_dataset(f"J_r_b{ib + 1}", data=np.array(float(val), dtype=np.float64))
             dset.attrs["bond_index"] = int(ib)
             dset.attrs["unit"] = "meV"
 
+        if orbit_symmetry is not None:
+            symmetry = h5.create_group("symmetry")
+            put_string(symmetry, "grouping_source", orbit_grouping.source)
+            put_string(symmetry, "policy", orbit_symmetry.policy)
+            put_string(symmetry, "spacegroup", orbit_grouping.spacegroup)
+            put_string(symmetry, "species_source", orbit_grouping.species_source)
+            symmetry.create_dataset(
+                "n_operations",
+                data=np.array(int(orbit_grouping.n_operations), dtype=np.int64),
+            )
+            symmetry.create_dataset(
+                "orbit_label",
+                data=np.asarray(orbit_symmetry.labels, dtype=object),
+                dtype=str_dt,
+            )
+            symmetry.create_dataset("orbit_size", data=orbit_symmetry.sizes)
+            for name, values in (
+                ("mean_raw_mev", orbit_symmetry.means_raw_mev),
+                ("std_raw_mev", orbit_symmetry.std_raw_mev),
+                (
+                    "max_abs_deviation_raw_mev",
+                    orbit_symmetry.max_abs_deviation_raw_mev,
+                ),
+            ):
+                dataset = symmetry.create_dataset(name, data=values)
+                dataset.attrs["unit"] = "meV"
 
-def _write_outputs(args, output_path, neighbours, pair_meta, j_mev, orbits, mag_atoms, slices, elapsed, nk, nE, exe_info, labels=None):
-    result_by_key = {
-        (int(m["gi"]), int(m["gj"]), tuple(int(x) for x in m["R"])): float(j_mev[ip])
-        for ip, m in enumerate(pair_meta)
-    }
-    meta_by_key = {
-        (int(m["gi"]), int(m["gj"]), tuple(int(x) for x in m["R"])): m
-        for m in pair_meta
-    }
+
+def _write_outputs(
+    args,
+    output_path,
+    neighbours,
+    pair_meta,
+    j_mev,
+    orbits,
+    mag_atoms,
+    slices,
+    elapsed,
+    nk,
+    nE,
+    exe_info,
+    labels=None,
+    *,
+    raw_j_mev=None,
+    orbit_symmetry=None,
+    orbit_grouping=None,
+):
+    raw_values = np.asarray(j_mev, dtype=np.float64) if raw_j_mev is None else np.asarray(raw_j_mev, dtype=np.float64)
+    result_by_key = {(int(m["gi"]), int(m["gj"]), tuple(int(x) for x in m["R"])): float(j_mev[ip]) for ip, m in enumerate(pair_meta)}
+    raw_by_key = {(int(m["gi"]), int(m["gj"]), tuple(int(x) for x in m["R"])): float(raw_values[ip]) for ip, m in enumerate(pair_meta)}
+    meta_by_key = {(int(m["gi"]), int(m["gj"]), tuple(int(x) for x in m["R"])): m for m in pair_meta}
 
     orbit_rows = []
     detailed_rows = []
-    mirror_rows = []
     orbit_counter = {}
-    orbits = sorted(orbits, key=lambda o: (int(o[0].get("shell_idx", 0)), float(o[0]["distance"]), int(o[0]["i"]), int(o[0]["j"]), tuple(o[0]["R"])))
+    orbits = sorted(
+        orbits,
+        key=lambda o: (
+            int(o[0].get("shell_idx", 0)),
+            float(o[0]["distance"]),
+            int(o[0]["i"]),
+            int(o[0]["j"]),
+            tuple(o[0]["R"]),
+        ),
+    )
 
     for orbit in orbits:
         keys = [(int(n["i"]), int(n["j"]), tuple(int(x) for x in n["R"])) for n in orbit]
@@ -707,18 +943,30 @@ def _write_outputs(args, output_path, neighbours, pair_meta, j_mev, orbits, mag_
         orbit_label = f"{shell}{chr(97 + orbit_counter[shell])}"
         orbit_counter[shell] += 1
         vals = np.asarray([result_by_key[k] for k in keys], dtype=np.float64)
+        raw_vals = np.asarray([raw_by_key[k] for k in keys], dtype=np.float64)
         name_i = _atom_name(n0["li"], n0["gi"], labels)
         name_j = _atom_name(n0["lj"], n0["gj"], labels)
-        orbit_rows.append((shell, orbit_label, len(keys), f"{name_i}-{name_j}", float(n0["dist"]), float(np.mean(vals)), float(np.std(vals))))
+        raw_mean = float(np.mean(raw_vals))
+        orbit_rows.append(
+            (
+                shell,
+                orbit_label,
+                len(keys),
+                f"{name_i}-{name_j}",
+                float(n0["dist"]),
+                float(np.mean(vals)),
+                float(np.std(raw_vals)),
+                float(np.max(np.abs(raw_vals - raw_mean))),
+            )
+        )
         for k in keys:
             m = meta_by_key[k]
             mir = _mirror_key(k)
             jm = result_by_key.get(mir, np.nan)
-            detailed_rows.append((orbit_label, m, result_by_key[k], jm))
-            mirror_rows.append((m, result_by_key[k], mir, jm))
+            detailed_rows.append((orbit_label, m, result_by_key[k], raw_by_key[k], jm))
 
-    header = f"{'Shell':<6} {'Orbit':<8} {'Deg.':<6} {'Neighbor':<13} {'Dist (A)':<10} {'Avg J (meV)':<14} {'Std':<10}"
-    sep = "-" * 78
+    header = f"{'Shell':<6} {'Orbit':<8} {'Deg.':<6} {'Neighbor':<13} {'Dist (A)':<10} {'J (meV)':<14} {'Raw std':<10} {'Raw max dev':<12}"
+    sep = "-" * 94
     with open(output_path, "w") as f:
         f.write("# Exchange Coupling (J) Results - EPR direct H(k)\n")
         f.write(f"# EPR up: {os.path.abspath(args.epr_up)}\n")
@@ -726,46 +974,68 @@ def _write_outputs(args, output_path, neighbours, pair_meta, j_mev, orbits, mag_
         f.write(f"# H unit interpreted as: {args.hr_unit}\n")
         f.write("# Neighbour source: EPR basic_data/at,tau with alat conversion\n")
         f.write(f"# K-mesh: {tuple(args.kmesh)}, Energy pts: {int(args.empoints)}, integrator={args.integrator}\n")
-        f.write(
-            f"# nk={int(nk)} nE={int(nE)} nproc={int(exe_info.get('nproc', 1))} "
-            f"n_chunks={int(exe_info.get('n_chunks', 1))} elapsed_s={elapsed:.2f}\n"
-        )
+        f.write(f"# nk={int(nk)} nE={int(nE)} nproc={int(exe_info.get('nproc', 1))} n_chunks={int(exe_info.get('n_chunks', 1))} elapsed_s={elapsed:.2f}\n")
         f.write(f"# mag_atoms_global_0based={mag_atoms}\n")
         f.write(f"# slices={ {int(k): (v.start, v.stop) for k, v in slices.items()} }\n")
+        if orbit_symmetry is not None:
+            f.write(
+                f"# orbit_symmetry={orbit_symmetry.policy} "
+                f"applied={str(bool(orbit_symmetry.applied)).lower()} "
+                f"tolerance_meV={orbit_symmetry.tolerance_mev:.12e} "
+                f"grouping_source={orbit_grouping.source}\n"
+            )
         f.write(f"# n_bonds={len(pair_meta)} n_orbits={len(orbit_rows)}\n\n")
         f.write(header + "\n")
         f.write(sep + "\n")
         print("\n" + header)
         print(sep)
-        for shell, label, deg, neigh, dist, avg, std in orbit_rows:
-            line = f"{shell:<6} {label:<8} {deg:<6} {neigh:<13} {dist:<10.4f} {avg:<14.6f} {std:<10.3e}"
+        for shell, label, deg, neigh, dist, avg, std, max_dev in orbit_rows:
+            line = f"{shell:<6} {label:<8} {deg:<6} {neigh:<13} {dist:<10.4f} {avg:<14.6f} {std:<10.3e} {max_dev:<12.3e}"
             f.write(line + "\n")
             print(line)
 
         f.write("\n\n# Detailed Directed Bond List (all selected bonds, no omission)\n")
-        f.write(f"{'Orbit':<8} {'Bond':<15} {'Mirror bond':<18} {'Distance (A)':<15} {'R vector':<15} {'J (meV)':<14} {'Mirror J':<14} {'Diff':<14}\n")
-        f.write("-" * 122 + "\n")
-        detailed_rows.sort(key=lambda x: (int(x[1]["shell"]), float(x[1]["dist"]), int(x[1]["gi"]), int(x[1]["gj"]), tuple(x[1]["R"])))
-        for orbit_label, m, jv, jm in detailed_rows:
+        f.write(
+            f"{'Orbit':<8} {'Bond':<15} {'Mirror bond':<18} "
+            f"{'Distance (A)':<15} {'R vector':<15} {'J (meV)':<14} "
+            f"{'Raw J':<14} {'Delta':<14} {'Mirror J':<14} {'Diff':<14}\n"
+        )
+        f.write("-" * 154 + "\n")
+        detailed_rows.sort(
+            key=lambda x: (
+                int(x[1]["shell"]),
+                float(x[1]["dist"]),
+                int(x[1]["gi"]),
+                int(x[1]["gj"]),
+                tuple(x[1]["R"]),
+            )
+        )
+        for orbit_label, m, jv, raw_jv, jm in detailed_rows:
             bond = f"{_atom_name(m['li'], m['gi'], labels)}-{_atom_name(m['lj'], m['gj'], labels)}"
             key = (int(m["gi"]), int(m["gj"]), tuple(int(x) for x in m["R"]))
             mir = _mirror_key(key)
             diff = jv - jm if np.isfinite(jm) else np.nan
             f.write(
                 f"{orbit_label:<8} {bond:<15} {_format_bond(*mir, labels=labels):<18} {float(m['dist']):<15.6f} "
-                f"{_format_r(m['R']):<15} {jv:<14.8f} {jm:<14.8f} {diff:<14.8e}\n"
+                f"{_format_r(m['R']):<15} {jv:<14.8f} {raw_jv:<14.8f} "
+                f"{jv - raw_jv:<14.8e} {jm:<14.8f} {diff:<14.8e}\n"
             )
 
     tsv_path = os.path.splitext(output_path)[0] + ".all_bonds.tsv"
     with open(tsv_path, "w") as f:
-        f.write("shell\torbit\tgi\tgj\tR1\tR2\tR3\tdist_A\tJ_meV\tmirror_gi\tmirror_gj\tmirror_R1\tmirror_R2\tmirror_R3\tmirror_J_meV\tdiff_meV\n")
-        for orbit_label, m, jv, jm in detailed_rows:
+        f.write(
+            "shell\torbit\tgi\tgj\tR1\tR2\tR3\tdist_A\tJ_meV\tJ_raw_meV\t"
+            "projection_delta_meV\tmirror_gi\tmirror_gj\tmirror_R1\tmirror_R2\t"
+            "mirror_R3\tmirror_J_meV\tdiff_meV\n"
+        )
+        for orbit_label, m, jv, raw_jv, jm in detailed_rows:
             key = (int(m["gi"]), int(m["gj"]), tuple(int(x) for x in m["R"]))
             mir = _mirror_key(key)
             diff = jv - jm if np.isfinite(jm) else np.nan
             f.write(
                 f"{int(m['shell'])}\t{orbit_label}\t{key[0]}\t{key[1]}\t{key[2][0]}\t{key[2][1]}\t{key[2][2]}\t"
-                f"{float(m['dist']):.12e}\t{jv:.12e}\t{mir[0]}\t{mir[1]}\t{mir[2][0]}\t{mir[2][1]}\t{mir[2][2]}\t"
+                f"{float(m['dist']):.12e}\t{jv:.12e}\t{raw_jv:.12e}\t{jv - raw_jv:.12e}\t"
+                f"{mir[0]}\t{mir[1]}\t{mir[2][0]}\t{mir[2][1]}\t{mir[2][2]}\t"
                 f"{jm:.12e}\t{diff:.12e}\n"
             )
     return tsv_path
@@ -913,8 +1183,7 @@ def run(args, comm=None):
     rank, size = rank_size(comm)
     local_energy_mesh = partition_sequence(energy_mesh, comm)
     print(
-        f"[J-epr-kspace] computing J for {len(pair_meta)} directed bonds, "
-        f"nE={len(energy_mesh)} local_nE={len(local_energy_mesh)} mpi={size}",
+        f"[J-epr-kspace] computing J for {len(pair_meta)} directed bonds, nE={len(energy_mesh)} local_nE={len(local_energy_mesh)} mpi={size}",
         flush=True,
     )
     local_state = {}
@@ -938,14 +1207,14 @@ def run(args, comm=None):
         return
     if reduced is None:  # pragma: no cover - defensive communicator guard
         raise RuntimeError("MPI root did not receive scalar J reduction")
-    j_mev, trace_acc = reduced
+    j_raw_mev, trace_acc = reduced
     kdata = local_state["kdata"]
     exe_info = {
         "n_chunks": max(1, size),
         "nproc": size if size > 1 else int(args.nproc),
         "mpi_size": size,
     }
-    orbits = _group_orbits_epr(
+    grouping = _group_orbits_epr_with_provenance(
         args.epr_up,
         neighbours,
         use_symmetry=not bool(args.no_symmetry_orbits),
@@ -958,6 +1227,22 @@ def run(args, comm=None):
         debug_orbit_shell=args.debug_orbit_shell,
         debug_epr_positions=bool(args.debug_epr_positions),
     )
+    orbit_symmetry = _apply_orbit_symmetry(
+        pair_meta,
+        j_raw_mev,
+        grouping,
+        policy=args.orbit_symmetry,
+        tolerance_mev=args.orbit_symmetry_tolerance_mev,
+    )
+    j_mev = orbit_symmetry.values_mev
+    max_residual = float(np.max(orbit_symmetry.max_abs_deviation_raw_mev, initial=0.0))
+    print(
+        "[J-epr-kspace] orbit symmetry: "
+        f"policy={orbit_symmetry.policy} source={grouping.source} "
+        f"n_orbits={len(orbit_symmetry.labels)} "
+        f"max_raw_deviation={max_residual:.6e} meV",
+        flush=True,
+    )
     out_dir = os.path.abspath(args.out_dir)
     os.makedirs(out_dir, exist_ok=True)
     output_path = os.path.join(out_dir, args.out_name)
@@ -968,7 +1253,7 @@ def run(args, comm=None):
         neighbours,
         pair_meta,
         j_mev,
-        orbits,
+        grouping.orbits,
         mag_atoms,
         slices,
         elapsed,
@@ -976,8 +1261,19 @@ def run(args, comm=None):
         len(energy_mesh),
         exe_info,
         labels=labels,
+        raw_j_mev=orbit_symmetry.raw_values_mev,
+        orbit_symmetry=orbit_symmetry,
+        orbit_grouping=grouping,
     )
-    _write_debug_pairs(args, out_dir, pair_meta, j_mev, trace_acc, kdata, labels=labels)
+    _write_debug_pairs(
+        args,
+        out_dir,
+        pair_meta,
+        orbit_symmetry.raw_values_mev,
+        trace_acc,
+        kdata,
+        labels=labels,
+    )
     if not args.no_h5:
         if args.out_h5:
             h5_path = args.out_h5
@@ -991,11 +1287,14 @@ def run(args, comm=None):
             labels,
             pair_meta,
             j_mev,
-            orbits,
+            grouping.orbits,
             elapsed,
             len(kpts),
             len(energy_mesh),
             exe_info,
+            raw_j_mev=orbit_symmetry.raw_values_mev,
+            orbit_symmetry=orbit_symmetry,
+            orbit_grouping=grouping,
         )
         print(f"[J-epr-kspace] wrote {h5_path}")
     print(f"[J-epr-kspace] wrote {output_path}")
@@ -1006,8 +1305,16 @@ def main():
     ap = argparse.ArgumentParser(description="Direct EPR H(k) bond-resolved LKAG J calculator")
     ap.add_argument("--epr_up", required=True)
     ap.add_argument("--epr_dn", required=True)
-    ap.add_argument("--atom_labels", default="", help="Comma-separated labels for EPR atoms; default Atom1,Atom2,...")
-    ap.add_argument("--species_labels", default="", help="Comma-separated species for spglib orbit grouping, e.g. Mn,Mn,Te,Te.")
+    ap.add_argument(
+        "--atom_labels",
+        default="",
+        help="Comma-separated labels for EPR atoms; default Atom1,Atom2,...",
+    )
+    ap.add_argument(
+        "--species_labels",
+        default="",
+        help="Comma-separated species for spglib orbit grouping, e.g. Mn,Mn,Te,Te.",
+    )
     ap.add_argument("--hr_unit", choices=["ev", "ry", "ha"], default="ry")
     ap.add_argument("--mag_atoms", type=int, nargs="+", required=True)
     ap.add_argument("--mag_atoms_base", type=int, choices=[0, 1], default=0)
@@ -1021,24 +1328,80 @@ def main():
     ap.add_argument("--integrator", choices=["contour", "cfr", "cfr_ozaki"], default="contour")
     ap.add_argument("--cfr_beta", type=float, default=400.0)
     ap.add_argument("--nproc", type=int, default=1, help="Parallel contour chunks/processes")
-    ap.add_argument("--symprec", type=float, default=1.0e-4, help="spglib symmetry tolerance for orbit grouping.")
-    ap.add_argument("--angle_tolerance", type=float, default=-1.0, help="spglib angle tolerance in degrees; -1 uses spglib default.")
+    ap.add_argument(
+        "--symprec",
+        type=float,
+        default=1.0e-4,
+        help="spglib symmetry tolerance for orbit grouping.",
+    )
+    ap.add_argument(
+        "--angle_tolerance",
+        type=float,
+        default=-1.0,
+        help="spglib angle tolerance in degrees; -1 uses spglib default.",
+    )
     ap.add_argument(
         "--orbit_grouping",
         choices=["spglib", "shell"],
         default="spglib",
         help="Orbit grouping mode. shell groups all bonds with the same shell index and distance.",
     )
-    ap.add_argument("--debug_orbits", action="store_true", help="Print spglib operation and bond-mapping diagnostics.")
-    ap.add_argument("--debug_orbit_shell", type=int, default=None, help="Restrict --debug_orbits bond diagnostics to one shell.")
-    ap.add_argument("--debug_epr_positions", action="store_true", help="Print EPR tau and Wannier-center position diagnostics.")
-    ap.add_argument("--debug_shell", type=int, default=None, help="Write per-bond LKAG debug TSV for one shell, e.g. 2 for J2.")
-    ap.add_argument("--debug_bond", default="", help="Write debug for one directed bond: gi,gj,R1,R2,R3.")
-    ap.add_argument("--debug_out", default="J_debug_pairs.tsv", help="Debug TSV filename inside --out_dir.")
-    ap.add_argument("--no_symmetry_orbits", action="store_true", help="Fallback to distance/pair orbit grouping.")
+    ap.add_argument(
+        "--orbit_symmetry",
+        choices=["report", "project", "fail"],
+        default="project",
+        help=("Treatment of scalar J within each spglib orbit: report raw values, project to the orbit mean, or fail above the requested tolerance."),
+    )
+    ap.add_argument(
+        "--orbit_symmetry_tolerance_mev",
+        type=float,
+        default=1.0e-8,
+        help="Maximum raw within-orbit deviation accepted by orbit_symmetry=fail.",
+    )
+    ap.add_argument(
+        "--debug_orbits",
+        action="store_true",
+        help="Print spglib operation and bond-mapping diagnostics.",
+    )
+    ap.add_argument(
+        "--debug_orbit_shell",
+        type=int,
+        default=None,
+        help="Restrict --debug_orbits bond diagnostics to one shell.",
+    )
+    ap.add_argument(
+        "--debug_epr_positions",
+        action="store_true",
+        help="Print EPR tau and Wannier-center position diagnostics.",
+    )
+    ap.add_argument(
+        "--debug_shell",
+        type=int,
+        default=None,
+        help="Write per-bond LKAG debug TSV for one shell, e.g. 2 for J2.",
+    )
+    ap.add_argument(
+        "--debug_bond",
+        default="",
+        help="Write debug for one directed bond: gi,gj,R1,R2,R3.",
+    )
+    ap.add_argument(
+        "--debug_out",
+        default="J_debug_pairs.tsv",
+        help="Debug TSV filename inside --out_dir.",
+    )
+    ap.add_argument(
+        "--no_symmetry_orbits",
+        action="store_true",
+        help="Fallback to distance/pair orbit grouping.",
+    )
     ap.add_argument("--out_dir", default=".")
     ap.add_argument("--out_name", default="J_epr_kspace.txt")
-    ap.add_argument("--out_h5", default=None, help="Optional J_r HDF5 filename/path. Default: <out_name basename>.Jr.h5")
+    ap.add_argument(
+        "--out_h5",
+        default=None,
+        help="Optional J_r HDF5 filename/path. Default: <out_name basename>.Jr.h5",
+    )
     ap.add_argument("--no_h5", action="store_true", help="Disable J_r HDF5 output.")
     run(ap.parse_args())
 

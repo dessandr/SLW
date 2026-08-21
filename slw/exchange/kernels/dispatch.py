@@ -38,6 +38,8 @@ _J_SCALAR_EPR_DEFAULTS: dict[str, Any] = {
     "symprec": 1.0e-4,
     "angle_tolerance": -1.0,
     "orbit_grouping": "spglib",
+    "orbit_symmetry": "project",
+    "orbit_symmetry_tolerance_mev": 1.0e-8,
     "debug_orbits": False,
     "debug_orbit_shell": None,
     "debug_epr_positions": False,
@@ -204,9 +206,7 @@ _DJ_TENSOR_DEFAULTS: dict[str, Any] = {
 
 
 def _slice_text(request: ExchangeRequest) -> str:
-    return ",".join(
-        f"{item.site}:{item.start}:{item.stop}" for item in request.slices
-    )
+    return ",".join(f"{item.site}:{item.start}:{item.stop}" for item in request.slices)
 
 
 def _normalize_aliases(options: dict[str, Any]) -> None:
@@ -222,22 +222,13 @@ def _normalize_aliases(options: dict[str, Any]) -> None:
         options["soc_groups_base"] = alias
     if "onsite_deriv_exchange_field" in options:
         alias = options.pop("onsite_deriv_exchange_field")
-        if (
-            "onsite_deriv_projector" in options
-            and options["onsite_deriv_projector"] != alias
-        ):
-            raise ValueError(
-                "onsite_deriv_exchange_field conflicts with onsite_deriv_projector"
-            )
+        if "onsite_deriv_projector" in options and options["onsite_deriv_projector"] != alias:
+            raise ValueError("onsite_deriv_exchange_field conflicts with onsite_deriv_projector")
         options["onsite_deriv_projector"] = alias
 
 
 def _core_options(request: ExchangeRequest) -> dict[str, Any]:
-    files = {
-        key: value
-        for key, value in vars(request.files).items()
-        if value is not None
-    }
+    files = {key: value for key, value in vars(request.files).items() if value is not None}
     options = {
         **files,
         "efermi": request.efermi,
@@ -283,6 +274,16 @@ def build_namespace(request: ExchangeRequest) -> tuple[str, str, argparse.Namesp
     advanced = request.options.as_dict()
     _normalize_aliases(advanced)
     options.update(advanced)
+    if (
+        request.calculation is ExchangeCalculation.J
+        and request.source is ExchangeSource.EPR
+        and not request.ltensor
+        and "orbit_symmetry" not in advanced
+        and (bool(options.get("no_symmetry_orbits", False)) or options.get("orbit_grouping") != "spglib")
+    ):
+        # An explicit fallback-grouping request is diagnostic by definition;
+        # never project it merely because projection is the production default.
+        options["orbit_symmetry"] = "report"
     options.update(_core_options(request))
     options["groupby"] = request.groupby.value if request.groupby is not None else None
     options["soc_manifolds"] = (
@@ -325,12 +326,8 @@ def execute(
     paths = [request.output.h5_path]
     if not (request.calculation is ExchangeCalculation.DJ and request.ltensor):
         paths.append(request.output.text_path)
-    has_table = (
-        request.calculation is ExchangeCalculation.DJ and not request.ltensor
-    ) or (
-        request.calculation is ExchangeCalculation.J
-        and not request.ltensor
-        and request.source is ExchangeSource.EPR
+    has_table = (request.calculation is ExchangeCalculation.DJ and not request.ltensor) or (
+        request.calculation is ExchangeCalculation.J and not request.ltensor and request.source is ExchangeSource.EPR
     )
     if has_table:
         paths.append(request.output.table_path)

@@ -11,6 +11,7 @@ from slw.exchange.config import (
     ExchangeRequest,
     build_exchange_request,
 )
+from slw.exchange.kernels.dispatch import build_namespace
 from slw.exchange.model import (
     ExchangeCalculation,
     ExchangeSource,
@@ -81,8 +82,9 @@ class ExchangeConfigTests(unittest.TestCase):
             )
 
         for option in ("tensor_kernel", "kernel"):
-            with self.subTest(option=option), self.assertRaisesRegex(
-                ExchangeInputError, "ltensor=true"
+            with (
+                self.subTest(option=option),
+                self.assertRaisesRegex(ExchangeInputError, "ltensor=true"),
             ):
                 build_exchange_request(
                     "j",
@@ -253,8 +255,9 @@ class ExchangeConfigTests(unittest.TestCase):
             ({"slices": "0:0:5,1:4:8"}, "overlap"),
         )
         for updates, message in cases:
-            with self.subTest(updates=updates), self.assertRaisesRegex(
-                ExchangeInputError, message
+            with (
+                self.subTest(updates=updates),
+                self.assertRaisesRegex(ExchangeInputError, message),
             ):
                 build_exchange_request(
                     "j",
@@ -321,6 +324,38 @@ class ExchangeConfigTests(unittest.TestCase):
                     onsite_deriv_projector=True,
                 ),
                 prefix="d",
+                savedir="save",
+            )
+
+    def test_scalar_j_orbit_symmetry_defaults_and_grouping_contract(self):
+        request = build_exchange_request(
+            "j",
+            _common(input_format="epr"),
+            prefix="x",
+            savedir="save",
+        )
+        _module, _function, namespace = build_namespace(request)
+        self.assertEqual(namespace.orbit_symmetry, "project")
+        self.assertEqual(namespace.orbit_symmetry_tolerance_mev, 1.0e-8)
+
+        diagnostic = build_exchange_request(
+            "j",
+            _common(input_format="epr", no_symmetry_orbits=True),
+            prefix="x",
+            savedir="save",
+        )
+        _module, _function, namespace = build_namespace(diagnostic)
+        self.assertEqual(namespace.orbit_symmetry, "report")
+
+        with self.assertRaisesRegex(ExchangeInputError, "requires orbit_grouping='spglib'"):
+            build_exchange_request(
+                "j",
+                _common(
+                    input_format="epr",
+                    orbit_grouping="shell",
+                    orbit_symmetry="project",
+                ),
+                prefix="x",
                 savedir="save",
             )
 
@@ -393,8 +428,9 @@ class ExchangeConfigTests(unittest.TestCase):
             ("j", {"input_format": "epr", "hr_unit": "kelvin"}, "hr_unit"),
         )
         for calculation, updates, message in cases:
-            with self.subTest(calculation=calculation, updates=updates), self.assertRaisesRegex(
-                ExchangeInputError, message
+            with (
+                self.subTest(calculation=calculation, updates=updates),
+                self.assertRaisesRegex(ExchangeInputError, message),
             ):
                 build_exchange_request(
                     calculation,
@@ -484,9 +520,7 @@ class ExchangeConfigTests(unittest.TestCase):
 
         spinor = {**base, "up_hr": None, "dn_hr": None, "spinor_hr": "s.hr"}
         with self.assertRaisesRegex(ExchangeInputError, "requires explicit groupby"):
-            build_exchange_request(
-                "j_tensor", spinor, prefix="w", savedir="save"
-            )
+            build_exchange_request("j_tensor", spinor, prefix="w", savedir="save")
         with self.assertRaisesRegex(ExchangeInputError, "spin or orbital"):
             build_exchange_request(
                 "j_tensor",

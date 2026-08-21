@@ -342,8 +342,13 @@ rejected by the scalar kernel. Supplying `win` avoids ambiguous structure
 discovery for bond construction.
 
 **Outputs:** `${savedir}/${prefix}.j.txt` and `.h5`; EPR also writes the
-derived `.all_bonds.tsv` table. `no_h5=.true.` disables scalar EPR HDF5.
-Wannier scalar J is currently stored in an isotropic `J_tensor_r` envelope.
+derived `.all_bonds.tsv` table. By default, EPR scalar J is averaged only
+within each bond orbit validated by spglib. The canonical values are stored in
+`J_r/value`, while the unmodified integration values remain in
+`J_r/value_raw`; `J_r/projection_delta` and the `symmetry/` group record the
+residual and provenance. Distinct symmetry orbits in the same distance shell
+remain distinct. `no_h5=.true.` disables scalar EPR HDF5. Wannier scalar J is
+currently stored in an isotropic `J_tensor_r` envelope.
 
 #### `input_format='epr'`
 
@@ -371,6 +376,8 @@ Native engine: `slw.exchange.engine`; numerical kernel:
 | `symprec` | float | no | `0.0001` | spglib symmetry tolerance for orbit grouping.<br>CLI aliases: `--symprec` |
 | `angle_tolerance` | float | no | `-1.0` | spglib angle tolerance in degrees; -1 uses spglib default.<br>CLI aliases: `--angle_tolerance` |
 | `orbit_grouping` | enum {spglib, shell} | no | `spglib` | Orbit grouping mode. shell groups all bonds with the same shell index and distance.<br>CLI aliases: `--orbit_grouping` |
+| `orbit_symmetry` | enum {report, project, fail} | no | `project` | `project` replaces every scalar J in a validated spglib orbit by that orbit's mean. `report` preserves raw values; `fail` rejects a raw within-orbit deviation above `orbit_symmetry_tolerance_mev`. Projection/failure are forbidden for shell, disabled, or fallback grouping.<br>CLI aliases: `--orbit_symmetry` |
+| `orbit_symmetry_tolerance_mev` | float | no | `1.0e-8` | Non-negative tolerance used by `orbit_symmetry='fail'`; also recorded as projection provenance.<br>CLI aliases: `--orbit_symmetry_tolerance_mev` |
 | `debug_orbits` | boolean | no | .false. | Print spglib operation and bond-mapping diagnostics.<br>CLI aliases: `--debug_orbits` |
 | `debug_orbit_shell` | int | no | none / runtime | Restrict --debug_orbits bond diagnostics to one shell.<br>CLI aliases: `--debug_orbit_shell` |
 | `debug_epr_positions` | boolean | no | .false. | Print EPR tau and Wannier-center position diagnostics.<br>CLI aliases: `--debug_epr_positions` |

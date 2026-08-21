@@ -2,7 +2,11 @@ import unittest
 
 import numpy as np
 
-from slw.exchange.kernels.j_epr import _compute_j_direct
+from slw.exchange.kernels.j_epr import (
+    _apply_orbit_symmetry,
+    _compute_j_direct,
+    _OrbitGrouping,
+)
 
 
 def _toy_exchange_problem():
@@ -71,9 +75,7 @@ def _dense_reference(hk_up, hk_dn, slices, pair_meta, kpts, energy_mesh, efermi)
                 green_up += phase * g_up[ik][slice_i, slice_j]
                 green_dn += phase.conjugate() * g_dn[ik][slice_j, slice_i]
             relative_sign = signs[site_i] * signs[site_j]
-            trace = np.trace(
-                delta[site_i] @ green_up @ delta[site_j] @ green_dn
-            ) / relative_sign
+            trace = np.trace(delta[site_i] @ green_up @ delta[site_j] @ green_dn) / relative_sign
             trace_acc[bond] += trace
             j_acc[bond] += trace * dz
 
@@ -96,9 +98,7 @@ class DirectExchangeKernelTests(unittest.TestCase):
             0.0,
             nproc=1,
         )
-        expected, expected_trace = _dense_reference(
-            hk_up, hk_dn, slices, pair_meta, kpts, energy_mesh, 0.0
-        )
+        expected, expected_trace = _dense_reference(hk_up, hk_dn, slices, pair_meta, kpts, energy_mesh, 0.0)
 
         self.assertEqual(result.shape, (len(pair_meta),))
         self.assertEqual(trace.shape, (len(pair_meta),))
@@ -113,12 +113,8 @@ class DirectExchangeKernelTests(unittest.TestCase):
     def test_two_process_result_matches_serial(self):
         hk_up, hk_dn, slices, pair_meta, kpts, energy_mesh = _toy_exchange_problem()
 
-        serial = _compute_j_direct(
-            hk_up, hk_dn, slices, pair_meta, kpts, energy_mesh, 0.0, nproc=1
-        )
-        parallel = _compute_j_direct(
-            hk_up, hk_dn, slices, pair_meta, kpts, energy_mesh, 0.0, nproc=2
-        )
+        serial = _compute_j_direct(hk_up, hk_dn, slices, pair_meta, kpts, energy_mesh, 0.0, nproc=1)
+        parallel = _compute_j_direct(hk_up, hk_dn, slices, pair_meta, kpts, energy_mesh, 0.0, nproc=2)
 
         np.testing.assert_allclose(parallel[0], serial[0], rtol=1e-12, atol=1e-12)
         np.testing.assert_allclose(parallel[1], serial[1], rtol=1e-12, atol=1e-12)
@@ -142,6 +138,76 @@ class DirectExchangeKernelTests(unittest.TestCase):
         np.testing.assert_array_equal(trace, np.zeros(len(pair_meta), dtype=np.complex128))
         for local_delta in kdata["delta"].values():
             np.testing.assert_array_equal(local_delta, np.zeros_like(local_delta))
+
+
+class OrbitSymmetryTests(unittest.TestCase):
+    def setUp(self):
+        self.pair_meta = [
+            {"gi": 0, "gj": 1, "R": (1, 0, 0), "shell": 10},
+            {"gi": 1, "gj": 0, "R": (-1, 0, 0), "shell": 10},
+            {"gi": 0, "gj": 1, "R": (0, 1, 0), "shell": 10},
+            {"gi": 1, "gj": 0, "R": (0, -1, 0), "shell": 10},
+        ]
+        orbit_a = [
+            {"i": 0, "j": 1, "R": (1, 0, 0), "shell_idx": 10, "distance": 5.0},
+            {"i": 1, "j": 0, "R": (-1, 0, 0), "shell_idx": 10, "distance": 5.0},
+        ]
+        orbit_b = [
+            {"i": 0, "j": 1, "R": (0, 1, 0), "shell_idx": 10, "distance": 5.0},
+            {"i": 1, "j": 0, "R": (0, -1, 0), "shell_idx": 10, "distance": 5.0},
+        ]
+        self.grouping = _OrbitGrouping(
+            [orbit_a, orbit_b],
+            source="spglib",
+            spacegroup="test",
+            n_operations=4,
+            species_source="test",
+        )
+
+    def test_projection_averages_each_orbit_without_merging_directional_orbits(self):
+        result = _apply_orbit_symmetry(
+            self.pair_meta,
+            np.asarray([1.0, 3.0, 10.0, 14.0]),
+            self.grouping,
+            policy="project",
+        )
+
+        np.testing.assert_array_equal(result.values_mev, [2.0, 2.0, 12.0, 12.0])
+        np.testing.assert_array_equal(result.raw_values_mev, [1.0, 3.0, 10.0, 14.0])
+        np.testing.assert_array_equal(result.sizes, [2, 2])
+        np.testing.assert_array_equal(result.means_raw_mev, [2.0, 12.0])
+        np.testing.assert_array_equal(result.max_abs_deviation_raw_mev, [1.0, 2.0])
+        self.assertEqual(set(result.labels), {"10a", "10b"})
+        self.assertTrue(result.applied)
+
+    def test_projection_refuses_non_spglib_grouping(self):
+        fallback = _OrbitGrouping(self.grouping.orbits, source="shell_distance")
+        with self.assertRaisesRegex(ValueError, "requires a successful spglib"):
+            _apply_orbit_symmetry(
+                self.pair_meta,
+                np.ones(4),
+                fallback,
+                policy="project",
+            )
+
+        report = _apply_orbit_symmetry(
+            self.pair_meta,
+            np.asarray([1.0, 3.0, 10.0, 14.0]),
+            fallback,
+            policy="report",
+        )
+        np.testing.assert_array_equal(report.values_mev, report.raw_values_mev)
+        self.assertFalse(report.applied)
+
+    def test_fail_policy_enforces_raw_orbit_tolerance(self):
+        with self.assertRaisesRegex(ValueError, "orbit=10"):
+            _apply_orbit_symmetry(
+                self.pair_meta,
+                np.asarray([1.0, 1.1, 2.0, 2.0]),
+                self.grouping,
+                policy="fail",
+                tolerance_mev=0.01,
+            )
 
 
 if __name__ == "__main__":

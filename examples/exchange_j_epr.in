@@ -25,6 +25,9 @@
   mag_atoms_base = 0,
   slices = '0:0:5,1:5:10',
   n_shells = 1,
+  ! Canonical J uses one mean value per validated spglib bond orbit.
+  ! Distinct directional orbits (for example 10a and 10b) remain separate.
+  orbit_symmetry = 'project',
   integrator = 'contour',
   ! Small smoke-test value; perform an empoints convergence study.
   empoints = 64
