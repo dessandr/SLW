@@ -50,9 +50,7 @@ def _sum_payloads(values: Sequence[Any]) -> Any:
         keys = tuple(first)
         if any(tuple(value) != keys for value in values):
             raise ValueError("MPI mapping payload keys differ across ranks")
-        return {
-            key: _sum_payloads([value[key] for value in values]) for key in keys
-        }
+        return {key: _sum_payloads([value[key] for value in values]) for key in keys}
     if isinstance(first, tuple):
         if any(len(value) != len(first) for value in values):
             raise ValueError("MPI tuple payload lengths differ across ranks")
@@ -94,4 +92,66 @@ def collective_sum(comm: Any | None, work: Callable[[], T]) -> T | None:
     return _sum_payloads(gathered)
 
 
-__all__ = ["collective_sum", "partition_sequence", "rank_size"]
+def collective_call(
+    comm: Any | None,
+    work: Callable[[], T],
+    *,
+    phase: str,
+) -> T:
+    """Run rank-local work and agree failures before later collectives."""
+
+    if comm is None:
+        return work()
+    rank, _size = rank_size(comm)
+    error: tuple[int, str, str] | None
+    try:
+        result = work()
+    except Exception as exc:  # noqa: BLE001 - synchronize rank-local setup
+        result = None
+        error = (rank, type(exc).__name__, str(exc))
+    else:
+        error = None
+    errors = list(comm.allgather(error))
+    failures = [item for item in errors if item is not None]
+    if failures:
+        rendered = "; ".join(
+            f"rank {item[0]} {item[1]}: {item[2]}" for item in failures
+        )
+        raise RuntimeError(f"native exchange MPI {phase} failed: {rendered}")
+    return result  # type: ignore[return-value]
+
+
+def collective_root_call(
+    comm: Any | None,
+    work: Callable[[], T],
+    *,
+    phase: str,
+) -> T | None:
+    """Run root-only finalization and broadcast its success or failure."""
+
+    if comm is None:
+        return work()
+    rank, _size = rank_size(comm)
+    result: T | None = None
+    error: tuple[int, str, str] | None = None
+    if rank == 0:
+        try:
+            result = work()
+        except Exception as exc:  # noqa: BLE001 - peers await root status
+            error = (rank, type(exc).__name__, str(exc))
+    error = comm.bcast(error, root=0)
+    if error is not None:
+        raise RuntimeError(
+            f"native exchange MPI {phase} failed: "
+            f"rank {error[0]} {error[1]}: {error[2]}"
+        )
+    return result
+
+
+__all__ = [
+    "collective_call",
+    "collective_root_call",
+    "collective_sum",
+    "partition_sequence",
+    "rank_size",
+]

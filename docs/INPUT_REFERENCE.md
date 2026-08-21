@@ -238,8 +238,12 @@ With `execution='auto'`, a launch containing more than one rank uses MPI for
 every mode. Scalar/tensor J and scalar dJ partition the contour or pole energy
 mesh; tensor dJ partitions target/displacement-axis tasks. Rank 0 writes the
 final HDF5/text products after the collective reduction. Set `nproc=1` under
-MPI to avoid nested process oversubscription. In a serial launch, `nproc>1`
-enables the existing local multiprocessing path.
+MPI for every mode except scalar dJ. Scalar dJ supports a hybrid route where
+each rank builds one EPC cache, publishes its arrays in POSIX shared memory,
+and runs `nproc` clean local worker processes. The launcher affinity assigned
+to each rank must contain at least `nproc*omp_threads` CPUs, and the node-local
+POSIX shared-memory filesystem must be large enough for that rank's cache. In
+a serial launch, `nproc>1` uses the copy-on-write local multiprocessing path.
 
 | Native namelist key | Type | Required | Default | Meaning |
 |---|---|---:|---|---|
@@ -545,9 +549,9 @@ Native engine: `slw.exchange.engine`; numerical kernel:
 | `empoints` | int | no | `100` | Advanced native-kernel option.<br>CLI aliases: `--empoints` |
 | `integrator` | enum {contour, cfr, cfr_ozaki} | no | `contour` | Advanced native-kernel option.<br>CLI aliases: `--integrator` |
 | `cfr_beta` | float | no | `400.0` | Advanced native-kernel option.<br>CLI aliases: `--cfr_beta` |
-| `nproc` | int | no | `1` | Serial local energy-worker processes; must be 1 per MPI rank<br>CLI aliases: `--nproc` |
-| `omp_threads` | int | no | `1` | BLAS/OpenMP threads per energy worker process<br>CLI aliases: `--omp_threads` |
-| `precache_workers` | int | no | `1` | Thread workers for independent g(k,q) pre-cache entries<br>CLI aliases: `--precache_workers` |
+| `nproc` | int | no | `1` | Local energy-worker processes per rank. Under MPI, scalar dJ publishes its cache once per rank through POSIX shared memory; one rank per node minimizes cache replication.<br>CLI aliases: `--nproc` |
+| `omp_threads` | int | no | `1` | BLAS/OpenMP threads per local energy worker. `nproc*omp_threads` must not exceed the CPU affinity assigned to one rank.<br>CLI aliases: `--omp_threads` |
+| `precache_workers` | int | no | `1` | Threads used before integration for independent g(k,q) cache entries. `precache_workers*omp_threads` must fit the rank affinity.<br>CLI aliases: `--precache_workers` |
 | `rotation_mode` | enum {none} | no | `none` | Advanced native-kernel option.<br>CLI aliases: `--rotation_mode` |
 | `ddelta_mode` | enum {off, local, onsite} | no | `off` | Include derivative of local exchange splitting Delta. off: legacy dG-only; local: use full local block of g_up-g_dn; onsite: use only electron Re=(0,0,0) onsite derivative.<br>CLI aliases: `--ddelta_mode` |
 | `symprec` | float | no | `0.0001` | spglib symmetry tolerance for orbit grouping.<br>CLI aliases: `--symprec` |

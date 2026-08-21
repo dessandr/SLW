@@ -13,7 +13,7 @@ from slw.cli.schema import parse_run_config
 from slw.exchange.config import build_exchange_request
 from slw.exchange.engine import ExchangeRunResult, _execute, prepare_run, run_exchange
 from slw.exchange.kernels.dispatch import KernelArtifacts, build_namespace
-from slw.exchange.kernels.dj_epr import _axis_list
+from slw.exchange.kernels.dj_epr import _axis_list, _validate_local_parallelism
 
 
 def _parameters(*, ltensor=False, source="epr"):
@@ -84,6 +84,64 @@ class ExchangeEngineTests(unittest.TestCase):
         self.assertTrue(scalar.all_ranks)
         self.assertIsNone(scalar.warning)
 
+    def test_scalar_dj_accepts_rank_local_workers_under_mpi(self):
+        parameters = {**_parameters(), "nproc": 4, "omp_threads": 2}
+        config = _run_config("dj", parameters)
+        plan = prepare_run(
+            calculation="dj",
+            requested_name="dj",
+            parameters=parameters,
+            config=config,
+            context=MPIContext(comm=object(), rank=0, size=2),
+            program="slw_exchange.x",
+        )
+
+        self.assertTrue(plan.all_ranks)
+        self.assertIn(("local workers/rank", 4), plan.summary)
+        self.assertIn(("threads/worker", 2), plan.summary)
+
+        tensor_parameters = {
+            key: value for key, value in parameters.items() if key != "omp_threads"
+        }
+        tensor_parameters["ltensor"] = True
+        tensor_config = _run_config("dj", tensor_parameters)
+        with self.assertRaisesRegex(ValueError, "requires nproc=1 per rank"):
+            prepare_run(
+                calculation="dj",
+                requested_name="dj",
+                parameters=tensor_parameters,
+                config=tensor_config,
+                context=MPIContext(comm=object(), rank=0, size=2),
+                program="slw_exchange.x",
+            )
+
+    def test_scalar_dj_local_workers_respect_rank_cpu_affinity(self):
+        with (
+            mock.patch(
+                "slw.exchange.kernels.dj_epr.os.sched_getaffinity",
+                return_value={0, 1, 2, 3},
+            ),
+            self.assertRaisesRegex(ValueError, r"nproc\*omp_threads=8"),
+        ):
+            _validate_local_parallelism(
+                nproc=4,
+                omp_threads=2,
+                precache_workers=1,
+            )
+
+        with mock.patch(
+            "slw.exchange.kernels.dj_epr.os.sched_getaffinity",
+            return_value={0, 1, 2, 3},
+        ):
+            self.assertEqual(
+                _validate_local_parallelism(
+                    nproc=2,
+                    omp_threads=2,
+                    precache_workers=1,
+                ),
+                4,
+            )
+
     def test_explicit_mpi_accepts_static_exchange(self):
         parameters = _parameters(ltensor=True)
         config = _run_config("j", parameters, execution="mpi")
@@ -113,7 +171,9 @@ class ExchangeEngineTests(unittest.TestCase):
         self.assertEqual(namespace.slices, "0:0:2,1:2:4")
         self.assertTrue(os.path.isabs(namespace.out_dir))
         self.assertTrue(os.path.isabs(namespace.out_name))
-        self.assertFalse(namespace.out_name.startswith(namespace.out_dir + namespace.out_dir))
+        self.assertFalse(
+            namespace.out_name.startswith(namespace.out_dir + namespace.out_dir)
+        )
 
     def test_tensor_dj_normalizes_one_based_targets_with_atoms(self):
         parameters = _parameters(ltensor=True)
@@ -143,7 +203,9 @@ class ExchangeEngineTests(unittest.TestCase):
                 )
                 _, _, namespace = build_namespace(request)
 
-                self.assertEqual(_axis_list(namespace.axes), list(axes.replace(",", "")))
+                self.assertEqual(
+                    _axis_list(namespace.axes), list(axes.replace(",", ""))
+                )
 
     def test_spinor_groupby_and_soc_card_reach_native_namespace(self):
         parameters = {
@@ -199,7 +261,10 @@ class ExchangeEngineTests(unittest.TestCase):
             try:
                 os.chdir(directory)
                 sys.stdin = io.StringIO(text)
-                with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                with (
+                    contextlib.redirect_stdout(stdout),
+                    contextlib.redirect_stderr(stderr),
+                ):
                     code = run_stage("exchange", ["--dry-run"])
                 self.assertFalse(os.path.exists(os.path.join(directory, "scratch")))
             finally:
@@ -235,7 +300,9 @@ class ExchangeEngineTests(unittest.TestCase):
 
             stdout = io.StringIO()
             with (
-                mock.patch("slw.exchange.engine.execute_kernel", side_effect=fake_kernel),
+                mock.patch(
+                    "slw.exchange.engine.execute_kernel", side_effect=fake_kernel
+                ),
                 contextlib.redirect_stdout(stdout),
             ):
                 result = _execute(
@@ -247,7 +314,9 @@ class ExchangeEngineTests(unittest.TestCase):
                 )
 
         output = stdout.getvalue()
-        self.assertEqual(result.artifacts, (request.output.h5_path, request.output.text_path))
+        self.assertEqual(
+            result.artifacts, (request.output.h5_path, request.output.text_path)
+        )
         self.assertGreaterEqual(result.wall_seconds, 0.0)
         self.assertIn("Running tensor J kernel ...", output)
         self.assertIn("completed bond block 1/1", output)
@@ -274,7 +343,9 @@ class ExchangeEngineTests(unittest.TestCase):
         expected = ExchangeRunResult(request, (), 1.0, 2.0, 1)
         with (
             mock.patch.object(MPIContext, "discover", return_value=context) as discover,
-            mock.patch("slw.exchange.engine._execute", return_value=expected) as execute,
+            mock.patch(
+                "slw.exchange.engine._execute", return_value=expected
+            ) as execute,
         ):
             result = run_exchange(request, execution="serial")
 

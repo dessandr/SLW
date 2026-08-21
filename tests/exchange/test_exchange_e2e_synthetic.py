@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import concurrent.futures
+import contextlib
+import io
 import tempfile
 import threading
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import h5py
 import numpy as np
@@ -21,16 +24,20 @@ class _CollectiveState:
     def __init__(self, size: int) -> None:
         self.size = size
         self.condition = threading.Condition()
-        self.allgather: dict[int, object] = {}
-        self.allgather_result: list[object] | None = None
-        self.gather: dict[int, object] = {}
-        self.gather_result: list[object] | None = None
+        self.allgather: dict[int, dict[int, object]] = {}
+        self.allgather_result: dict[int, list[object]] = {}
+        self.gather: dict[int, dict[int, object]] = {}
+        self.gather_result: dict[int, list[object]] = {}
+        self.broadcast: dict[int, object] = {}
 
 
 class _ThreadComm:
     def __init__(self, state: _CollectiveState, rank: int) -> None:
         self.state = state
         self.rank = rank
+        self.allgather_sequence = 0
+        self.gather_sequence = 0
+        self.broadcast_sequence = 0
 
     def Get_rank(self):
         return self.rank
@@ -39,30 +46,51 @@ class _ThreadComm:
         return self.state.size
 
     def allgather(self, value):
+        sequence = self.allgather_sequence
+        self.allgather_sequence += 1
         with self.state.condition:
-            self.state.allgather[self.rank] = value
-            if len(self.state.allgather) == self.state.size:
-                self.state.allgather_result = [
-                    self.state.allgather[index] for index in range(self.state.size)
+            pending = self.state.allgather.setdefault(sequence, {})
+            pending[self.rank] = value
+            if len(pending) == self.state.size:
+                self.state.allgather_result[sequence] = [
+                    pending[index] for index in range(self.state.size)
                 ]
                 self.state.condition.notify_all()
             else:
                 self.state.condition.wait_for(
-                    lambda: self.state.allgather_result is not None
+                    lambda: sequence in self.state.allgather_result
                 )
-            return list(self.state.allgather_result)
+            return list(self.state.allgather_result[sequence])
 
     def gather(self, value, root=0):
+        sequence = self.gather_sequence
+        self.gather_sequence += 1
         with self.state.condition:
-            self.state.gather[self.rank] = value
-            if len(self.state.gather) == self.state.size:
-                self.state.gather_result = [
-                    self.state.gather[index] for index in range(self.state.size)
+            pending = self.state.gather.setdefault(sequence, {})
+            pending[self.rank] = value
+            if len(pending) == self.state.size:
+                self.state.gather_result[sequence] = [
+                    pending[index] for index in range(self.state.size)
                 ]
                 self.state.condition.notify_all()
             else:
-                self.state.condition.wait_for(lambda: self.state.gather_result is not None)
-            return list(self.state.gather_result) if self.rank == root else None
+                self.state.condition.wait_for(
+                    lambda: sequence in self.state.gather_result
+                )
+            return (
+                list(self.state.gather_result[sequence]) if self.rank == root else None
+            )
+
+    def bcast(self, value, root=0):
+        sequence = self.broadcast_sequence
+        self.broadcast_sequence += 1
+        with self.state.condition:
+            if self.rank == root:
+                self.state.broadcast[sequence] = value
+                self.state.condition.notify_all()
+            else:
+                self.state.condition.wait_for(lambda: sequence in self.state.broadcast)
+            return self.state.broadcast[sequence]
 
 
 class SyntheticExchangeEndToEndTests(unittest.TestCase):
@@ -104,10 +132,12 @@ class SyntheticExchangeEndToEndTests(unittest.TestCase):
         if isinstance(node, h5py.Dataset):
             return [np.asarray(node)]
         node.visititems(
-            lambda _name, item: arrays.append(np.asarray(item))
-            if isinstance(item, h5py.Dataset)
-            and np.issubdtype(item.dtype, np.number)
-            else None
+            lambda _name, item: (
+                arrays.append(np.asarray(item))
+                if isinstance(item, h5py.Dataset)
+                and np.issubdtype(item.dtype, np.number)
+                else None
+            )
         )
         return arrays
 
@@ -237,9 +267,76 @@ class SyntheticExchangeEndToEndTests(unittest.TestCase):
                     self.assertEqual(int(handle["basic_data/mpi_size"][()]), 2)
                 self.assertEqual(len(actual), len(expected))
                 for got, want in zip(actual, expected, strict=True):
-                    np.testing.assert_allclose(
-                        got, want, rtol=1.0e-11, atol=1.0e-11
-                    )
+                    np.testing.assert_allclose(got, want, rtol=1.0e-11, atol=1.0e-11)
+
+    def test_scalar_dj_rank_local_workers_match_single_worker(self) -> None:
+        options = {
+            "eph_unit": "ev",
+            "targets": "0",
+            "axes": "x",
+            "qmesh": (1, 1, 1),
+            "no_symmetry_orbits": True,
+        }
+        serial = self._request("dj", "serial_worker", **options)
+        execute(serial)
+        with h5py.File(serial.output.h5_path) as handle:
+            expected = self._numeric_group_payload(handle, "dJ_r")
+
+        hybrid = self._request("dj", "hybrid_worker", nproc=2, **options)
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            execute(
+                hybrid,
+                mpi=True,
+                comm=_ThreadComm(_CollectiveState(1), 0),
+            )
+        self.assertIn("integration completed", stdout.getvalue())
+        self.assertIn("100.0%", stdout.getvalue())
+        with h5py.File(hybrid.output.h5_path) as handle:
+            actual = self._numeric_group_payload(handle, "dJ_r")
+            self.assertEqual(int(handle["basic_data/nproc"][()]), 2)
+            self.assertEqual(int(handle["basic_data/mpi_size"][()]), 1)
+            self.assertGreaterEqual(
+                int(handle["basic_data/affinity_cpus_per_rank"][()]), 2
+            )
+            self.assertEqual(
+                handle["basic_data/local_worker_backend"].asstr()[()],
+                "posix_shared_process",
+            )
+
+        self.assertEqual(len(actual), len(expected))
+        for got, want in zip(actual, expected, strict=True):
+            np.testing.assert_allclose(got, want, rtol=1.0e-11, atol=1.0e-11)
+
+    def test_scalar_dj_root_write_failure_releases_every_rank(self) -> None:
+        request = self._request(
+            "dj",
+            "write_failure",
+            eph_unit="ev",
+            targets="0",
+            axes="x",
+            qmesh=(1, 1, 1),
+            no_symmetry_orbits=True,
+        )
+        state = _CollectiveState(2)
+
+        def run_rank(rank: int):
+            return execute(request, mpi=True, comm=_ThreadComm(state, rank))
+
+        with (
+            mock.patch(
+                "slw.exchange.kernels.dj_epr._write_h5",
+                side_effect=OSError("disk full"),
+            ),
+            concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool,
+        ):
+            futures = [pool.submit(run_rank, rank) for rank in range(2)]
+            for future in futures:
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "scalar dJ output write failed: rank 0 OSError: disk full",
+                ):
+                    future.result(timeout=15.0)
 
     def test_wannier_and_epr_scalar_j_agree_for_same_hamiltonian(self) -> None:
         epr = self._request("j", "epr_j", no_symmetry_orbits=True)

@@ -138,13 +138,18 @@ def _validate_runtime(request: ExchangeRequest, *, all_ranks: bool) -> None:
         and request.ltensor
         and request.tensor_kernel.value != "tb2j"
     ):
-        raise ExchangeInputError("tensor dJ currently supports tensor_kernel='tb2j' only")
+        raise ExchangeInputError(
+            "tensor dJ currently supports tensor_kernel='tb2j' only"
+        )
     if all_ranks:
         nproc = int(request.options.as_dict().get("nproc", 1))
-        if nproc != 1:
+        hybrid_scalar_dj = (
+            request.calculation is ExchangeCalculation.DJ and not request.ltensor
+        )
+        if nproc != 1 and not hybrid_scalar_dj:
             raise ExchangeInputError(
-                "MPI exchange requires nproc=1 per rank to avoid nested process "
-                "oversubscription; use numba_threads/blas_threads for rank-local work"
+                "MPI exchange requires nproc=1 per rank for this mode; only scalar "
+                "dJ currently supports MPI ranks with rank-local worker processes"
             )
 
 
@@ -152,7 +157,9 @@ def _check_artifacts(artifacts: KernelArtifacts) -> None:
     missing = [path for path in artifacts.paths if not Path(path).is_file()]
     if missing:
         rendered = ", ".join(missing)
-        raise RuntimeError(f"exchange kernel did not create expected output(s): {rendered}")
+        raise RuntimeError(
+            f"exchange kernel did not create expected output(s): {rendered}"
+        )
 
 
 def _execute(
@@ -257,9 +264,7 @@ def run_exchange(
     requested = str(execution).strip().lower()
     if mpi.size > 1:
         control_payload = (
-            (request, requested, str(program), str(verbosity))
-            if mpi.is_root
-            else None
+            (request, requested, str(program), str(verbosity)) if mpi.is_root else None
         )
         canonical = mpi.bcast(control_payload, root=0)
         if canonical is None:  # pragma: no cover - defensive communicator guard
@@ -330,12 +335,22 @@ def prepare_run(
     )
     _validate_runtime(request, all_ranks=all_ranks)
     mode = _mode_label(request)
-    summary: tuple[tuple[str, Any], ...] = (
+    summary_items: list[tuple[str, Any]] = [
         ("form", "tensor" if request.ltensor else "scalar"),
         ("k-point mesh", " x ".join(map(str, request.kmesh))),
         ("magnetic sites", len(request.mag_atoms)),
         ("output", request.output.h5_path),
-    )
+    ]
+    if request.calculation is ExchangeCalculation.DJ and not request.ltensor:
+        options = request.options.as_dict()
+        summary_items.extend(
+            (
+                ("local workers/rank", int(options.get("nproc", 1))),
+                ("threads/worker", int(options.get("omp_threads", 1))),
+                ("precache workers", int(options.get("precache_workers", 1))),
+            )
+        )
+    summary = tuple(summary_items)
 
     def run() -> int:
         _execute(

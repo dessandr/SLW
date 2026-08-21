@@ -14,6 +14,8 @@ import os
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
+from multiprocessing import shared_memory
 
 import h5py
 import numpy as np
@@ -42,17 +44,37 @@ from slw.exchange.kernels.lkag import (
     get_cfr_pole_mesh,
     get_semicircle_contour,
 )
-from slw.exchange.kernels.parallel import collective_sum, partition_sequence, rank_size
+from slw.exchange.kernels.parallel import (
+    collective_call,
+    collective_root_call,
+    collective_sum,
+    partition_sequence,
+    rank_size,
+)
 
 _WORKER_STATIC = None
+_WORKER_SHARED_MEMORY = []
 _THREADPOOL_LIMITER = None
+_DEFAULT_PROGRESS_UPDATES = 20
+
+
+@dataclass(frozen=True)
+class _SharedArraySpec:
+    name: str
+    shape: tuple[int, ...]
+    dtype: str
 
 
 def _configure_threads(nthreads):
     """Limit BLAS/OpenMP libraries for this process when threadpoolctl exists."""
     global _THREADPOOL_LIMITER
     n = max(1, int(nthreads))
-    for key in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
+    for key in (
+        "OMP_NUM_THREADS",
+        "MKL_NUM_THREADS",
+        "OPENBLAS_NUM_THREADS",
+        "NUMEXPR_NUM_THREADS",
+    ):
         os.environ[key] = str(n)
     if threadpool_limits is not None:
         if _THREADPOOL_LIMITER is not None:
@@ -61,12 +83,55 @@ def _configure_threads(nthreads):
         _THREADPOOL_LIMITER.__enter__()
 
 
+def _available_cpu_count():
+    """Return CPUs available to this rank, respecting launcher affinity."""
+    if hasattr(os, "sched_getaffinity"):
+        try:
+            affinity = os.sched_getaffinity(0)
+        except OSError:
+            pass
+        else:
+            if affinity:
+                return len(affinity)
+    return os.cpu_count() or 1
+
+
+def _validate_local_parallelism(*, nproc, omp_threads, precache_workers):
+    local_workers = max(1, int(nproc))
+    threads = max(1, int(omp_threads))
+    cache_workers = max(1, int(precache_workers))
+    available = _available_cpu_count()
+    integration_demand = local_workers * threads
+    precache_demand = cache_workers * threads
+    if integration_demand > available:
+        raise ValueError(
+            "rank-local nproc*omp_threads="
+            f"{integration_demand} exceeds CPU affinity={available}; reserve that "
+            "many cores per MPI rank (for OpenMPI use :PE=N) or reduce workers"
+        )
+    if precache_demand > available:
+        raise ValueError(
+            "rank-local precache_workers*omp_threads="
+            f"{precache_demand} exceeds CPU affinity={available}"
+        )
+    return available
+
+
+def _format_elapsed(seconds):
+    total = max(0, round(float(seconds)))
+    hours, remainder = divmod(total, 3600)
+    minutes, secs = divmod(remainder, 60)
+    if hours:
+        return f"{hours:d}h{minutes:02d}m{secs:02d}s"
+    if minutes:
+        return f"{minutes:d}m{secs:02d}s"
+    return f"{secs:d}s"
+
+
 def _axis_list(text):
     """Normalize compact or comma-separated Cartesian-axis input."""
     normalized = "".join(
-        char
-        for char in str(text).strip().lower()
-        if char not in {",", " ", "\t"}
+        char for char in str(text).strip().lower() if char not in {",", " ", "\t"}
     )
     if not normalized:
         return ["x", "y", "z"]
@@ -121,7 +186,7 @@ def _target_indices(text, labels):
         else:
             idx = int(t)
             if idx < 0 or idx >= len(labels):
-                raise ValueError(f"Target index {idx} outside [0,{len(labels)-1}]")
+                raise ValueError(f"Target index {idx} outside [0,{len(labels) - 1}]")
             out.append(idx)
     return list(dict.fromkeys(out))
 
@@ -132,26 +197,43 @@ def _full_q_mesh(qmesh):
 
 def _rp_grid(qmesh):
     axes = [np.fft.fftfreq(int(n)) * int(n) for n in qmesh]
-    return np.asarray([(int(i), int(j), int(k)) for i in axes[0] for j in axes[1] for k in axes[2]], dtype=np.int64)
+    return np.asarray(
+        [(int(i), int(j), int(k)) for i in axes[0] for j in axes[1] for k in axes[2]],
+        dtype=np.int64,
+    )
 
 
 def _kq_map(kmesh, qmesh):
     kmesh = np.asarray(kmesh, dtype=np.int64)
     qmesh = np.asarray(qmesh, dtype=np.int64)
     if np.any(kmesh % qmesh != 0):
-        raise ValueError(f"kmesh={tuple(kmesh)} must be commensurate with qmesh={tuple(qmesh)}")
+        raise ValueError(
+            f"kmesh={tuple(kmesh)} must be commensurate with qmesh={tuple(qmesh)}"
+        )
     kpts_idx = np.asarray(
-        [(i, j, k) for i in range(kmesh[0]) for j in range(kmesh[1]) for k in range(kmesh[2])],
+        [
+            (i, j, k)
+            for i in range(kmesh[0])
+            for j in range(kmesh[1])
+            for k in range(kmesh[2])
+        ],
         dtype=np.int64,
     )
     qpts_idx = np.asarray(
-        [(i, j, k) for i in range(qmesh[0]) for j in range(qmesh[1]) for k in range(qmesh[2])],
+        [
+            (i, j, k)
+            for i in range(qmesh[0])
+            for j in range(qmesh[1])
+            for k in range(qmesh[2])
+        ],
         dtype=np.int64,
     )
     scale = kmesh // qmesh
     shifts = qpts_idx * scale[None, :]
     kq = (kpts_idx[None, :, :] + shifts[:, None, :]) % kmesh[None, None, :]
-    return (kq[:, :, 0] * (kmesh[1] * kmesh[2]) + kq[:, :, 1] * kmesh[2] + kq[:, :, 2]).astype(np.int64)
+    return (
+        kq[:, :, 0] * (kmesh[1] * kmesh[2]) + kq[:, :, 1] * kmesh[2] + kq[:, :, 2]
+    ).astype(np.int64)
 
 
 def _bond_target_q_phase(qpts, pair_meta):
@@ -177,7 +259,10 @@ def _precompute_eigensystem(hk_up, hk_dn, slices, efermi):
     nk, dim, _ = hk_up.shape
     eye = np.eye(dim, dtype=np.complex128)
     evals = {"up": np.zeros((nk, dim)), "down": np.zeros((nk, dim))}
-    coeffs = {"up": np.zeros((nk, dim, dim), dtype=np.complex128), "down": np.zeros((nk, dim, dim), dtype=np.complex128)}
+    coeffs = {
+        "up": np.zeros((nk, dim, dim), dtype=np.complex128),
+        "down": np.zeros((nk, dim, dim), dtype=np.complex128),
+    }
     delta = {}
     signs = {}
     for spin, hk in (("up", hk_up), ("down", hk_dn)):
@@ -228,14 +313,21 @@ def _build_hk_epr_phase(epr_path, kpts, *, unit="ry", phase_cache=None):
                 di = f"electron_wannier/hopping_i{tri}"
                 if dr not in h5 or di not in h5:
                     continue
-                hop = (np.asarray(h5[dr], dtype=np.float64) + 1j * np.asarray(h5[di], dtype=np.float64)) * scale
+                hop = (
+                    np.asarray(h5[dr], dtype=np.float64)
+                    + 1j * np.asarray(h5[di], dtype=np.float64)
+                ) * scale
                 key = (iw, jw)
                 ws = ws_cache.get(key)
                 if ws is None:
-                    ws = set_wigner_seitz_cell(images, meta.at, meta.wc[iw - 1], meta.wc[jw - 1])
+                    ws = set_wigner_seitz_cell(
+                        images, meta.at, meta.wc[iw - 1], meta.wc[jw - 1]
+                    )
                     ws_cache[key] = ws
                 if hop.shape[0] != ws.nr:
-                    raise ValueError(f"H WS mismatch iw={iw} jw={jw}: h5={hop.shape[0]} ws={ws.nr}")
+                    raise ValueError(
+                        f"H WS mismatch iw={iw} jw={jw}: h5={hop.shape[0]} ws={ws.nr}"
+                    )
                 phase_k = _phase_table(kpts, ws.vectors, phase_cache, "hk")
                 vals = phase_k @ hop
                 hk[:, iw - 1, jw - 1] += vals
@@ -244,9 +336,21 @@ def _build_hk_epr_phase(epr_path, kpts, *, unit="ry", phase_cache=None):
         return 0.5 * (hk + np.swapaxes(hk.conj(), 1, 2)), meta.nk_grid
 
 
-def _build_gkq_one(epr_path, target_ia0, axis, kpts, qpts, *, unit="ry", rotation_mode="none", phase_cache=None):
+def _build_gkq_one(
+    epr_path,
+    target_ia0,
+    axis,
+    kpts,
+    qpts,
+    *,
+    unit="ry",
+    rotation_mode="none",
+    phase_cache=None,
+):
     if rotation_mode != "none":
-        raise NotImplementedError("rotation_mode scaffold exists, but U-rotation is not implemented yet.")
+        raise NotImplementedError(
+            "rotation_mode scaffold exists, but U-rotation is not implemented yet."
+        )
     ax_id = {"x": 0, "y": 1, "z": 2}[axis]
     scale = _unit_scale_to_ev(unit)
     phase_cache = {} if phase_cache is None else phase_cache
@@ -266,14 +370,21 @@ def _build_gkq_one(epr_path, target_ia0, axis, kpts, qpts, *, unit="ry", rotatio
                 di = f"ep_hop_i_{ia}_{jw}_{iw}"
                 if dr not in grp or di not in grp:
                     continue
-                arr = (np.asarray(grp[dr], dtype=np.float64) + 1j * np.asarray(grp[di], dtype=np.float64)).transpose(2, 1, 0)
+                arr = (
+                    np.asarray(grp[dr], dtype=np.float64)
+                    + 1j * np.asarray(grp[di], dtype=np.float64)
+                ).transpose(2, 1, 0)
                 key = (jw, iw)
                 got = ws_cache.get(key)
                 if got is None:
                     iw0 = iw - 1
                     jw0 = jw - 1
-                    ws_el = set_wigner_seitz_cell(el_images, meta.at, meta.wc[iw0], meta.wc[jw0])
-                    ws_ph = set_wigner_seitz_cell(ph_images, meta.at, meta.wc[iw0], meta.tau[target_ia0])
+                    ws_el = set_wigner_seitz_cell(
+                        el_images, meta.at, meta.wc[iw0], meta.wc[jw0]
+                    )
+                    ws_ph = set_wigner_seitz_cell(
+                        ph_images, meta.at, meta.wc[iw0], meta.tau[target_ia0]
+                    )
                     got = (ws_el, ws_ph)
                     ws_cache[key] = got
                 ws_el, ws_ph = got
@@ -281,8 +392,12 @@ def _build_gkq_one(epr_path, target_ia0, axis, kpts, qpts, *, unit="ry", rotatio
                     raise ValueError(
                         f"WS mismatch ia={ia} jw={jw} iw={iw}: arr={arr.shape[1:]} ws={(ws_el.nr, ws_ph.nr)}"
                     )
-                phase_k = _phase_table(kpts, ws_el.vectors, phase_cache, f"gk:{iw}:{jw}")
-                phase_q = _phase_table(qpts, ws_ph.vectors, phase_cache, f"gq:{target_ia0}:{iw}")
+                phase_k = _phase_table(
+                    kpts, ws_el.vectors, phase_cache, f"gk:{iw}:{jw}"
+                )
+                phase_q = _phase_table(
+                    qpts, ws_ph.vectors, phase_cache, f"gq:{target_ia0}:{iw}"
+                )
                 block = arr[ax_id] * scale
                 # Pipeline equivalent:
                 #   g(k,q) = sum_Re,Rp eph_hop(Re,Rp) exp(+ik.Re) exp(+iq.Rp)
@@ -293,9 +408,21 @@ def _build_gkq_one(epr_path, target_ia0, axis, kpts, qpts, *, unit="ry", rotatio
         return gkq
 
 
-def _build_gkq_onsite_one(epr_path, target_ia0, axis, kpts, qpts, *, unit="ry", rotation_mode="none", phase_cache=None):
+def _build_gkq_onsite_one(
+    epr_path,
+    target_ia0,
+    axis,
+    kpts,
+    qpts,
+    *,
+    unit="ry",
+    rotation_mode="none",
+    phase_cache=None,
+):
     if rotation_mode != "none":
-        raise NotImplementedError("rotation_mode scaffold exists, but U-rotation is not implemented yet.")
+        raise NotImplementedError(
+            "rotation_mode scaffold exists, but U-rotation is not implemented yet."
+        )
     ax_id = {"x": 0, "y": 1, "z": 2}[axis]
     scale = _unit_scale_to_ev(unit)
     phase_cache = {} if phase_cache is None else phase_cache
@@ -315,14 +442,21 @@ def _build_gkq_onsite_one(epr_path, target_ia0, axis, kpts, qpts, *, unit="ry", 
                 di = f"ep_hop_i_{ia}_{jw}_{iw}"
                 if dr not in grp or di not in grp:
                     continue
-                arr = (np.asarray(grp[dr], dtype=np.float64) + 1j * np.asarray(grp[di], dtype=np.float64)).transpose(2, 1, 0)
+                arr = (
+                    np.asarray(grp[dr], dtype=np.float64)
+                    + 1j * np.asarray(grp[di], dtype=np.float64)
+                ).transpose(2, 1, 0)
                 key = (jw, iw)
                 got = ws_cache.get(key)
                 if got is None:
                     iw0 = iw - 1
                     jw0 = jw - 1
-                    ws_el = set_wigner_seitz_cell(el_images, meta.at, meta.wc[iw0], meta.wc[jw0])
-                    ws_ph = set_wigner_seitz_cell(ph_images, meta.at, meta.wc[iw0], meta.tau[target_ia0])
+                    ws_el = set_wigner_seitz_cell(
+                        el_images, meta.at, meta.wc[iw0], meta.wc[jw0]
+                    )
+                    ws_ph = set_wigner_seitz_cell(
+                        ph_images, meta.at, meta.wc[iw0], meta.tau[target_ia0]
+                    )
                     got = (ws_el, ws_ph)
                     ws_cache[key] = got
                 ws_el, ws_ph = got
@@ -333,16 +467,30 @@ def _build_gkq_onsite_one(epr_path, target_ia0, axis, kpts, qpts, *, unit="ry", 
                 re_mask = np.all(np.asarray(ws_el.vectors, dtype=np.int64) == 0, axis=1)
                 if not np.any(re_mask):
                     continue
-                phase_q = _phase_table(qpts, ws_ph.vectors, phase_cache, f"gq:on:{target_ia0}:{iw}")
+                phase_q = _phase_table(
+                    qpts, ws_ph.vectors, phase_cache, f"gq:on:{target_ia0}:{iw}"
+                )
                 block = np.sum(arr[ax_id][re_mask, :], axis=0) * scale
                 vals_q = phase_q @ block
                 gkq[:, :, iw - 1, jw - 1] += vals_q[:, None]
         return gkq
 
 
-def _build_gk_rp_one(epr_path, target_ia0, axis, kpts, rp_idx, *, unit="ry", rotation_mode="none", phase_cache=None):
+def _build_gk_rp_one(
+    epr_path,
+    target_ia0,
+    axis,
+    kpts,
+    rp_idx,
+    *,
+    unit="ry",
+    rotation_mode="none",
+    phase_cache=None,
+):
     if rotation_mode != "none":
-        raise NotImplementedError("rotation_mode scaffold exists, but U-rotation is not implemented yet.")
+        raise NotImplementedError(
+            "rotation_mode scaffold exists, but U-rotation is not implemented yet."
+        )
     ax_id = {"x": 0, "y": 1, "z": 2}[axis]
     scale = _unit_scale_to_ev(unit)
     phase_cache = {} if phase_cache is None else phase_cache
@@ -362,14 +510,21 @@ def _build_gk_rp_one(epr_path, target_ia0, axis, kpts, rp_idx, *, unit="ry", rot
                 di = f"ep_hop_i_{ia}_{jw}_{iw}"
                 if dr not in grp or di not in grp:
                     continue
-                arr = (np.asarray(grp[dr], dtype=np.float64) + 1j * np.asarray(grp[di], dtype=np.float64)).transpose(2, 1, 0)
+                arr = (
+                    np.asarray(grp[dr], dtype=np.float64)
+                    + 1j * np.asarray(grp[di], dtype=np.float64)
+                ).transpose(2, 1, 0)
                 key = (jw, iw)
                 got = ws_cache.get(key)
                 if got is None:
                     iw0 = iw - 1
                     jw0 = jw - 1
-                    ws_el = set_wigner_seitz_cell(el_images, meta.at, meta.wc[iw0], meta.wc[jw0])
-                    ws_ph = set_wigner_seitz_cell(ph_images, meta.at, meta.wc[iw0], meta.tau[target_ia0])
+                    ws_el = set_wigner_seitz_cell(
+                        el_images, meta.at, meta.wc[iw0], meta.wc[jw0]
+                    )
+                    ws_ph = set_wigner_seitz_cell(
+                        ph_images, meta.at, meta.wc[iw0], meta.tau[target_ia0]
+                    )
                     got = (ws_el, ws_ph)
                     ws_cache[key] = got
                 ws_el, ws_ph = got
@@ -377,19 +532,35 @@ def _build_gk_rp_one(epr_path, target_ia0, axis, kpts, rp_idx, *, unit="ry", rot
                     raise ValueError(
                         f"WS mismatch ia={ia} jw={jw} iw={iw}: arr={arr.shape[1:]} ws={(ws_el.nr, ws_ph.nr)}"
                     )
-                rp_mask = np.all(np.asarray(ws_ph.vectors, dtype=np.int64) == rp_idx[None, :], axis=1)
+                rp_mask = np.all(
+                    np.asarray(ws_ph.vectors, dtype=np.int64) == rp_idx[None, :], axis=1
+                )
                 if not np.any(rp_mask):
                     continue
-                phase_k = _phase_table(kpts, ws_el.vectors, phase_cache, f"gk:{iw}:{jw}")
+                phase_k = _phase_table(
+                    kpts, ws_el.vectors, phase_cache, f"gk:{iw}:{jw}"
+                )
                 block_rp = np.sum(arr[ax_id][:, rp_mask], axis=1) * scale
                 # Comparison path: keep Rp in real space and Fourier-transform only Re -> k.
                 gk[0, :, iw - 1, jw - 1] += phase_k @ block_rp
         return gk
 
 
-def _build_gk_rp_onsite_one(epr_path, target_ia0, axis, kpts, rp_idx, *, unit="ry", rotation_mode="none", phase_cache=None):
+def _build_gk_rp_onsite_one(
+    epr_path,
+    target_ia0,
+    axis,
+    kpts,
+    rp_idx,
+    *,
+    unit="ry",
+    rotation_mode="none",
+    phase_cache=None,
+):
     if rotation_mode != "none":
-        raise NotImplementedError("rotation_mode scaffold exists, but U-rotation is not implemented yet.")
+        raise NotImplementedError(
+            "rotation_mode scaffold exists, but U-rotation is not implemented yet."
+        )
     ax_id = {"x": 0, "y": 1, "z": 2}[axis]
     scale = _unit_scale_to_ev(unit)
     phase_cache = {} if phase_cache is None else phase_cache
@@ -409,14 +580,21 @@ def _build_gk_rp_onsite_one(epr_path, target_ia0, axis, kpts, rp_idx, *, unit="r
                 di = f"ep_hop_i_{ia}_{jw}_{iw}"
                 if dr not in grp or di not in grp:
                     continue
-                arr = (np.asarray(grp[dr], dtype=np.float64) + 1j * np.asarray(grp[di], dtype=np.float64)).transpose(2, 1, 0)
+                arr = (
+                    np.asarray(grp[dr], dtype=np.float64)
+                    + 1j * np.asarray(grp[di], dtype=np.float64)
+                ).transpose(2, 1, 0)
                 key = (jw, iw)
                 got = ws_cache.get(key)
                 if got is None:
                     iw0 = iw - 1
                     jw0 = jw - 1
-                    ws_el = set_wigner_seitz_cell(el_images, meta.at, meta.wc[iw0], meta.wc[jw0])
-                    ws_ph = set_wigner_seitz_cell(ph_images, meta.at, meta.wc[iw0], meta.tau[target_ia0])
+                    ws_el = set_wigner_seitz_cell(
+                        el_images, meta.at, meta.wc[iw0], meta.wc[jw0]
+                    )
+                    ws_ph = set_wigner_seitz_cell(
+                        ph_images, meta.at, meta.wc[iw0], meta.tau[target_ia0]
+                    )
                     got = (ws_el, ws_ph)
                     ws_cache[key] = got
                 ws_el, ws_ph = got
@@ -425,7 +603,9 @@ def _build_gk_rp_onsite_one(epr_path, target_ia0, axis, kpts, rp_idx, *, unit="r
                         f"WS mismatch ia={ia} jw={jw} iw={iw}: arr={arr.shape[1:]} ws={(ws_el.nr, ws_ph.nr)}"
                     )
                 re_mask = np.all(np.asarray(ws_el.vectors, dtype=np.int64) == 0, axis=1)
-                rp_mask = np.all(np.asarray(ws_ph.vectors, dtype=np.int64) == rp_idx[None, :], axis=1)
+                rp_mask = np.all(
+                    np.asarray(ws_ph.vectors, dtype=np.int64) == rp_idx[None, :], axis=1
+                )
                 if not np.any(re_mask) or not np.any(rp_mask):
                     continue
                 block = np.sum(arr[ax_id][re_mask][:, rp_mask]) * scale
@@ -434,20 +614,55 @@ def _build_gk_rp_onsite_one(epr_path, target_ia0, axis, kpts, rp_idx, *, unit="r
 
 
 def _build_g_cache_entry(task):
-    spin, epr_path, ia0, ax, labels, g_transform, kpts, qpts, rp_idx, eph_unit, rotation_mode, onsite_only = task
+    (
+        spin,
+        epr_path,
+        ia0,
+        ax,
+        labels,
+        g_transform,
+        kpts,
+        qpts,
+        rp_idx,
+        eph_unit,
+        rotation_mode,
+        onsite_only,
+    ) = task
     local_phase_cache = {}
     target_name = f"atom #{ia0 + 1} {labels[ia0]}"
     if g_transform == "kq":
         suffix = " onsite" if onsite_only else ""
-        print(f"[dJ-epr-kspace] precache g(k,q){suffix}: {target_name}/{ax} {spin}", flush=True)
+        print(
+            f"[dJ-epr-kspace] precache g(k,q){suffix}: {target_name}/{ax} {spin}",
+            flush=True,
+        )
         builder = _build_gkq_onsite_one if onsite_only else _build_gkq_one
-        arr = builder(epr_path, ia0, ax, kpts, qpts, unit=eph_unit, rotation_mode=rotation_mode, phase_cache=local_phase_cache)
+        arr = builder(
+            epr_path,
+            ia0,
+            ax,
+            kpts,
+            qpts,
+            unit=eph_unit,
+            rotation_mode=rotation_mode,
+            phase_cache=local_phase_cache,
+        )
     else:
         suffix = " onsite" if onsite_only else ""
-        print(f"[dJ-epr-kspace] precache g(k,Rp={tuple(rp_idx)}){suffix}: {target_name}/{ax} {spin}", flush=True)
+        print(
+            f"[dJ-epr-kspace] precache g(k,Rp={tuple(rp_idx)}){suffix}: {target_name}/{ax} {spin}",
+            flush=True,
+        )
         builder = _build_gk_rp_onsite_one if onsite_only else _build_gk_rp_one
         arr = builder(
-            epr_path, ia0, ax, kpts, rp_idx, unit=eph_unit, rotation_mode=rotation_mode, phase_cache=local_phase_cache
+            epr_path,
+            ia0,
+            ax,
+            kpts,
+            rp_idx,
+            unit=eph_unit,
+            rotation_mode=rotation_mode,
+            phase_cache=local_phase_cache,
         )
     return (spin, ia0, ax, bool(onsite_only)), arr
 
@@ -457,19 +672,32 @@ def _precache(args, labels, target_ids, axes, slices, pair_meta):
     with h5py.File(args.epr_up, "r") as h5:
         epr_qmesh = tuple(int(x) for x in h5["basic_data/qc_dim"][()])
     if args.g_transform == "kq":
-        qmesh = tuple(int(x) for x in (args.qmesh if args.qmesh is not None else epr_qmesh))
+        qmesh = tuple(
+            int(x) for x in (args.qmesh if args.qmesh is not None else epr_qmesh)
+        )
         qpts = _full_q_mesh(qmesh)
     else:
         qmesh = (1, 1, 1)
         qpts = np.zeros((1, 3), dtype=np.float64)
     phase_cache = {}
-    print(f"[dJ-epr-kspace] precache phase tables + H(k): nk={len(kpts)} qmesh={qmesh} g_transform={args.g_transform}")
-    hk_up, kc_up = _build_hk_epr_phase(args.epr_up, kpts, unit=args.hr_unit, phase_cache=phase_cache)
-    hk_dn, kc_dn = _build_hk_epr_phase(args.epr_dn, kpts, unit=args.hr_unit, phase_cache=phase_cache)
+    print(
+        f"[dJ-epr-kspace] precache phase tables + H(k): nk={len(kpts)} qmesh={qmesh} g_transform={args.g_transform}"
+    )
+    hk_up, kc_up = _build_hk_epr_phase(
+        args.epr_up, kpts, unit=args.hr_unit, phase_cache=phase_cache
+    )
+    hk_dn, kc_dn = _build_hk_epr_phase(
+        args.epr_dn, kpts, unit=args.hr_unit, phase_cache=phase_cache
+    )
     if tuple(kc_up) != tuple(kc_dn):
         raise ValueError(f"EPR up/dn kc_dim mismatch: up={kc_up} dn={kc_dn}")
     eig = _precompute_eigensystem(hk_up, hk_dn, slices, args.efermi)
-    phase_R = np.exp(-1j * 2.0 * np.pi * (np.asarray([m["R"] for m in pair_meta], dtype=np.float64) @ kpts.T))
+    phase_R = np.exp(
+        -1j
+        * 2.0
+        * np.pi
+        * (np.asarray([m["R"] for m in pair_meta], dtype=np.float64) @ kpts.T)
+    )
     bond_target_q_phase = _bond_target_q_phase(qpts, pair_meta)
     if args.g_transform == "kq":
         kq = _kq_map(tuple(args.kmesh), qmesh)
@@ -481,18 +709,81 @@ def _precache(args, labels, target_ids, axes, slices, pair_meta):
     need_ddelta_onsite = onsite_mode == "onsite"
     for ia0 in target_ids:
         for ax in axes:
-            tasks.append(("up", args.epr_up, ia0, ax, labels, args.g_transform, kpts, qpts, args.rp_idx, args.eph_unit, args.rotation_mode, False))
-            tasks.append(("down", args.epr_dn, ia0, ax, labels, args.g_transform, kpts, qpts, args.rp_idx, args.eph_unit, args.rotation_mode, False))
+            tasks.append(
+                (
+                    "up",
+                    args.epr_up,
+                    ia0,
+                    ax,
+                    labels,
+                    args.g_transform,
+                    kpts,
+                    qpts,
+                    args.rp_idx,
+                    args.eph_unit,
+                    args.rotation_mode,
+                    False,
+                )
+            )
+            tasks.append(
+                (
+                    "down",
+                    args.epr_dn,
+                    ia0,
+                    ax,
+                    labels,
+                    args.g_transform,
+                    kpts,
+                    qpts,
+                    args.rp_idx,
+                    args.eph_unit,
+                    args.rotation_mode,
+                    False,
+                )
+            )
             if need_ddelta_onsite:
-                tasks.append(("up", args.epr_up, ia0, ax, labels, args.g_transform, kpts, qpts, args.rp_idx, args.eph_unit, args.rotation_mode, True))
-                tasks.append(("down", args.epr_dn, ia0, ax, labels, args.g_transform, kpts, qpts, args.rp_idx, args.eph_unit, args.rotation_mode, True))
+                tasks.append(
+                    (
+                        "up",
+                        args.epr_up,
+                        ia0,
+                        ax,
+                        labels,
+                        args.g_transform,
+                        kpts,
+                        qpts,
+                        args.rp_idx,
+                        args.eph_unit,
+                        args.rotation_mode,
+                        True,
+                    )
+                )
+                tasks.append(
+                    (
+                        "down",
+                        args.epr_dn,
+                        ia0,
+                        ax,
+                        labels,
+                        args.g_transform,
+                        kpts,
+                        qpts,
+                        args.rp_idx,
+                        args.eph_unit,
+                        args.rotation_mode,
+                        True,
+                    )
+                )
     npre = min(max(1, int(args.precache_workers)), len(tasks))
     if npre <= 1:
         for task in tasks:
             key, arr = _build_g_cache_entry(task)
             g_cache[key] = arr
     else:
-        print(f"[dJ-epr-kspace] precache g entries in parallel: workers={npre} tasks={len(tasks)}", flush=True)
+        print(
+            f"[dJ-epr-kspace] precache g entries in parallel: workers={npre} tasks={len(tasks)}",
+            flush=True,
+        )
         with ThreadPoolExecutor(max_workers=npre) as pool:
             futures = [pool.submit(_build_g_cache_entry, task) for task in tasks]
             for fut in as_completed(futures):
@@ -513,7 +804,9 @@ def _precache(args, labels, target_ids, axes, slices, pair_meta):
         "kpts": kpts,
         "qpts": qpts,
         "qmesh": qmesh,
-        "rp_grid": _rp_grid(qmesh) if args.g_transform == "kq" else np.asarray([args.rp_idx], dtype=np.int64),
+        "rp_grid": _rp_grid(qmesh)
+        if args.g_transform == "kq"
+        else np.asarray([args.rp_idx], dtype=np.int64),
         "eig": eig,
         "phase_R": phase_R,
         "bond_target_q_phase": bond_target_q_phase,
@@ -522,6 +815,7 @@ def _precache(args, labels, target_ids, axes, slices, pair_meta):
         "ddelta": ddelta_cache,
         "ddelta_mode": onsite_mode,
     }
+
 
 def _compute_chunk(energy_chunk):
     st = _WORKER_STATIC
@@ -539,7 +833,11 @@ def _compute_chunk(energy_chunk):
     nk = phase_R.shape[1]
     nq = kq_map.shape[0]
     wk = 1.0 / float(nk)
-    out = {(ia, ax): np.zeros((nq, len(pair_meta)), dtype=np.complex128) for ia in target_ids for ax in axes}
+    out = {
+        (ia, ax): np.zeros((nq, len(pair_meta)), dtype=np.complex128)
+        for ia in target_ids
+        for ax in axes
+    }
 
     for z, dz in energy_chunk:
         inv_u = 1.0 / (z - eig["evals"]["up"])
@@ -568,7 +866,11 @@ def _compute_chunk(energy_chunk):
             sl_j = slices[lj]
             ph = phase_R[ip] * wk
             GRu.append(np.einsum("k,kij->ij", ph, Gu[:, sl_i, sl_j], optimize=True))
-            GRd.append(np.einsum("k,kji->ji", np.conjugate(ph), Gd[:, sl_j, sl_i], optimize=True))
+            GRd.append(
+                np.einsum(
+                    "k,kji->ji", np.conjugate(ph), Gd[:, sl_j, sl_i], optimize=True
+                )
+            )
 
         for ia in target_ids:
             for ax in axes:
@@ -587,9 +889,14 @@ def _compute_chunk(energy_chunk):
                         sl_j = slices[lj]
                         ph = phase_R[ip] * wk
                         endpoint_phase = bond_target_q_phase[iq, ip]
-                        dGRu = np.einsum("k,kij->ij", ph, dGu[:, sl_i, sl_j], optimize=True)
+                        dGRu = np.einsum(
+                            "k,kij->ij", ph, dGu[:, sl_i, sl_j], optimize=True
+                        )
                         dGRd = endpoint_phase * np.einsum(
-                            "k,kji->ji", np.conjugate(ph), dGd[:, sl_j, sl_i], optimize=True
+                            "k,kji->ji",
+                            np.conjugate(ph),
+                            dGd[:, sl_j, sl_i],
+                            optimize=True,
                         )
                         Di = eig["delta"][li]
                         Dj = eig["delta"][lj]
@@ -600,7 +907,9 @@ def _compute_chunk(energy_chunk):
                         ) / rel_sign
                         if ddelta_mode != "off" and ddelta is not None:
                             ddel_li = np.mean(ddelta[iq, :, sl_i, sl_i], axis=0)
-                            ddel_lj = endpoint_phase * np.mean(ddelta[iq, :, sl_j, sl_j], axis=0)
+                            ddel_lj = endpoint_phase * np.mean(
+                                ddelta[iq, :, sl_j, sl_j], axis=0
+                            )
                             tr += (
                                 np.trace(ddel_li @ GRu[ip] @ Dj @ GRd[ip])
                                 + np.trace(Di @ GRu[ip] @ ddel_lj @ GRd[ip])
@@ -609,13 +918,114 @@ def _compute_chunk(energy_chunk):
     return out
 
 
+def _share_static_arrays(value, owners):
+    """Replace NumPy arrays by descriptors backed by POSIX shared memory."""
+    if isinstance(value, np.ndarray):
+        contiguous = np.ascontiguousarray(value)
+        if contiguous.nbytes == 0:
+            return contiguous
+        block = shared_memory.SharedMemory(create=True, size=contiguous.nbytes)
+        shared = np.ndarray(
+            contiguous.shape,
+            dtype=contiguous.dtype,
+            buffer=block.buf,
+        )
+        shared[...] = contiguous
+        owners.append(block)
+        return _SharedArraySpec(
+            name=block.name,
+            shape=tuple(int(item) for item in contiguous.shape),
+            dtype=contiguous.dtype.str,
+        )
+    if isinstance(value, dict):
+        return {key: _share_static_arrays(item, owners) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_share_static_arrays(item, owners) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_share_static_arrays(item, owners) for item in value)
+    return value
+
+
+def _attach_static_arrays(value, handles):
+    if isinstance(value, _SharedArraySpec):
+        block = shared_memory.SharedMemory(name=value.name)
+        handles.append(block)
+        array = np.ndarray(
+            value.shape,
+            dtype=np.dtype(value.dtype),
+            buffer=block.buf,
+        )
+        array.setflags(write=False)
+        return array
+    if isinstance(value, dict):
+        return {
+            key: _attach_static_arrays(item, handles) for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_attach_static_arrays(item, handles) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_attach_static_arrays(item, handles) for item in value)
+    return value
+
+
+def _release_shared_arrays(owners):
+    for block in owners:
+        block.close()
+    for block in owners:
+        try:
+            block.unlink()
+        except FileNotFoundError:
+            pass
+
+
 def _worker_init(static_payload):
-    global _WORKER_STATIC
+    global _THREADPOOL_LIMITER, _WORKER_STATIC
+    # A threadpoolctl context inherited across fork must not be exited by the
+    # child.  Recreate rank-local thread limits from a clean worker state.
+    _THREADPOOL_LIMITER = None
     _configure_threads(static_payload.get("omp_threads", 1))
     _WORKER_STATIC = static_payload
 
 
-def _compute_dj(pre, slices, pair_meta, target_ids, axes, energy_mesh, nproc, omp_threads=1):
+def _shared_worker_init(static_payload, omp_threads):
+    global _THREADPOOL_LIMITER, _WORKER_SHARED_MEMORY, _WORKER_STATIC
+    _THREADPOOL_LIMITER = None
+    _WORKER_SHARED_MEMORY = []
+    _WORKER_STATIC = _attach_static_arrays(
+        static_payload,
+        _WORKER_SHARED_MEMORY,
+    )
+    _configure_threads(omp_threads)
+
+
+def _worker_compute_energy_chunk(energy_chunk):
+    return len(energy_chunk), _compute_chunk(energy_chunk)
+
+
+def _energy_task_count(n_energy, nproc):
+    n_energy = max(0, int(n_energy))
+    local_workers = max(1, min(int(nproc), max(1, n_energy)))
+    task_count = min(
+        max(1, n_energy),
+        max(local_workers, min(_DEFAULT_PROGRESS_UPDATES, max(1, n_energy))),
+    )
+    return local_workers, task_count
+
+
+def _compute_dj(
+    pre,
+    slices,
+    pair_meta,
+    target_ids,
+    axes,
+    energy_mesh,
+    nproc,
+    omp_threads=1,
+    progress=None,
+    shared_workers=False,
+):
+    qmesh = tuple(int(x) for x in pre["qmesh"])
+    rp_grid = np.asarray(pre["rp_grid"], dtype=np.int64)
     static = {
         "eig": pre["eig"],
         "phase_R": pre["phase_R"],
@@ -631,46 +1041,139 @@ def _compute_dj(pre, slices, pair_meta, target_ids, axes, energy_mesh, nproc, om
         "axes": axes,
         "omp_threads": max(1, int(omp_threads)),
     }
-    chunks = _split_chunks(energy_mesh, max(1, int(nproc)))
-    if int(nproc) <= 1 or len(chunks) <= 1:
+    n_energy = len(energy_mesh)
+    local_workers, progress_chunks = _energy_task_count(n_energy, nproc)
+    chunks = _split_chunks(energy_mesh, progress_chunks)
+    nq = int(np.prod(pre["qmesh"]))
+    out_q = {
+        (ia, ax): np.zeros((nq, len(pair_meta)), dtype=np.complex128)
+        for ia in target_ids
+        for ax in axes
+    }
+    completed = 0
+
+    def accumulate(part, count):
+        nonlocal completed
+        for key, val in part.items():
+            out_q[key] += val
+        completed += int(count)
+        if progress is not None and n_energy:
+            progress(completed, n_energy)
+
+    if local_workers <= 1 or len(chunks) <= 1:
         global _WORKER_STATIC
         _configure_threads(omp_threads)
         _WORKER_STATIC = static
-        parts = [_compute_chunk(chunks[0])]
+        for chunk in chunks:
+            accumulate(_compute_chunk(chunk), len(chunk))
     else:
-        ctx = mp.get_context("fork") if "fork" in mp.get_all_start_methods() else mp.get_context()
-        with ctx.Pool(processes=len(chunks), initializer=_worker_init, initargs=(static,)) as pool:
-            parts = pool.map(_compute_chunk, chunks)
-    nq = int(np.prod(pre["qmesh"]))
-    out_q = {(ia, ax): np.zeros((nq, len(pair_meta)), dtype=np.complex128) for ia in target_ids for ax in axes}
-    for part in parts:
-        for key, val in part.items():
-            out_q[key] += val
-    qmesh = tuple(int(x) for x in pre["qmesh"])
+        owners = []
+        if shared_workers:
+            methods = mp.get_all_start_methods()
+            start_method = "forkserver" if "forkserver" in methods else "spawn"
+            ctx = mp.get_context(start_method)
+            worker_payload = {}
+            try:
+                # Publish and release one top-level cache component at a time.
+                # This avoids retaining a second complete cache while copying
+                # the arrays into POSIX shared memory.
+                for key in tuple(static):
+                    value = static.pop(key)
+                    if key in {
+                        "eig",
+                        "phase_R",
+                        "bond_target_q_phase",
+                        "kq_map",
+                        "g",
+                        "ddelta",
+                    }:
+                        pre.pop(key, None)
+                    worker_payload[key] = _share_static_arrays(value, owners)
+                    del value
+            except OSError as exc:
+                _release_shared_arrays(owners)
+                raise RuntimeError(
+                    "could not publish the scalar dJ cache in POSIX shared "
+                    "memory; check the node-local /dev/shm capacity"
+                ) from exc
+            except Exception:
+                _release_shared_arrays(owners)
+                raise
+            initializer = _shared_worker_init
+            initargs = (worker_payload, max(1, int(omp_threads)))
+        else:
+            methods = mp.get_all_start_methods()
+            if "fork" not in methods:
+                raise RuntimeError(
+                    "rank-local copy-on-write workers require the POSIX fork "
+                    "start method"
+                )
+            ctx = mp.get_context("fork")
+            initializer = _worker_init
+            initargs = (static,)
+        try:
+            with ctx.Pool(
+                processes=local_workers,
+                initializer=initializer,
+                initargs=initargs,
+            ) as pool:
+                for count, part in pool.imap(
+                    _worker_compute_energy_chunk,
+                    chunks,
+                ):
+                    accumulate(part, count)
+        finally:
+            _release_shared_arrays(owners)
     djr = {}
     for key, val in out_q.items():
         grid = val.reshape(qmesh[0], qmesh[1], qmesh[2], len(pair_meta))
         # The EPR phase path uses exp(+i q.Rp), so the inverse q->Rp transform
         # is the negative-sign DFT, i.e. numpy fft normalized by Nq.
-        real_grid = (np.fft.fftn(grid, axes=(0, 1, 2)) / float(nq)).reshape(nq, len(pair_meta))
+        real_grid = (np.fft.fftn(grid, axes=(0, 1, 2)) / float(nq)).reshape(
+            nq, len(pair_meta)
+        )
         djr[key] = 1000.0 * np.imag(real_grid) / (4.0 * np.pi)
-    return djr, {"n_chunks": len(chunks), "qmesh": qmesh, "rp_grid": np.asarray(pre["rp_grid"], dtype=np.int64)}
+    return djr, {
+        "local_workers": local_workers,
+        "n_chunks": len(chunks),
+        "qmesh": qmesh,
+        "rp_grid": rp_grid,
+    }
 
 
 def _rp_slice_for_text(djr, rp_grid, rp_idx):
     rp_idx = tuple(int(x) for x in rp_idx)
-    matches = np.where(np.all(np.asarray(rp_grid, dtype=np.int64) == np.asarray(rp_idx, dtype=np.int64)[None, :], axis=1))[0]
+    matches = np.where(
+        np.all(
+            np.asarray(rp_grid, dtype=np.int64)
+            == np.asarray(rp_idx, dtype=np.int64)[None, :],
+            axis=1,
+        )
+    )[0]
     irp = int(matches[0]) if len(matches) else 0
-    return {key: val[irp] for key, val in djr.items()}, tuple(int(x) for x in rp_grid[irp])
+    return {key: val[irp] for key, val in djr.items()}, tuple(
+        int(x) for x in rp_grid[irp]
+    )
 
 
 def _orbit_label_map(pair_meta, orbits):
     meta_by_key = {(m["gi"], m["gj"], tuple(m["R"])): m for m in pair_meta}
     orbit_counter = {}
-    orbits = sorted(orbits, key=lambda o: (int(o[0].get("shell_idx", 0)), float(o[0]["distance"]), int(o[0]["i"]), int(o[0]["j"]), tuple(o[0]["R"])))
+    orbits = sorted(
+        orbits,
+        key=lambda o: (
+            int(o[0].get("shell_idx", 0)),
+            float(o[0]["distance"]),
+            int(o[0]["i"]),
+            int(o[0]["j"]),
+            tuple(o[0]["R"]),
+        ),
+    )
     orbit_label_by_key = {}
     for orbit in orbits:
-        keys = [(int(n["i"]), int(n["j"]), tuple(int(x) for x in n["R"])) for n in orbit]
+        keys = [
+            (int(n["i"]), int(n["j"]), tuple(int(x) for x in n["R"])) for n in orbit
+        ]
         keys = [k for k in keys if k in meta_by_key]
         if not keys:
             continue
@@ -683,7 +1186,19 @@ def _orbit_label_map(pair_meta, orbits):
     return orbit_label_by_key
 
 
-def _write_outputs(path, args, labels, axes, target_ids, pair_meta, dj, orbits, elapsed, exe_info, rp_text=(0, 0, 0)):
+def _write_outputs(
+    path,
+    args,
+    labels,
+    axes,
+    target_ids,
+    pair_meta,
+    dj,
+    orbits,
+    elapsed,
+    exe_info,
+    rp_text=(0, 0, 0),
+):
     orbit_label_by_key = _orbit_label_map(pair_meta, orbits)
     pair_index = {id(m): ip for ip, m in enumerate(pair_meta)}
     with open(path, "w") as f:
@@ -693,8 +1208,13 @@ def _write_outputs(path, args, labels, axes, target_ids, pair_meta, dj, orbits, 
         f.write(f"# H unit={args.hr_unit} eph unit={args.eph_unit}\n")
         f.write(f"# g_transform={args.g_transform} rp_idx={tuple(args.rp_idx)}\n")
         f.write(f"# terms: dG + dDelta_mode={args.ddelta_mode}\n")
-        f.write(f"# kmesh={tuple(args.kmesh)} nE={args.empoints} nproc={args.nproc} n_chunks={exe_info['n_chunks']} elapsed_s={elapsed:.2f}\n\n")
-        for m in sorted(pair_meta, key=lambda x: (x["shell"], x["dist"], x["gi"], x["gj"], tuple(x["R"]))):
+        f.write(
+            f"# kmesh={tuple(args.kmesh)} nE={args.empoints} nproc={args.nproc} n_chunks={exe_info['n_chunks']} elapsed_s={elapsed:.2f}\n\n"
+        )
+        for m in sorted(
+            pair_meta,
+            key=lambda x: (x["shell"], x["dist"], x["gi"], x["gj"], tuple(x["R"])),
+        ):
             key = (m["gi"], m["gj"], tuple(m["R"]))
             label = orbit_label_by_key.get(key, "NA")
             gi = int(m["gi"])
@@ -727,7 +1247,10 @@ def _write_outputs(path, args, labels, axes, target_ids, pair_meta, dj, orbits, 
             "orbit\tgi\tgj\ti_atom\tj_atom\ti_label\tj_label\tli\tlj\tR1\tR2\tR3\tdist_A\t"
             "target_idx\ttarget_atom\ttarget_label\tdJx\tdJy\tdJz\n"
         )
-        for m in sorted(pair_meta, key=lambda x: (x["shell"], x["dist"], x["gi"], x["gj"], tuple(x["R"]))):
+        for m in sorted(
+            pair_meta,
+            key=lambda x: (x["shell"], x["dist"], x["gi"], x["gj"], tuple(x["R"])),
+        ):
             key = (m["gi"], m["gj"], tuple(m["R"]))
             label = orbit_label_by_key.get(key, "NA")
             ip = pair_index[id(m)]
@@ -749,7 +1272,10 @@ def _write_outputs(path, args, labels, axes, target_ids, pair_meta, dj, orbits, 
 
 
 def _mirror_indices(pair_meta):
-    by_key = {(int(m["gi"]), int(m["gj"]), tuple(int(x) for x in m["R"])): i for i, m in enumerate(pair_meta)}
+    by_key = {
+        (int(m["gi"]), int(m["gj"]), tuple(int(x) for x in m["R"])): i
+        for i, m in enumerate(pair_meta)
+    }
     out = np.full(len(pair_meta), -1, dtype=np.int64)
     for i, m in enumerate(pair_meta):
         key = (int(m["gj"]), int(m["gi"]), tuple(-int(x) for x in m["R"]))
@@ -757,7 +1283,19 @@ def _mirror_indices(pair_meta):
     return out
 
 
-def _write_h5(path, args, labels, axes, target_ids, pair_meta, djr, rp_grid, orbits, elapsed, exe_info):
+def _write_h5(
+    path,
+    args,
+    labels,
+    axes,
+    target_ids,
+    pair_meta,
+    djr,
+    rp_grid,
+    orbits,
+    elapsed,
+    exe_info,
+):
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     axis_to_col = {"x": 0, "y": 1, "z": 2}
     str_dt = h5py.string_dtype(encoding="utf-8")
@@ -767,18 +1305,25 @@ def _write_h5(path, args, labels, axes, target_ids, pair_meta, djr, rp_grid, orb
         h5.attrs["derivative_representation"] = "isotropic"
         h5.attrs["fourier_phase_convention"] = "exp(+i2pi_q_dot_Rp)"
         h5.attrs["directed_bond_mate"] = "(j,i,-R;Rp-R)_periodic"
-        h5.attrs["atomic_gauge_bond_phase"] = (
-            "endpoint_j_at_R_times_exp(+i2pi_q_dot_R)"
-        )
+        h5.attrs["atomic_gauge_bond_phase"] = "endpoint_j_at_R_times_exp(+i2pi_q_dot_R)"
+
         def put_string(group, name, value):
-            group.create_dataset(name, data=np.array(str(value), dtype=object), dtype=str_dt)
+            group.create_dataset(
+                name, data=np.array(str(value), dtype=object), dtype=str_dt
+            )
 
         basic = h5.create_group("basic_data")
         basic.create_dataset("nat", data=np.array(len(labels), dtype=np.int64))
-        basic.create_dataset("atom_labels", data=np.asarray(labels, dtype=object), dtype=str_dt)
+        basic.create_dataset(
+            "atom_labels", data=np.asarray(labels, dtype=object), dtype=str_dt
+        )
         basic.create_dataset("kmesh", data=np.asarray(args.kmesh, dtype=np.int64))
-        basic.create_dataset("qmesh", data=np.asarray(exe_info["qmesh"], dtype=np.int64))
-        basic.create_dataset("efermi_ev", data=np.array(float(args.efermi), dtype=np.float64))
+        basic.create_dataset(
+            "qmesh", data=np.asarray(exe_info["qmesh"], dtype=np.int64)
+        )
+        basic.create_dataset(
+            "efermi_ev", data=np.array(float(args.efermi), dtype=np.float64)
+        )
         put_string(basic, "unit", "meV/A")
         put_string(basic, "hamiltonian_sign", "minus")
         put_string(basic, "spin_normalization", "unit_vector")
@@ -794,16 +1339,30 @@ def _write_h5(path, args, labels, axes, target_ids, pair_meta, djr, rp_grid, orb
         put_string(basic, "hr_unit", args.hr_unit)
         put_string(basic, "eph_unit", args.eph_unit)
         put_string(basic, "integrator", args.integrator)
-        basic.create_dataset("empoints", data=np.array(int(args.empoints), dtype=np.int64))
+        basic.create_dataset(
+            "empoints", data=np.array(int(args.empoints), dtype=np.int64)
+        )
         basic.create_dataset("nproc", data=np.array(int(args.nproc), dtype=np.int64))
         basic.create_dataset(
             "mpi_size", data=np.array(int(exe_info.get("mpi_size", 1)), dtype=np.int64)
         )
-        basic.create_dataset("omp_threads", data=np.array(int(args.omp_threads), dtype=np.int64))
-        basic.create_dataset("precache_workers", data=np.array(int(args.precache_workers), dtype=np.int64))
+        basic.create_dataset(
+            "affinity_cpus_per_rank",
+            data=np.array(int(exe_info["affinity_cpus_per_rank"]), dtype=np.int64),
+        )
+        basic.create_dataset(
+            "omp_threads", data=np.array(int(args.omp_threads), dtype=np.int64)
+        )
+        basic.create_dataset(
+            "precache_workers",
+            data=np.array(int(args.precache_workers), dtype=np.int64),
+        )
+        put_string(basic, "local_worker_backend", exe_info["local_worker_backend"])
         put_string(basic, "g_transform", args.g_transform)
         put_string(basic, "ddelta_mode", getattr(args, "ddelta_mode", "off"))
-        basic.create_dataset("elapsed_s", data=np.array(float(elapsed), dtype=np.float64))
+        basic.create_dataset(
+            "elapsed_s", data=np.array(float(elapsed), dtype=np.float64)
+        )
         put_string(basic, "command", " ".join(sys.argv))
         with h5py.File(args.epr_up, "r") as src:
             meta = _read_meta(src)
@@ -811,31 +1370,64 @@ def _write_h5(path, args, labels, axes, target_ids, pair_meta, djr, rp_grid, orb
                 alat_ang = float(src["basic_data/alat"][()]) * BOHR_TO_ANG
                 lattice_ang = np.asarray(meta.at, dtype=np.float64) * alat_ang
                 basic.create_dataset("lattice_ang", data=lattice_ang)
-                basic.create_dataset("tau_frac", data=np.asarray(meta.tau, dtype=np.float64))
-                basic.create_dataset("tau_cart_ang", data=np.asarray(meta.tau, dtype=np.float64) @ lattice_ang)
+                basic.create_dataset(
+                    "tau_frac", data=np.asarray(meta.tau, dtype=np.float64)
+                )
+                basic.create_dataset(
+                    "tau_cart_ang",
+                    data=np.asarray(meta.tau, dtype=np.float64) @ lattice_ang,
+                )
 
         bonds = h5.create_group("bonds")
-        bonds.create_dataset("mag_i_atom", data=np.asarray([m["gi"] for m in pair_meta], dtype=np.int64))
-        bonds.create_dataset("mag_j_atom", data=np.asarray([m["gj"] for m in pair_meta], dtype=np.int64))
-        bonds.create_dataset("mag_i_local", data=np.asarray([m["li"] for m in pair_meta], dtype=np.int64))
-        bonds.create_dataset("mag_j_local", data=np.asarray([m["lj"] for m in pair_meta], dtype=np.int64))
-        bonds.create_dataset("R", data=np.asarray([m["R"] for m in pair_meta], dtype=np.int64))
-        bonds.create_dataset("distance_ang", data=np.asarray([m["dist"] for m in pair_meta], dtype=np.float64))
-        bonds.create_dataset("shell", data=np.asarray([m["shell"] for m in pair_meta], dtype=np.int64))
-        orbit_labels = [orbit_label_by_key.get((m["gi"], m["gj"], tuple(m["R"])), "NA") for m in pair_meta]
-        bonds.create_dataset("orbit_label", data=np.asarray(orbit_labels, dtype=object), dtype=str_dt)
+        bonds.create_dataset(
+            "mag_i_atom", data=np.asarray([m["gi"] for m in pair_meta], dtype=np.int64)
+        )
+        bonds.create_dataset(
+            "mag_j_atom", data=np.asarray([m["gj"] for m in pair_meta], dtype=np.int64)
+        )
+        bonds.create_dataset(
+            "mag_i_local", data=np.asarray([m["li"] for m in pair_meta], dtype=np.int64)
+        )
+        bonds.create_dataset(
+            "mag_j_local", data=np.asarray([m["lj"] for m in pair_meta], dtype=np.int64)
+        )
+        bonds.create_dataset(
+            "R", data=np.asarray([m["R"] for m in pair_meta], dtype=np.int64)
+        )
+        bonds.create_dataset(
+            "distance_ang",
+            data=np.asarray([m["dist"] for m in pair_meta], dtype=np.float64),
+        )
+        bonds.create_dataset(
+            "shell", data=np.asarray([m["shell"] for m in pair_meta], dtype=np.int64)
+        )
+        orbit_labels = [
+            orbit_label_by_key.get((m["gi"], m["gj"], tuple(m["R"])), "NA")
+            for m in pair_meta
+        ]
+        bonds.create_dataset(
+            "orbit_label", data=np.asarray(orbit_labels, dtype=object), dtype=str_dt
+        )
         bonds.create_dataset("mirror_index", data=_mirror_indices(pair_meta))
 
         disp = h5.create_group("displacements")
         disp.create_dataset("target_atom", data=np.asarray(target_ids, dtype=np.int64))
-        disp.create_dataset("target_label", data=np.asarray([labels[i] for i in target_ids], dtype=object), dtype=str_dt)
-        disp.create_dataset("axes", data=np.asarray(["x", "y", "z"], dtype=object), dtype=str_dt)
+        disp.create_dataset(
+            "target_label",
+            data=np.asarray([labels[i] for i in target_ids], dtype=object),
+            dtype=str_dt,
+        )
+        disp.create_dataset(
+            "axes", data=np.asarray(["x", "y", "z"], dtype=object), dtype=str_dt
+        )
         disp.create_dataset("Rp", data=np.asarray(rp_grid, dtype=np.int64))
 
         grp = h5.create_group("dJ_r")
         grp.attrs["dataset_shape"] = "(nRp, 3)"
         grp.attrs["axis_order"] = "x,y,z"
-        grp.attrs["meaning"] = "dJ_r_m{moved_atom_1based}_b{bond_1based}[irp,axis] = dJ(R_bond,Rp_irp)/du_target_axis"
+        grp.attrs["meaning"] = (
+            "dJ_r_m{moved_atom_1based}_b{bond_1based}[irp,axis] = dJ(R_bond,Rp_irp)/du_target_axis"
+        )
         n_rp = len(rp_grid)
         n_bond = len(pair_meta)
         for ia in target_ids:
@@ -851,60 +1443,145 @@ def _write_h5(path, args, labels, axes, target_ids, pair_meta, djr, rp_grid, orb
 
 def run(args, comm=None):
     t0 = time.time()
-    _configure_threads(args.omp_threads)
-    ncpu = os.cpu_count() or 1
-    if int(args.nproc) * int(args.omp_threads) > ncpu:
+    rank, size = rank_size(comm)
+
+    def setup_local():
+        available_cpus = _validate_local_parallelism(
+            nproc=args.nproc,
+            omp_threads=args.omp_threads,
+            precache_workers=args.precache_workers,
+        )
+        _configure_threads(args.omp_threads)
+        species_labels = (
+            [x.strip() for x in str(args.species_labels).split(",") if x.strip()]
+            if args.species_labels
+            else None
+        )
+        labels = _atom_labels(
+            args.epr_up,
+            args.atom_labels,
+            species_labels=species_labels,
+        )
+        target_ids = _target_indices(args.targets, labels)
+        axes = _axis_list(args.axes)
+        mag_atoms = _normalize_mag_atoms(args)
+        with h5py.File(args.epr_up, "r") as h5:
+            dim = int(h5["basic_data/num_wann"][()])
+        slices = _load_slices(args, dim)
+        neighbours = _find_nearest_neighbours_from_epr(
+            args.epr_up,
+            mag_atoms,
+            n_shells=args.n_shells,
+            d_max=args.d_max,
+            all_bonds=True,
+        )
+        global_to_local = {g: i for i, g in enumerate(mag_atoms)}
+        pair_meta = []
+        for neighbour in neighbours:
+            gi = int(neighbour["i"])
+            gj = int(neighbour["j"])
+            if gi not in global_to_local or gj not in global_to_local:
+                continue
+            pair_meta.append(
+                {
+                    "gi": gi,
+                    "gj": gj,
+                    "li": global_to_local[gi],
+                    "lj": global_to_local[gj],
+                    "R": tuple(int(x) for x in neighbour["R"]),
+                    "dist": float(neighbour["distance"]),
+                    "shell": int(neighbour.get("shell_idx", 0)),
+                }
+            )
+        if not pair_meta:
+            raise RuntimeError("No selected magnetic bonds found.")
+
+        if args.integrator == "contour":
+            energy_mesh = get_semicircle_contour(
+                emin=args.emin,
+                emax=0.0,
+                npoints=args.empoints,
+            )
+        elif args.integrator == "cfr_ozaki":
+            energy_mesh = get_cfr_ozaki_mesh(
+                npoles=args.empoints,
+                beta_eV_inv=args.cfr_beta,
+            )
+        else:
+            energy_mesh = get_cfr_pole_mesh(
+                npoles=args.empoints,
+                beta_eV_inv=args.cfr_beta,
+            )
+        pre = _precache(args, labels, target_ids, axes, slices, pair_meta)
+        return (
+            species_labels,
+            labels,
+            target_ids,
+            axes,
+            slices,
+            neighbours,
+            pair_meta,
+            energy_mesh,
+            pre,
+            available_cpus,
+        )
+
+    (
+        species_labels,
+        labels,
+        target_ids,
+        axes,
+        slices,
+        neighbours,
+        pair_meta,
+        energy_mesh,
+        pre,
+        available_cpus,
+    ) = collective_call(comm, setup_local, phase="scalar dJ setup")
+    if rank == 0:
         print(
-            f"[dJ-epr-kspace] warning: nproc*omp_threads={int(args.nproc) * int(args.omp_threads)} > cpu_count={ncpu}",
+            "[dJ-epr-kspace] local parallel layout: "
+            f"mpi_ranks={size} workers_per_rank={int(args.nproc)} "
+            f"threads_per_worker={int(args.omp_threads)} "
+            f"precache_workers={int(args.precache_workers)} "
+            f"affinity_cpus_per_rank={available_cpus}",
             flush=True,
         )
-    species_labels = [x.strip() for x in str(args.species_labels).split(",") if x.strip()] if args.species_labels else None
-    labels = _atom_labels(args.epr_up, args.atom_labels, species_labels=species_labels)
-    target_ids = _target_indices(args.targets, labels)
-    axes = _axis_list(args.axes)
-    mag_atoms = _normalize_mag_atoms(args)
-    with h5py.File(args.epr_up, "r") as h5:
-        dim = int(h5["basic_data/num_wann"][()])
-    slices = _load_slices(args, dim)
-    neighbours = _find_nearest_neighbours_from_epr(args.epr_up, mag_atoms, n_shells=args.n_shells, d_max=args.d_max, all_bonds=True)
-    global_to_local = {g: i for i, g in enumerate(mag_atoms)}
-    pair_meta = []
-    for n in neighbours:
-        gi = int(n["i"])
-        gj = int(n["j"])
-        if gi not in global_to_local or gj not in global_to_local:
-            continue
-        pair_meta.append(
-            {
-                "gi": gi,
-                "gj": gj,
-                "li": global_to_local[gi],
-                "lj": global_to_local[gj],
-                "R": tuple(int(x) for x in n["R"]),
-                "dist": float(n["distance"]),
-                "shell": int(n.get("shell_idx", 0)),
-            }
-        )
-    if not pair_meta:
-        raise RuntimeError("No selected magnetic bonds found.")
-
-    if args.integrator == "contour":
-        energy_mesh = get_semicircle_contour(emin=args.emin, emax=0.0, npoints=args.empoints)
-    elif args.integrator == "cfr_ozaki":
-        energy_mesh = get_cfr_ozaki_mesh(npoles=args.empoints, beta_eV_inv=args.cfr_beta)
-    else:
-        energy_mesh = get_cfr_pole_mesh(npoles=args.empoints, beta_eV_inv=args.cfr_beta)
-
-    pre = _precache(args, labels, target_ids, axes, slices, pair_meta)
-    rank, size = rank_size(comm)
     local_energy_mesh = partition_sequence(energy_mesh, comm)
     print(
         f"[dJ-epr-kspace] assemble dJ: bonds={len(pair_meta)} "
         f"targets={len(target_ids)} axes={axes} nE={len(energy_mesh)} "
-        f"local_nE={len(local_energy_mesh)} mpi={size}",
+        f"local_nE={len(local_energy_mesh)} mpi={size} "
+        f"local_workers={int(args.nproc)} omp_threads={int(args.omp_threads)}",
         flush=True,
     )
     local_info = {}
+    integration_start = time.monotonic()
+    last_progress_bucket = 0
+
+    def report_progress(completed, local_total):
+        nonlocal last_progress_bucket
+        if rank != 0 or local_total <= 0:
+            return
+        fraction = min(1.0, float(completed) / float(local_total))
+        percent = 100.0 * fraction
+        bucket = int(percent // 5.0)
+        if completed < local_total and bucket <= last_progress_bucket:
+            return
+        last_progress_bucket = bucket
+        elapsed = time.monotonic() - integration_start
+        eta = elapsed * (1.0 - fraction) / fraction if fraction > 0.0 else 0.0
+        estimated_global = min(
+            len(energy_mesh),
+            round(fraction * len(energy_mesh)),
+        )
+        qualifier = "" if size == 1 else " balanced-rank estimate"
+        print(
+            "[dJ-epr-kspace] integration completed "
+            f"{estimated_global}/{len(energy_mesh)} ({percent:.1f}%{qualifier}) "
+            f"elapsed={_format_elapsed(elapsed)} ETA={_format_elapsed(eta)}",
+            flush=True,
+        )
 
     def integrate_local():
         dj_local, info = _compute_dj(
@@ -914,58 +1591,109 @@ def run(args, comm=None):
             target_ids,
             axes,
             local_energy_mesh,
-            int(args.nproc) if size == 1 else 1,
+            int(args.nproc),
             args.omp_threads,
+            progress=report_progress,
+            shared_workers=comm is not None and int(args.nproc) > 1,
         )
         local_info.update(info)
         return dj_local
 
     reduced = collective_sum(comm, integrate_local)
-    if rank != 0:
-        return
-    if reduced is None:  # pragma: no cover - defensive communicator guard
-        raise RuntimeError("MPI root did not receive scalar dJ reduction")
-    djr = reduced
-    exe_info = {
-        **local_info,
-        "n_chunks": size if size > 1 else local_info.get("n_chunks", 1),
-        "mpi_size": size,
-    }
-    orbits = _group_orbits_epr(
-        args.epr_up,
-        neighbours,
-        use_symmetry=not bool(args.no_symmetry_orbits),
-        symprec=float(args.symprec),
-        labels=labels,
-        species_labels=species_labels,
-        orbit_grouping=args.orbit_grouping,
-        angle_tolerance=float(args.angle_tolerance),
-        debug_orbits=bool(args.debug_orbits),
-        debug_orbit_shell=args.debug_orbit_shell,
-        debug_epr_positions=bool(args.debug_epr_positions),
+    global_chunks = sum(
+        _energy_task_count(len(energy_mesh[irank::size]), int(args.nproc))[1]
+        for irank in range(size)
     )
-    os.makedirs(args.out_dir, exist_ok=True)
-    out = os.path.join(args.out_dir, args.out_name)
-    rp_grid = np.asarray(exe_info["rp_grid"], dtype=np.int64)
-    dj_text, rp_text = _rp_slice_for_text(djr, rp_grid, args.rp_idx)
-    elapsed = time.time() - t0
-    tsv = _write_outputs(out, args, labels, axes, target_ids, pair_meta, dj_text, orbits, elapsed, exe_info, rp_text=rp_text)
-    out_h5 = args.out_h5 if os.path.isabs(args.out_h5) else os.path.join(args.out_dir, args.out_h5)
-    _write_h5(out_h5, args, labels, axes, target_ids, pair_meta, djr, rp_grid, orbits, elapsed, exe_info)
-    print(f"[dJ-epr-kspace] wrote {out}")
-    print(f"[dJ-epr-kspace] wrote {tsv}")
-    print(f"[dJ-epr-kspace] wrote {out_h5}")
+
+    def finalize_root():
+        if reduced is None:  # pragma: no cover - defensive communicator guard
+            raise RuntimeError("MPI root did not receive scalar dJ reduction")
+        exe_info = {
+            **local_info,
+            "n_chunks": global_chunks,
+            "mpi_size": size,
+            "affinity_cpus_per_rank": available_cpus,
+            "local_worker_backend": (
+                "posix_shared_process"
+                if comm is not None and int(args.nproc) > 1
+                else "fork_copy_on_write"
+                if int(args.nproc) > 1
+                else "inline"
+            ),
+        }
+        orbits = _group_orbits_epr(
+            args.epr_up,
+            neighbours,
+            use_symmetry=not bool(args.no_symmetry_orbits),
+            symprec=float(args.symprec),
+            labels=labels,
+            species_labels=species_labels,
+            orbit_grouping=args.orbit_grouping,
+            angle_tolerance=float(args.angle_tolerance),
+            debug_orbits=bool(args.debug_orbits),
+            debug_orbit_shell=args.debug_orbit_shell,
+            debug_epr_positions=bool(args.debug_epr_positions),
+        )
+        os.makedirs(args.out_dir, exist_ok=True)
+        out = os.path.join(args.out_dir, args.out_name)
+        rp_grid = np.asarray(exe_info["rp_grid"], dtype=np.int64)
+        dj_text, rp_text = _rp_slice_for_text(reduced, rp_grid, args.rp_idx)
+        elapsed = time.time() - t0
+        tsv = _write_outputs(
+            out,
+            args,
+            labels,
+            axes,
+            target_ids,
+            pair_meta,
+            dj_text,
+            orbits,
+            elapsed,
+            exe_info,
+            rp_text=rp_text,
+        )
+        out_h5 = (
+            args.out_h5
+            if os.path.isabs(args.out_h5)
+            else os.path.join(args.out_dir, args.out_h5)
+        )
+        _write_h5(
+            out_h5,
+            args,
+            labels,
+            axes,
+            target_ids,
+            pair_meta,
+            reduced,
+            rp_grid,
+            orbits,
+            elapsed,
+            exe_info,
+        )
+        print(f"[dJ-epr-kspace] wrote {out}")
+        print(f"[dJ-epr-kspace] wrote {tsv}")
+        print(f"[dJ-epr-kspace] wrote {out_h5}")
+
+    collective_root_call(comm, finalize_root, phase="scalar dJ output write")
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Direct EPR k,q-space dJ/du calculator for Rp=(0,0,0)")
+    ap = argparse.ArgumentParser(
+        description="Direct EPR k,q-space dJ/du calculator for Rp=(0,0,0)"
+    )
     ap.add_argument("--epr_up", required=True)
     ap.add_argument("--epr_dn", required=True)
     ap.add_argument("--hr_unit", choices=["ev", "ry", "ha"], default="ry")
     ap.add_argument("--eph_unit", choices=["ev", "ry", "ha"], default="ry")
     ap.add_argument("--atom_labels", default="")
-    ap.add_argument("--species_labels", default="", help="Comma-separated species for spglib orbit grouping, e.g. Mn,Mn,Te,Te.")
-    ap.add_argument("--targets", default="all", help="Comma labels or 0-based indices; default all")
+    ap.add_argument(
+        "--species_labels",
+        default="",
+        help="Comma-separated species for spglib orbit grouping, e.g. Mn,Mn,Te,Te.",
+    )
+    ap.add_argument(
+        "--targets", default="all", help="Comma labels or 0-based indices; default all"
+    )
     ap.add_argument(
         "--axes",
         default="xyz",
@@ -973,10 +1701,18 @@ def main():
     )
     ap.add_argument("--mag_atoms", type=int, nargs="+", required=True)
     ap.add_argument("--mag_atoms_base", type=int, choices=[0, 1], default=0)
-    ap.add_argument("--slices", required=True, help="Local orbital slices, e.g. '0:0:5,1:5:10'")
+    ap.add_argument(
+        "--slices", required=True, help="Local orbital slices, e.g. '0:0:5,1:5:10'"
+    )
     ap.add_argument("--efermi", type=float, required=True)
     ap.add_argument("--kmesh", type=int, nargs=3, required=True)
-    ap.add_argument("--qmesh", type=int, nargs=3, default=None, help="Output q mesh; default EPR basic_data/qc_dim")
+    ap.add_argument(
+        "--qmesh",
+        type=int,
+        nargs=3,
+        default=None,
+        help="Output q mesh; default EPR basic_data/qc_dim",
+    )
     ap.add_argument("--rp_idx", type=int, nargs=3, default=[0, 0, 0])
     ap.add_argument(
         "--g_transform",
@@ -988,11 +1724,23 @@ def main():
     ap.add_argument("--d_max", type=float, default=20.0)
     ap.add_argument("--emin", type=float, default=-25.0)
     ap.add_argument("--empoints", type=int, default=100)
-    ap.add_argument("--integrator", choices=["contour", "cfr", "cfr_ozaki"], default="contour")
+    ap.add_argument(
+        "--integrator", choices=["contour", "cfr", "cfr_ozaki"], default="contour"
+    )
     ap.add_argument("--cfr_beta", type=float, default=400.0)
     ap.add_argument("--nproc", type=int, default=1)
-    ap.add_argument("--omp_threads", type=int, default=1, help="BLAS/OpenMP threads per energy worker process")
-    ap.add_argument("--precache_workers", type=int, default=1, help="Thread workers for independent g(k,q) pre-cache entries")
+    ap.add_argument(
+        "--omp_threads",
+        type=int,
+        default=1,
+        help="BLAS/OpenMP threads per energy worker process",
+    )
+    ap.add_argument(
+        "--precache_workers",
+        type=int,
+        default=1,
+        help="Thread workers for independent g(k,q) pre-cache entries",
+    )
     ap.add_argument("--rotation_mode", choices=["none"], default="none")
     ap.add_argument(
         "--ddelta_mode",
@@ -1004,17 +1752,40 @@ def main():
             "onsite: use only electron Re=(0,0,0) onsite derivative."
         ),
     )
-    ap.add_argument("--symprec", type=float, default=1.0e-4, help="spglib symmetry tolerance for orbit grouping.")
-    ap.add_argument("--angle_tolerance", type=float, default=-1.0, help="spglib angle tolerance in degrees; -1 uses spglib default.")
+    ap.add_argument(
+        "--symprec",
+        type=float,
+        default=1.0e-4,
+        help="spglib symmetry tolerance for orbit grouping.",
+    )
+    ap.add_argument(
+        "--angle_tolerance",
+        type=float,
+        default=-1.0,
+        help="spglib angle tolerance in degrees; -1 uses spglib default.",
+    )
     ap.add_argument(
         "--orbit_grouping",
         choices=["spglib", "shell"],
         default="spglib",
         help="Orbit grouping mode. shell groups all bonds with the same shell index and distance.",
     )
-    ap.add_argument("--debug_orbits", action="store_true", help="Print spglib operation and bond-mapping diagnostics.")
-    ap.add_argument("--debug_orbit_shell", type=int, default=None, help="Restrict --debug_orbits bond diagnostics to one shell.")
-    ap.add_argument("--debug_epr_positions", action="store_true", help="Print EPR tau and Wannier-center position diagnostics.")
+    ap.add_argument(
+        "--debug_orbits",
+        action="store_true",
+        help="Print spglib operation and bond-mapping diagnostics.",
+    )
+    ap.add_argument(
+        "--debug_orbit_shell",
+        type=int,
+        default=None,
+        help="Restrict --debug_orbits bond diagnostics to one shell.",
+    )
+    ap.add_argument(
+        "--debug_epr_positions",
+        action="store_true",
+        help="Print EPR tau and Wannier-center position diagnostics.",
+    )
     ap.add_argument("--no_symmetry_orbits", action="store_true")
     ap.add_argument("--out_dir", default="dJ_epr_kspace")
     ap.add_argument("--out_name", default="dJ_epr_kspace.txt")

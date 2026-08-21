@@ -22,10 +22,12 @@ only parseable examples. In particular, dJ requires EPR files containing
 electron-phonon data, and its explicit `qmesh` must agree with EPR `qc_dim` and
 divide the electronic `kmesh`.
 
-All exchange templates use `execution='auto'` and `nproc=1`. A multi-rank
-launch therefore uses the native MPI route without nested local process pools.
-A serial convergence run may raise `nproc`, while MPI runs should leave it at
-one and tune only rank-local thread settings deliberately.
+All exchange templates use `execution='auto'` and `nproc=1`, which is the safe
+portable MPI default. Scalar dJ may instead use `nproc>1` with one MPI rank per
+node: the rank creates one shared-memory EPC cache and its local processes
+share it. Reserve and bind at least `nproc*omp_threads` cores per rank, and
+check that node-local POSIX shared-memory capacity is sufficient for the
+cache. Other MPI exchange modes must leave `nproc=1`.
 
 Validate every exchange template without opening a scientific input file or
 creating its save directory:

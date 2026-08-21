@@ -100,7 +100,11 @@ All four exchange modes participate in MPI when `execution='auto'` discovers
 more than one rank. Scalar/tensor J and scalar dJ split the energy integration;
 tensor dJ splits target/displacement-axis tasks. Rank 0 alone writes the final
 products. Use `nproc=1` per MPI rank; serial runs may raise `nproc` for local
-multiprocessing.
+multiprocessing. Scalar dJ additionally supports hybrid MPI with `nproc>1`:
+each rank creates one POSIX shared-memory EPC cache and clean local worker
+processes attach to it. For a multi-node run, using one rank per node avoids
+replicating that cache within a node; bind at least `nproc*omp_threads` cores
+to each rank. Other exchange modes still require `nproc=1` under MPI.
 
 Historical magph modules are likewise quarantined under `slw.magph.legacy`.
 The retained compatibility drivers live in `slw.magph.legacy.reference`;

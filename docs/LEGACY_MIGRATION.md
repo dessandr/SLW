@@ -35,4 +35,5 @@ q/mode contractions vectorized within each rank. Exchange scalar/tensor J and
 scalar dJ distribute contour/pole energy points; tensor dJ distributes
 target-axis tasks. Collective phases agree serializable errors before entering
 the next collective. A requested multi-rank run must not silently degrade to
-rank-zero serial execution, and exchange requires `nproc=1` per MPI rank.
+rank-zero serial execution. Scalar dJ may use shared-memory local workers with
+`nproc>1` per rank; other exchange modes require `nproc=1` per MPI rank.
