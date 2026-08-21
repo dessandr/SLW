@@ -20,6 +20,7 @@ from .model import (
     ExchangeSpinNormalization,
     MagneticConfiguration,
     MagneticOrder,
+    SingleIonAnisotropy,
 )
 
 _SCALAR_DATASETS = (
@@ -836,6 +837,7 @@ def screen_magnetic_configuration(
     spin_pattern: ArrayLike | None = None,
     spin_magnitudes: ArrayLike | float | None = None,
     quantization_axis: ArrayLike | None = None,
+    anisotropy: SingleIonAnisotropy | None = None,
     require_local_stability: bool = True,
     stability_atol_mev: float = 1.0e-10,
     torque_atol_mev: float = 1.0e-8,
@@ -843,8 +845,9 @@ def screen_magnetic_configuration(
     """Validate a declared FM or bipartite collinear-AFM reference state.
 
     The order is mandatory and is never inferred from the sign of ``J``.  This
-    inexpensive real-space check verifies local alignment and torque only; a
-    later LSWT/BdG stage must still screen the full q-space spectrum.
+    inexpensive real-space check verifies local alignment and torque for the
+    exchange plus optional single-ion anisotropy; a later LSWT/BdG stage must
+    still screen the full q-space spectrum.
     """
 
     stability_atol_mev = _nonnegative_finite_tolerance(
@@ -954,10 +957,38 @@ def screen_magnetic_configuration(
     bond_fields = np.einsum(
         "bij,bj->bi", exchange.tensor_mev, neighbour_spins, optimize=True
     )
-    fields = np.zeros((n_site, 3), dtype=np.float64)
-    np.add.at(fields, exchange.bond_i, bond_fields)
-    stiffness = np.einsum("ij,ij->i", exchange_states, fields, optimize=True)
-    torque = np.cross(exchange_states, fields)
+    exchange_fields = np.zeros((n_site, 3), dtype=np.float64)
+    np.add.at(exchange_fields, exchange.bond_i, bond_fields)
+    fields = (
+        exchange_fields
+        if exchange.convention.spin_normalization
+        is ExchangeSpinNormalization.UNIT_VECTOR
+        else magnitudes[:, None] * exchange_fields
+    )
+    if anisotropy is not None:
+        if anisotropy.n_magnetic_sites != n_site:
+            raise ValueError(
+                "single-ion anisotropy and exchange magnetic site counts differ"
+            )
+        anisotropy_states = (
+            directions
+            if anisotropy.spin_normalization is ExchangeSpinNormalization.UNIT_VECTOR
+            else spin_vectors
+        )
+        projections = np.einsum(
+            "ij,ij->i", anisotropy_states, anisotropy.axis, optimize=True
+        )
+        anisotropy_fields = (
+            2.0
+            * anisotropy.energy_mev[:, None]
+            * projections[:, None]
+            * anisotropy.axis
+        )
+        if anisotropy.spin_normalization is ExchangeSpinNormalization.SPIN_OPERATOR:
+            anisotropy_fields = magnitudes[:, None] * anisotropy_fields
+        fields = fields + anisotropy_fields
+    stiffness = np.einsum("ij,ij->i", directions, fields, optimize=True)
+    torque = np.cross(directions, fields)
     max_torque = float(np.max(np.linalg.norm(torque, axis=1)))
     minimum_stiffness = float(np.min(stiffness))
     locally_stable = (
@@ -966,7 +997,7 @@ def screen_magnetic_configuration(
     if require_local_stability and not locally_stable:
         raise ValueError(
             "Declared magnetic reference is not locally stationary/stable under the "
-            "screened exchange model: "
+            "screened exchange/SIA model: "
             f"min longitudinal stiffness={minimum_stiffness:.6g} meV, "
             f"max torque={max_torque:.6g} meV. The order is not inferred from J; "
             "check the declared order/spin_pattern or explicitly disable this local check."

@@ -205,6 +205,37 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertIn("does not use &parallel numba_threads", stderr.getvalue())
 
+    def test_native_dispersion_dry_run_accepts_complete_sia(self):
+        input_text = """
+        &control calculation = 'dispersion', prefix = 'mn' /
+        &parallel workers_per_rank = 1, threads_per_worker = 4 /
+        &magph
+          exchange_h5 = 'J.h5',
+          kpath_file = 'bands.win',
+          magnetic_order = 'collinear_afm',
+          spin_magnitudes = 2.5, 2.5,
+          spin_pattern = 1.0, -1.0,
+          quantization_axis = 0.0, 0.0, 1.0,
+          anisotropy_model = 'uniaxial',
+          anisotropy_mev = 0.05,
+          anisotropy_axis = 0.0, 0.0, 1.0,
+          anisotropy_normalization = 'unit_vector',
+          plot = .false.
+        /
+        """
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            previous = sys.stdin
+            sys.stdin = io.StringIO(input_text)
+            try:
+                code = run_stage("magph", ["--dry-run"])
+            finally:
+                sys.stdin = previous
+        self.assertEqual(code, 0)
+        self.assertIn("native dispersion", stdout.getvalue())
+        self.assertIn("points/segment", stdout.getvalue())
+        self.assertNotIn("Numba threads", stdout.getvalue())
+
 
 if __name__ == "__main__":
     unittest.main()

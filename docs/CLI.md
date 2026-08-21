@@ -8,7 +8,7 @@ standard output.
 |---|---|---|
 | `slw_epr.x` | QE/qe2pert EPR preparation and validation | none yet |
 | `slw_exchange.x` | scalar/tensor `J` and analytic `dJ/du` | all calculations |
-| `slw_magph.x` | hybrid bands, Berry, lifetime, spectral, and scattering calculations | `lifetime`, `spectral`, `chirality_plane` |
+| `slw_magph.x` | magnon dispersion, lifetime, hybrid, spectral, and scattering calculations | `dispersion`, `lifetime`, `spectral`, `chirality_plane` |
 | `slw_post.x` | ASR/symmetry checks, analysis, dumps, and plotting | none yet |
 
 Serial use follows the QE convention:

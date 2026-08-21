@@ -1,8 +1,9 @@
 # Native magnon--phonon redesign contract
 
 This document defines the numerical and data-contract boundary for the new
-native magnon--phonon implementation. `calculation='lifetime'` is now the
-first registered native command; other `slw_magph.x` calculations still use
+native magnon--phonon implementation. `calculation='dispersion'` and
+`calculation='lifetime'` are registered native commands; other
+`slw_magph.x` calculations still use
 the quarantined compatibility drivers documented in
 [INPUT_REFERENCE.md](INPUT_REFERENCE.md).
 
@@ -20,6 +21,9 @@ The first numerical foundation is now implemented as Python APIs:
   contract it with physical phonon displacements;
 - `slw.magph.lswt` and `slw.magph.vertex` construct arbitrary-N FM or
   bipartite-AFM bare magnons and band-basis exchange-striction vertices;
+- `slw.magph.dispersion` reads explicit Wannier90 paths, distributes path
+  points with MPI, and retains exact Goldstone energies without inventing
+  paraunitary eigenvectors;
 - `slw.magph.self_energy` evaluates the common retarded self-energy with
   vectorized, chunked contractions;
 - `slw.magph.lifetime` applies one HWHM/FWHM/rate/lifetime convention;
@@ -116,6 +120,39 @@ by the first native canonical importer until a dedicated conversion is backed
 by scalar/direct/TB2J parity tests. Likewise, a canonical-half bond list and a
 tensor-axis subset are valid retained exchange artifacts but are not silently
 expanded by the native magnon path.
+
+## Single-ion anisotropy
+
+The native isotropic-exchange route may include an independent uniaxial
+single-ion term
+
+$$
+H_{\mathrm{SIA}}=-\sum_i K_i(\mathbf s_i\cdot\hat{\mathbf n}_i)^2.
+$$
+
+Positive `K_i` is easy-axis and negative `K_i` is easy-plane. The spin
+variable is explicit: `unit_vector` means $\mathbf s_i$ is a unit direction,
+while `spin_operator` means it is the dimensionless spin operator with the
+declared site spin magnitude. Consequently the two inputs have different
+quadratic LSWT coefficients and are never converted by guessing. One `K` and
+axis may be broadcast to every magnetic site, or site-resolved values and axes
+may be supplied in magnetic-site order.
+
+SIA participates in reference-state torque/stability screening and in every
+LSWT eigensystem used by dispersion and lifetime. It changes magnon energies,
+eigenvectors, and self-energy phase space. It does not create a
+magnon--phonon vertex by itself: an additional derivative $dK/du$ would be
+needed for an anisotropy-striction vertex, and that derivative is outside the
+current native scope.
+
+The energy-only dispersion solver admits exact AFM Goldstone points. The
+strict paraunitary solver used for vertices and lifetimes continues to require
+a physical SIA gap or an explicitly shifted mesh. No artificial anisotropy is
+inserted as a numerical regulator. Energy-only FM dispersion also supports a
+stationary transverse easy-plane axis through a Nambu energy solve. The first
+FM lifetime route still uses its normal $N$-channel basis and therefore
+rejects SIA that produces anomalous FM terms; extending that route requires a
+tested $2N$-channel FM vertex contract.
 
 ### Scalar/tensor capability gate
 
@@ -297,6 +334,52 @@ final metadata/output. The two broadcast caches are currently replicated once
 per MPI rank; their actual rank and maximum-node footprints are printed at run
 time and recorded in output metadata.
 
+## Native dispersion output v1
+
+`calculation='dispersion'` reads an explicit Wannier90 `kpoint_path` block;
+the package does not select material-specific high-symmetry coordinates. The
+exchange HDF5 must contain `lattice_ang`, which converts fractional reciprocal
+coordinates to a cumulative path distance in inverse Angstrom. Path points
+are distributed over MPI ranks and rank zero atomically writes an NPZ plus an
+optional PNG, PDF, or SVG plot.
+
+The NPZ contains fractional k points, reciprocal path distance, physical
+magnon energies, exact-Goldstone flags, path segment boundaries, tick labels,
+and JSON provenance. Exact AFM Goldstone points are valid here because no
+paraunitary transform is claimed.
+
+```fortran
+&control
+  calculation = 'dispersion',
+  prefix = 'sample',
+  outdir = './slw-tmp'
+/
+&parallel
+  execution = 'auto',
+  workers_per_rank = 1,
+  threads_per_worker = 4
+/
+&magph
+  exchange_h5 = './input/J.h5',
+  magnetic_order = 'collinear_afm',
+  spin_magnitudes = 2.5, 2.5,
+  spin_pattern = 1, -1,
+  quantization_axis = 0.0, 0.0, 1.0,
+  anisotropy_model = 'uniaxial',
+  anisotropy_mev = 0.05,
+  anisotropy_axis = 0.0, 0.0, 1.0,
+  anisotropy_normalization = 'unit_vector',
+  kpath_file = './input/bands.win',
+  points_per_segment = 50,
+  output = '${savedir}/sample.dispersion.npz',
+  plot = .true.,
+  plot_output = '${savedir}/sample.dispersion.png'
+/
+```
+
+Remove all four `anisotropy_*` keys for a zero-SIA model. Supplying only part
+of the SIA contract is an input error.
+
 ## Native lifetime output v1
 
 The registered lifetime product records:
@@ -347,6 +430,7 @@ input file:
   spin_magnitudes = 2.5,
   spin_pattern = 1,
   quantization_axis = 0.0, 0.0, 1.0,
+  ! The same complete anisotropy_* set accepted by dispersion is optional.
   kmesh = 12, 12, 8,
   kshift = 0.5, 0.5, 0.5,
   temperature_k = 300.0,
@@ -365,8 +449,9 @@ largest streamed q block; when both are present the smaller value is used.
 ## Migration roadmap and legacy boundary
 
 1. Completed: typed static/dynamic exchange and phonon screening, isotropic
-   LSWT/vertex construction, self-energy/lifetime, MPI k distribution, and a
-   registered native lifetime output for arbitrary-N FM and bipartite AFM.
+   LSWT/vertex construction with optional uniaxial SIA, exact-Goldstone magnon
+   dispersion, self-energy/lifetime, MPI k distribution, and registered
+   native dispersion/lifetime outputs for arbitrary-N FM and bipartite AFM.
 2. Add generated HDF5 end-to-end fixtures and real-material opt-in parity
    artifacts without using the dimensionally inconsistent legacy absolute
    linewidth as an oracle.

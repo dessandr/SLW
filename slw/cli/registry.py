@@ -148,6 +148,13 @@ _REGISTRY: dict[str, tuple[Action, ...]] = {
     ),
     "magph": (
         _action(
+            "dispersion",
+            "Compute native MPI-distributed magnon bands and an optional plot",
+            backends={
+                "default": _backend(handler="slw.magph.engine:prepare_run"),
+            },
+        ),
+        _action(
             "hybrid",
             "Build and diagonalize the hybrid magnon-phonon Hamiltonian",
             "slw.magph.legacy.reference.hybrid",
@@ -324,12 +331,12 @@ def find_action(stage: str, calculation: str) -> Action:
         names = (action.name, *action.aliases)
         if wanted in names:
             return action
-    choices = sorted({name for action in actions for name in (action.name, *action.aliases)})
+    choices = sorted(
+        {name for action in actions for name in (action.name, *action.aliases)}
+    )
     close = get_close_matches(wanted, choices, n=3)
     hint = f"; did you mean {', '.join(close)}?" if close else ""
-    raise RegistryError(
-        f"unknown calculation {calculation!r} for slw_{stage}.x{hint}"
-    )
+    raise RegistryError(f"unknown calculation {calculation!r} for slw_{stage}.x{hint}")
 
 
 def resolve_action(
@@ -356,8 +363,7 @@ def resolve_action(
     if (
         source_value is not None
         and source_alias is not None
-        and str(source_value).strip().lower()
-        != str(source_alias).strip().lower()
+        and str(source_value).strip().lower() != str(source_alias).strip().lower()
     ):
         raise RegistryError("source and input_format specify different backends")
     source_value = source_value if source_value is not None else source_alias

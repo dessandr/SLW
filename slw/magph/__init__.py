@@ -2,11 +2,19 @@
 
 The array kernels and strict data contracts here are independent of the
 quarantined compatibility drivers under :mod:`slw.magph.legacy`.  Native
-``calculation='lifetime'`` has completed its initial FM/AFM gate; unrelated
-registry calculations remain compatibility-backed until replaced explicitly.
+``calculation='dispersion'`` and ``calculation='lifetime'`` have completed
+their initial FM/AFM gate; unrelated registry calculations remain
+compatibility-backed until replaced explicitly.
 """
 
-from .config import MagphInputError, MagphLifetimeRequest, build_lifetime_request
+from .config import (
+    MagphDispersionRequest,
+    MagphInputError,
+    MagphLifetimeRequest,
+    SingleIonAnisotropyInput,
+    build_dispersion_request,
+    build_lifetime_request,
+)
 from .coupling import (
     ModeResolvedExchangeDerivative,
     build_mode_resolved_isotropic_derivative,
@@ -18,14 +26,27 @@ from .derivative import (
     ExchangeDerivativeReport,
     load_exchange_derivative_h5,
 )
-from .engine import MagphRunResult, run_lifetime
+from .dispersion import (
+    DistributedMagnonDispersion,
+    MagnonDispersionResult,
+    MagnonKPath,
+    build_wannier90_kpath,
+    compute_magnon_dispersion,
+)
+from .engine import MagphRunResult, run_dispersion, run_lifetime
 from .lifetime import (
     LifetimeResult,
     compute_lifetime,
     lifetime_from_onshell_self_energy,
     linewidth_observables,
 )
-from .lswt import MagnonSpectrum, solve_isotropic_lswt, uniform_fractional_mesh
+from .lswt import (
+    MagnonDispersion,
+    MagnonSpectrum,
+    solve_isotropic_lswt,
+    solve_isotropic_lswt_energies,
+    uniform_fractional_mesh,
+)
 from .mesh import MagnonMeshCache, build_magnon_mesh_cache
 from .model import (
     ExchangeCapability,
@@ -36,8 +57,15 @@ from .model import (
     ExchangeSpinNormalization,
     MagneticConfiguration,
     MagneticOrder,
+    SingleIonAnisotropy,
 )
-from .output import LIFETIME_OUTPUT_SCHEMA_VERSION, write_lifetime_npz
+from .output import (
+    DISPERSION_OUTPUT_SCHEMA_VERSION,
+    LIFETIME_OUTPUT_SCHEMA_VERSION,
+    write_dispersion_npz,
+    write_dispersion_plot,
+    write_lifetime_npz,
+)
 from .parallel import (
     CollectiveExecutionError,
     DistributedArrayResult,
@@ -80,11 +108,13 @@ from .vertex import (
 )
 
 __all__ = (
+    "DISPERSION_OUTPUT_SCHEMA_VERSION",
     "LIFETIME_OUTPUT_SCHEMA_VERSION",
     "CollectiveExecutionError",
     "DerivativeASRPolicy",
     "DistributedArrayResult",
     "DistributedLifetimeGridResult",
+    "DistributedMagnonDispersion",
     "ExchangeCapability",
     "ExchangeConvention",
     "ExchangeDerivativeModel",
@@ -100,9 +130,13 @@ __all__ = (
     "LifetimeResult",
     "MagneticConfiguration",
     "MagneticOrder",
+    "MagnonDispersion",
+    "MagnonDispersionResult",
+    "MagnonKPath",
     "MagnonMeshCache",
     "MagnonPhononScatteringProblem",
     "MagnonSpectrum",
+    "MagphDispersionRequest",
     "MagphInputError",
     "MagphLifetimeRequest",
     "MagphRunResult",
@@ -112,19 +146,24 @@ __all__ = (
     "PhononInputError",
     "PhononMassUnit",
     "SelfEnergyResult",
+    "SingleIonAnisotropy",
+    "SingleIonAnisotropyInput",
     "ZeroPointDisplacement",
     "accumulate_onshell_self_energy_diagonal_block",
     "balanced_partition",
     "bose_occupation",
     "build_bare_isotropic_vertex",
     "build_bare_isotropic_vertex_block",
+    "build_dispersion_request",
     "build_lifetime_request",
     "build_magnon_mesh_cache",
     "build_mode_resolved_isotropic_derivative",
     "build_mode_resolved_isotropic_derivative_distributed",
     "build_scattering_problem",
+    "build_wannier90_kpath",
     "compute_lifetime",
     "compute_lifetime_grid",
+    "compute_magnon_dispersion",
     "compute_onshell_self_energy_diagonal",
     "compute_retarded_self_energy",
     "distributed_array_map",
@@ -136,10 +175,14 @@ __all__ = (
     "load_exchange_h5",
     "load_phonon_cache",
     "normalize_q_weights",
+    "run_dispersion",
     "run_lifetime",
     "screen_magnetic_configuration",
     "solve_isotropic_lswt",
+    "solve_isotropic_lswt_energies",
     "uniform_fractional_mesh",
+    "write_dispersion_npz",
+    "write_dispersion_plot",
     "write_lifetime_npz",
     "zero_point_displacements",
 )

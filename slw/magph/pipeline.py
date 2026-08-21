@@ -17,7 +17,7 @@ from .lifetime import (
     linewidth_observables,
 )
 from .mesh import MagnonMeshCache, build_magnon_mesh_cache
-from .model import ExchangeModel, MagneticConfiguration
+from .model import ExchangeModel, MagneticConfiguration, SingleIonAnisotropy
 from .parallel import DistributedArrayResult, distributed_array_map
 from .self_energy import (
     OnShellSelfEnergyResult,
@@ -203,6 +203,7 @@ def compute_lifetime_grid(
     k_mesh_shape: tuple[int, int, int] | None = None,
     kshift_grid: ArrayLike | None = None,
     magnon_cache: MagnonMeshCache | None = None,
+    anisotropy: SingleIonAnisotropy | None = None,
     context: MPIContext | None = None,
     root: int = 0,
     progress: Callable[[int, int], None] | None = None,
@@ -236,6 +237,7 @@ def compute_lifetime_grid(
             k_points,
             k_mesh_shape=k_mesh_shape,
             kshift_grid=kshift_grid,
+            anisotropy=anisotropy,
             context=context,
             root=root,
             lswt_options=lswt_options,
@@ -306,6 +308,7 @@ def compute_lifetime_grid(
                     k_points[int(global_index)],
                     q_chunk_size=vertex_q_chunk_size,
                     lswt_options=lswt_options,
+                    anisotropy=anisotropy,
                 )
                 evaluated = evaluate_scattering_problem(
                     problem,

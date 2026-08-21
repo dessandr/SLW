@@ -5,12 +5,17 @@ from pathlib import Path
 
 import numpy as np
 
-from slw.magph.lswt import solve_isotropic_lswt, uniform_fractional_mesh
+from slw.magph.lswt import (
+    solve_isotropic_lswt,
+    solve_isotropic_lswt_energies,
+    uniform_fractional_mesh,
+)
 from slw.magph.model import (
     ExchangeConvention,
     ExchangeModel,
     ExchangeRepresentation,
     ExchangeSpinNormalization,
+    SingleIonAnisotropy,
 )
 from slw.magph.screening import screen_magnetic_configuration
 
@@ -129,6 +134,130 @@ class NativeLSWTTests(unittest.TestCase):
                 exchange,
                 configuration,
                 np.asarray(((0.0, 0.0, 0.0),)),
+            )
+
+    def test_energy_only_afm_dispersion_retains_exact_goldstone(self) -> None:
+        exchange = _afm_chain()
+        configuration = screen_magnetic_configuration(
+            exchange,
+            order="collinear_afm",
+            spin_magnitudes=1.0,
+        )
+        dispersion = solve_isotropic_lswt_energies(
+            exchange,
+            configuration,
+            np.asarray(((0.0, 0.0, 0.0), (0.25, 0.0, 0.0))),
+        )
+        np.testing.assert_allclose(dispersion.energy_mev[0], 0.0)
+        np.testing.assert_array_equal(dispersion.goldstone_mask[0], (True, True))
+        np.testing.assert_allclose(
+            dispersion.energy_mev[1], (2.828427124746, 2.828427124746)
+        )
+
+    def test_uniaxial_sia_uses_explicit_spin_normalization(self) -> None:
+        exchange = _fm_chain(j_mev=2.0)
+        configuration = screen_magnetic_configuration(
+            exchange,
+            order="fm",
+            spin_magnitudes=2.0,
+        )
+        unit_vector = SingleIonAnisotropy(
+            energy_mev=(0.1,),
+            axis=((0.0, 0.0, 1.0),),
+            spin_normalization="unit_vector",
+        )
+        spin_operator = SingleIonAnisotropy(
+            energy_mev=(0.1,),
+            axis=((0.0, 0.0, 1.0),),
+            spin_normalization="spin_operator",
+        )
+        point = np.asarray(((0.0, 0.0, 0.0),))
+        np.testing.assert_allclose(
+            solve_isotropic_lswt(
+                exchange,
+                configuration,
+                point,
+                anisotropy=unit_vector,
+            ).physical_energies_mev,
+            ((0.1,),),
+        )
+        np.testing.assert_allclose(
+            solve_isotropic_lswt(
+                exchange,
+                configuration,
+                point,
+                anisotropy=spin_operator,
+            ).physical_energies_mev,
+            ((0.4,),),
+        )
+
+    def test_easy_axis_sia_opens_afm_gap_for_strict_solver(self) -> None:
+        exchange = _afm_chain()
+        configuration = screen_magnetic_configuration(
+            exchange,
+            order="collinear_afm",
+            spin_magnitudes=1.0,
+        )
+        anisotropy = SingleIonAnisotropy(
+            energy_mev=(0.1, 0.1),
+            axis=((0.0, 0.0, 1.0), (0.0, 0.0, 1.0)),
+            spin_normalization="unit_vector",
+        )
+        spectrum = solve_isotropic_lswt(
+            exchange,
+            configuration,
+            np.asarray(((0.0, 0.0, 0.0),)),
+            anisotropy=anisotropy,
+        )
+        self.assertTrue(np.all(spectrum.physical_energies_mev > 0.0))
+
+    def test_nonstationary_sia_axis_is_rejected(self) -> None:
+        exchange = _fm_chain()
+        configuration = screen_magnetic_configuration(
+            exchange,
+            order="fm",
+            spin_magnitudes=1.0,
+        )
+        anisotropy = SingleIonAnisotropy(
+            energy_mev=(0.1,),
+            axis=((1.0, 0.0, 1.0),),
+            spin_normalization="unit_vector",
+        )
+        with self.assertRaisesRegex(ValueError, "non-stationary"):
+            solve_isotropic_lswt_energies(
+                exchange,
+                configuration,
+                np.asarray(((0.1, 0.0, 0.0),)),
+                anisotropy=anisotropy,
+            )
+
+    def test_energy_only_fm_supports_stationary_easy_plane_pairing(self) -> None:
+        exchange = _fm_chain()
+        configuration = screen_magnetic_configuration(
+            exchange,
+            order="fm",
+            spin_magnitudes=2.0,
+            quantization_axis=(1.0, 0.0, 0.0),
+        )
+        anisotropy = SingleIonAnisotropy(
+            energy_mev=(-0.1,),
+            axis=((0.0, 0.0, 1.0),),
+            spin_normalization="unit_vector",
+        )
+        dispersion = solve_isotropic_lswt_energies(
+            exchange,
+            configuration,
+            np.asarray(((0.0, 0.0, 0.0), (0.25, 0.0, 0.0))),
+            anisotropy=anisotropy,
+        )
+        np.testing.assert_allclose(dispersion.energy_mev[0], 0.0)
+        self.assertGreater(float(dispersion.energy_mev[1, 0]), 0.0)
+        with self.assertRaisesRegex(ValueError, "anomalous LSWT terms"):
+            solve_isotropic_lswt(
+                exchange,
+                configuration,
+                np.asarray(((0.25, 0.0, 0.0),)),
+                anisotropy=anisotropy,
             )
 
 

@@ -240,6 +240,7 @@ def _uses_numba_threads(config: RunConfig) -> bool:
             config.parameters.get("ltensor", False)
         )
     return config.stage == "magph" and calculation not in {
+        "dispersion",
         "lifetime",
         "prepare_lifetime",
     }

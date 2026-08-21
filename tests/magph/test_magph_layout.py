@@ -54,6 +54,7 @@ NATIVE_MODULES = {
     "config.py",
     "coupling.py",
     "derivative.py",
+    "dispersion.py",
     "engine.py",
     "lifetime.py",
     "lswt.py",

@@ -4,7 +4,11 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from slw.magph.config import MagphInputError, build_lifetime_request
+from slw.magph.config import (
+    MagphInputError,
+    build_dispersion_request,
+    build_lifetime_request,
+)
 
 
 def _parameters() -> dict[str, object]:
@@ -47,6 +51,51 @@ class NativeMagphConfigTests(unittest.TestCase):
         parameters["material"] = "MnTe"
         with self.assertRaisesRegex(MagphInputError, "unknown.*material"):
             build_lifetime_request(parameters, prefix="slw", savedir=".")
+
+    def test_lifetime_parses_complete_single_ion_anisotropy(self) -> None:
+        parameters = _parameters()
+        parameters.update(
+            {
+                "anisotropy_model": "uniaxial",
+                "anisotropy_mev": (0.1, 0.2),
+                "anisotropy_axis": (0.0, 0.0, 1.0),
+                "anisotropy_normalization": "unit_vector",
+            }
+        )
+        request = build_lifetime_request(parameters, prefix="slw", savedir=".")
+        assert request.anisotropy is not None
+        built = request.anisotropy.build(2)
+        self.assertEqual(built.energy_mev.tolist(), [0.1, 0.2])
+        self.assertEqual(built.axis.tolist(), [[0.0, 0.0, 1.0]] * 2)
+
+    def test_partial_single_ion_anisotropy_is_rejected(self) -> None:
+        parameters = _parameters()
+        parameters["anisotropy_mev"] = 0.1
+        with self.assertRaisesRegex(MagphInputError, "requires.*anisotropy_axis"):
+            build_lifetime_request(parameters, prefix="slw", savedir=".")
+
+    def test_dispersion_request_has_atomic_output_defaults(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            request = build_dispersion_request(
+                {
+                    "exchange_h5": "J.h5",
+                    "kpath_file": "bands.win",
+                    "magnetic_order": "collinear_afm",
+                    "spin_magnitudes": (2.5, 2.5),
+                    "quantization_axis": (0.0, 0.0, 1.0),
+                },
+                prefix="mn",
+                savedir=directory,
+            )
+            self.assertEqual(
+                request.output,
+                Path(directory).resolve() / "mn.dispersion.npz",
+            )
+            self.assertEqual(
+                request.plot_output,
+                Path(directory).resolve() / "mn.dispersion.png",
+            )
+            self.assertEqual(request.points_per_segment, 50)
 
 
 if __name__ == "__main__":

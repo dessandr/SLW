@@ -49,5 +49,11 @@ mpirun -np 8 slw_exchange.x -in examples/exchange_dj_epr.in > dj.out
 Other stage templates can be checked independently:
 
 ```bash
+slw_magph.x -in examples/dispersion.in --dry-run
 slw_magph.x -in examples/lifetime.in --dry-run
 ```
+
+`dispersion.in` uses the explicit Wannier90 `kpoint_path` block in
+`kpath.win`. Its single-ion anisotropy is an illustrative input, not a
+material default: positive `K` follows `H_SIA=-K(s.n)^2` and the chosen
+`unit_vector` or `spin_operator` normalization is mandatory.

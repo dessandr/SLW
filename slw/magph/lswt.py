@@ -22,6 +22,7 @@ from .model import (
     ExchangeSpinNormalization,
     MagneticConfiguration,
     MagneticOrder,
+    SingleIonAnisotropy,
 )
 
 
@@ -95,6 +96,56 @@ class MagnonSpectrum:
         return values
 
 
+@dataclass(frozen=True)
+class MagnonDispersion:
+    """Physical magnon energies without a paraunitary transformation.
+
+    This is the appropriate result for band plots containing exact bosonic
+    Goldstone points.  Such points have well-defined zero energy but do not
+    possess a normalizable paraunitary eigenvector, so this object must not be
+    used as a vertex/self-energy cache.
+    """
+
+    k_points_frac: NDArray[np.float64]
+    energy_mev: NDArray[np.float64]
+    goldstone_mask: NDArray[np.bool_]
+    max_hermiticity_residual_mev: float
+    max_imaginary_energy_mev: float
+    max_particle_hole_residual_mev: float
+    minimum_hessian_mev: float
+
+    def __post_init__(self) -> None:
+        points = _readonly(self.k_points_frac, dtype=np.dtype(np.float64))
+        energy = _readonly(self.energy_mev, dtype=np.dtype(np.float64))
+        goldstone = _readonly(self.goldstone_mask, dtype=np.dtype(bool))
+        if points.ndim != 2 or points.shape[1:] != (3,) or points.shape[0] == 0:
+            raise ValueError("k_points_frac must have nonempty shape (nk,3)")
+        if energy.ndim != 2 or energy.shape[0] != points.shape[0]:
+            raise ValueError("energy_mev must have shape (nk,nmode)")
+        if goldstone.shape != energy.shape:
+            raise ValueError("goldstone_mask must match energy_mev")
+        if not np.all(np.isfinite(points)) or not np.all(np.isfinite(energy)):
+            raise ValueError("magnon dispersion contains non-finite values")
+        if np.any(energy < 0.0):
+            raise ValueError("physical magnon energies must be non-negative")
+        diagnostics = (
+            self.max_hermiticity_residual_mev,
+            self.max_imaginary_energy_mev,
+            self.max_particle_hole_residual_mev,
+        )
+        if any(not np.isfinite(value) or value < 0.0 for value in diagnostics):
+            raise ValueError(
+                "magnon dispersion residuals must be finite and non-negative"
+            )
+        minimum = float(self.minimum_hessian_mev)
+        if not np.isfinite(minimum):
+            raise ValueError("minimum_hessian_mev must be finite")
+        object.__setattr__(self, "k_points_frac", points)
+        object.__setattr__(self, "energy_mev", energy)
+        object.__setattr__(self, "goldstone_mask", goldstone)
+        object.__setattr__(self, "minimum_hessian_mev", minimum)
+
+
 def uniform_fractional_mesh(
     mesh: tuple[int, int, int] | ArrayLike,
     *,
@@ -159,10 +210,63 @@ def _spin_operator_tensor(
     return exchange.tensor_mev / denominator[:, None, None]
 
 
+def _single_ion_tensor(
+    anisotropy: SingleIonAnisotropy,
+    configuration: MagneticConfiguration,
+) -> NDArray[np.float64]:
+    if anisotropy.n_magnetic_sites != configuration.n_magnetic_sites:
+        raise ValueError(
+            "single-ion anisotropy and magnetic configuration site counts differ"
+        )
+    coefficients = np.asarray(anisotropy.energy_mev, dtype=np.float64)
+    if anisotropy.spin_normalization is ExchangeSpinNormalization.UNIT_VECTOR:
+        coefficients = coefficients / configuration.spin_magnitudes**2
+    return np.einsum(
+        "s,sa,sb->sab",
+        coefficients,
+        anisotropy.axis,
+        anisotropy.axis,
+        optimize=True,
+    )
+
+
+def _single_ion_torque(
+    anisotropy: SingleIonAnisotropy,
+    configuration: MagneticConfiguration,
+) -> NDArray[np.float64]:
+    tensor = _single_ion_tensor(anisotropy, configuration)
+    spins = configuration.spin_magnitudes[:, None] * configuration.spin_directions
+    effective_field = 2.0 * np.einsum("sab,sb->sa", tensor, spins, optimize=True)
+    return np.cross(spins, effective_field)
+
+
+def _add_single_ion_quadratic_terms(
+    normal: NDArray[np.complex128],
+    pairing: NDArray[np.complex128],
+    anisotropy: SingleIonAnisotropy,
+    configuration: MagneticConfiguration,
+) -> None:
+    frames = _local_frames(configuration)
+    tensor = _single_ion_tensor(anisotropy, configuration)
+    local = np.einsum("sai,sab,sbj->sij", frames, tensor, frames, optimize=True)
+    spin = configuration.spin_magnitudes
+    hp = np.sqrt(spin / 2.0)[:, None] * np.asarray(
+        (1.0, -1.0j, 0.0), dtype=np.complex128
+    )
+    transverse_forward = np.einsum("si,sij,sj->s", hp, local, hp.conj(), optimize=True)
+    transverse_backward = np.einsum("si,sij,sj->s", hp.conj(), local, hp, optimize=True)
+    normal_site = 2.0 * spin * local[:, 2, 2] - transverse_forward - transverse_backward
+    pair_create = -np.einsum("si,sij,sj->s", hp.conj(), local, hp.conj(), optimize=True)
+    diagonal = np.arange(configuration.n_magnetic_sites)
+    normal[:, diagonal, diagonal] += normal_site[None, :]
+    pairing[:, diagonal, diagonal] += 2.0 * pair_create[None, :]
+
+
 def _quadratic_blocks(
     exchange: ExchangeModel,
     configuration: MagneticConfiguration,
     k_points: NDArray[np.float64],
+    anisotropy: SingleIonAnisotropy | None = None,
 ) -> tuple[NDArray[np.complex128], NDArray[np.complex128]]:
     n_site = exchange.n_magnetic_sites
     n_k = k_points.shape[0]
@@ -222,6 +326,13 @@ def _quadratic_blocks(
     # The BdG block appears with 1/2, so B=C+C^T(-k).  Mate completeness makes
     # those two contributions identical in the canonical isotropic model.
     pairing *= 2.0
+    if anisotropy is not None:
+        _add_single_ion_quadratic_terms(
+            normal,
+            pairing,
+            anisotropy,
+            configuration,
+        )
     return normal, pairing
 
 
@@ -322,19 +433,22 @@ def _solve_bdg_one(
     return energies, transform, eigen_residual, paraunitary_residual
 
 
-def solve_isotropic_lswt(
+def _prepare_quadratic_problem(
     exchange: ExchangeModel,
     configuration: MagneticConfiguration,
     k_points_frac: ArrayLike,
     *,
-    stability_tolerance_mev: float = 1.0e-9,
-    imaginary_tolerance_mev: float = 1.0e-9,
-    hermiticity_tolerance_mev: float = 1.0e-10,
-    metric_tolerance: float = 1.0e-10,
-    goldstone_tolerance_mev: float = 1.0e-10,
-) -> MagnonSpectrum:
-    """Solve FM or bipartite-AFM isotropic LSWT on explicit k points."""
-
+    anisotropy: SingleIonAnisotropy | None,
+    hermiticity_tolerance_mev: float,
+    anisotropy_torque_tolerance_mev: float,
+) -> tuple[
+    NDArray[np.float64],
+    NDArray[np.complex128],
+    NDArray[np.complex128],
+    NDArray[np.complex128],
+    NDArray[np.complex128],
+    float,
+]:
     if exchange.representation is not ExchangeRepresentation.ISOTROPIC:
         raise NotImplementedError(
             "native tensor LSWT is not yet enabled; an isotropic projection must be explicit"
@@ -343,34 +457,240 @@ def solve_isotropic_lswt(
         raise ValueError("magnetic configuration and exchange site counts differ")
     if not configuration.locally_stable:
         raise ValueError("LSWT requires a locally stable magnetic configuration")
-    tolerances = {
-        "stability_tolerance_mev": float(stability_tolerance_mev),
-        "imaginary_tolerance_mev": float(imaginary_tolerance_mev),
-        "hermiticity_tolerance_mev": float(hermiticity_tolerance_mev),
-        "metric_tolerance": float(metric_tolerance),
-        "goldstone_tolerance_mev": float(goldstone_tolerance_mev),
-    }
-    if any(not np.isfinite(value) or value < 0.0 for value in tolerances.values()):
+    hermiticity_tolerance = float(hermiticity_tolerance_mev)
+    torque_tolerance = float(anisotropy_torque_tolerance_mev)
+    if (
+        not np.isfinite(hermiticity_tolerance)
+        or hermiticity_tolerance < 0.0
+        or not np.isfinite(torque_tolerance)
+        or torque_tolerance < 0.0
+    ):
         raise ValueError("LSWT tolerances must be finite and non-negative")
     k_points = np.asarray(k_points_frac, dtype=np.float64)
     if k_points.ndim != 2 or k_points.shape[1:] != (3,) or k_points.shape[0] == 0:
         raise ValueError("k_points_frac must have nonempty shape (nk,3)")
     if not np.all(np.isfinite(k_points)):
         raise ValueError("k_points_frac contains non-finite values")
+    if anisotropy is not None:
+        torque = _single_ion_torque(anisotropy, configuration)
+        maximum_torque = float(np.max(np.linalg.norm(torque, axis=1), initial=0.0))
+        if maximum_torque > torque_tolerance:
+            raise ValueError(
+                "single-ion anisotropy makes the declared collinear state "
+                "non-stationary; maximum torque="
+                f"{maximum_torque:.6g} meV"
+            )
 
-    normal, pairing = _quadratic_blocks(exchange, configuration, k_points)
-    normal_minus, pairing_minus = _quadratic_blocks(exchange, configuration, -k_points)
+    normal, pairing = _quadratic_blocks(
+        exchange,
+        configuration,
+        k_points,
+        anisotropy,
+    )
+    normal_minus, pairing_minus = _quadratic_blocks(
+        exchange,
+        configuration,
+        -k_points,
+        anisotropy,
+    )
     hermiticity = float(
         max(
             np.max(np.abs(normal - np.swapaxes(normal.conj(), 1, 2)), initial=0.0),
             np.max(np.abs(pairing - np.swapaxes(pairing_minus, 1, 2)), initial=0.0),
         )
     )
-    if hermiticity > tolerances["hermiticity_tolerance_mev"]:
+    if hermiticity > hermiticity_tolerance:
         raise ValueError(
             "LSWT quadratic blocks violate Hermiticity/Fourier reciprocity; "
             f"maximum residual={hermiticity:.6g} meV"
         )
+    return (
+        k_points,
+        normal,
+        pairing,
+        normal_minus,
+        pairing_minus,
+        hermiticity,
+    )
+
+
+def solve_isotropic_lswt_energies(
+    exchange: ExchangeModel,
+    configuration: MagneticConfiguration,
+    k_points_frac: ArrayLike,
+    *,
+    anisotropy: SingleIonAnisotropy | None = None,
+    stability_tolerance_mev: float = 1.0e-9,
+    imaginary_tolerance_mev: float = 1.0e-9,
+    hermiticity_tolerance_mev: float = 1.0e-10,
+    particle_hole_tolerance_mev: float = 1.0e-8,
+    goldstone_tolerance_mev: float = 1.0e-10,
+    anisotropy_torque_tolerance_mev: float = 1.0e-8,
+) -> MagnonDispersion:
+    """Return physical LSWT energies, including exact AFM Goldstone points.
+
+    No eigenvectors are returned.  The AFM branch pairs the absolute
+    eigenvalues of the bosonic dynamic matrix and validates particle-hole
+    duplication, which remains well defined when a zero mode has zero metric
+    norm.
+    """
+
+    tolerances = {
+        "stability_tolerance_mev": float(stability_tolerance_mev),
+        "imaginary_tolerance_mev": float(imaginary_tolerance_mev),
+        "hermiticity_tolerance_mev": float(hermiticity_tolerance_mev),
+        "particle_hole_tolerance_mev": float(particle_hole_tolerance_mev),
+        "goldstone_tolerance_mev": float(goldstone_tolerance_mev),
+        "anisotropy_torque_tolerance_mev": float(anisotropy_torque_tolerance_mev),
+    }
+    if any(not np.isfinite(value) or value < 0.0 for value in tolerances.values()):
+        raise ValueError("LSWT tolerances must be finite and non-negative")
+    (
+        k_points,
+        normal,
+        pairing,
+        normal_minus,
+        pairing_minus,
+        hermiticity,
+    ) = _prepare_quadratic_problem(
+        exchange,
+        configuration,
+        k_points_frac,
+        anisotropy=anisotropy,
+        hermiticity_tolerance_mev=tolerances["hermiticity_tolerance_mev"],
+        anisotropy_torque_tolerance_mev=tolerances["anisotropy_torque_tolerance_mev"],
+    )
+    n_k = k_points.shape[0]
+    n_site = exchange.n_magnetic_sites
+    maximum_imaginary = 0.0
+    maximum_pairing_residual = 0.0
+    minimum_hessian = np.inf
+    normal_fm = (
+        configuration.order is MagneticOrder.FM
+        and float(np.max(np.abs(pairing), initial=0.0))
+        <= tolerances["hermiticity_tolerance_mev"]
+    )
+    if normal_fm:
+        hermitian = 0.5 * (normal + np.swapaxes(normal.conj(), 1, 2))
+        energy = np.linalg.eigvalsh(hermitian)
+        minimum_hessian = float(np.min(energy))
+        if minimum_hessian < -tolerances["stability_tolerance_mev"]:
+            raise ValueError(
+                f"FM LSWT has an unstable mode at {minimum_hessian:.6g} meV"
+            )
+        energy = np.maximum(energy, 0.0)
+    else:
+        if configuration.order is not MagneticOrder.FM and (
+            configuration.order is not MagneticOrder.COLLINEAR_AFM or n_site != 2
+        ):
+            raise NotImplementedError(
+                "native AFM LSWT currently supports two sublattices"
+            )
+        metric = np.concatenate((np.ones(n_site), -np.ones(n_site)))
+        top = np.concatenate((normal, pairing), axis=2)
+        bottom = np.concatenate((pairing_minus.conj(), normal_minus.conj()), axis=2)
+        hamiltonian = np.concatenate((top, bottom), axis=1)
+        hamiltonian = 0.5 * (hamiltonian + np.swapaxes(hamiltonian.conj(), 1, 2))
+        hessian_eigenvalues = np.linalg.eigvalsh(hamiltonian)
+        local_hessian = hessian_eigenvalues[:, 0]
+        minimum_hessian = float(np.min(local_hessian))
+        if minimum_hessian < -tolerances["stability_tolerance_mev"]:
+            raise ValueError(
+                f"bosonic LSWT Hessian is unstable at {minimum_hessian:.6g} meV"
+            )
+        dynamic = metric[None, :, None] * hamiltonian
+        eigenvalues = np.linalg.eigvals(dynamic)
+        maximum_imaginary = float(np.max(np.abs(eigenvalues.imag), initial=0.0))
+        real_values = np.array(eigenvalues.real, copy=True)
+        # A semidefinite bosonic Hessian has a Jordan-defective zero mode.
+        # General eigensolvers can return a conjugate pair of order
+        # sqrt(machine epsilon) for that exact zero. Isolate only this
+        # norm-scaled numerical cluster; finite modes still obey the caller's
+        # explicit imaginary tolerance.
+        scale = np.maximum(
+            1.0,
+            np.linalg.norm(hamiltonian, ord=2, axis=(1, 2)),
+        )
+        defective_threshold = 32.0 * np.sqrt(np.finfo(np.float64).eps) * scale
+        defective_goldstone = (
+            local_hessian[:, None] <= tolerances["goldstone_tolerance_mev"]
+        ) & (np.abs(eigenvalues) <= defective_threshold[:, None])
+        real_values[defective_goldstone] = 0.0
+        unresolved_imaginary = float(
+            np.max(
+                np.where(defective_goldstone, 0.0, np.abs(eigenvalues.imag)),
+                initial=0.0,
+            )
+        )
+        if unresolved_imaginary > tolerances["imaginary_tolerance_mev"]:
+            raise ValueError(
+                "bosonic BdG spectrum contains complex modes; "
+                f"maximum imaginary part={unresolved_imaginary:.6g} meV"
+            )
+        absolute = np.sort(np.abs(real_values), axis=1)
+        paired = absolute.reshape(n_k, n_site, 2)
+        maximum_pairing_residual = float(
+            np.max(np.abs(paired[:, :, 0] - paired[:, :, 1]), initial=0.0)
+        )
+        if maximum_pairing_residual > tolerances["particle_hole_tolerance_mev"]:
+            raise ValueError(
+                "bosonic dynamic eigenvalues violate particle-hole pairing; "
+                f"maximum residual={maximum_pairing_residual:.6g} meV"
+            )
+        energy = np.mean(paired, axis=2)
+    goldstone = energy <= tolerances["goldstone_tolerance_mev"]
+    energy = np.where(goldstone, 0.0, energy)
+    return MagnonDispersion(
+        k_points_frac=k_points,
+        energy_mev=energy,
+        goldstone_mask=goldstone,
+        max_hermiticity_residual_mev=hermiticity,
+        max_imaginary_energy_mev=maximum_imaginary,
+        max_particle_hole_residual_mev=maximum_pairing_residual,
+        minimum_hessian_mev=float(minimum_hessian),
+    )
+
+
+def solve_isotropic_lswt(
+    exchange: ExchangeModel,
+    configuration: MagneticConfiguration,
+    k_points_frac: ArrayLike,
+    *,
+    anisotropy: SingleIonAnisotropy | None = None,
+    stability_tolerance_mev: float = 1.0e-9,
+    imaginary_tolerance_mev: float = 1.0e-9,
+    hermiticity_tolerance_mev: float = 1.0e-10,
+    metric_tolerance: float = 1.0e-10,
+    goldstone_tolerance_mev: float = 1.0e-10,
+    anisotropy_torque_tolerance_mev: float = 1.0e-8,
+) -> MagnonSpectrum:
+    """Solve FM or bipartite-AFM isotropic LSWT on explicit k points."""
+
+    tolerances = {
+        "stability_tolerance_mev": float(stability_tolerance_mev),
+        "imaginary_tolerance_mev": float(imaginary_tolerance_mev),
+        "hermiticity_tolerance_mev": float(hermiticity_tolerance_mev),
+        "metric_tolerance": float(metric_tolerance),
+        "goldstone_tolerance_mev": float(goldstone_tolerance_mev),
+        "anisotropy_torque_tolerance_mev": float(anisotropy_torque_tolerance_mev),
+    }
+    if any(not np.isfinite(value) or value < 0.0 for value in tolerances.values()):
+        raise ValueError("LSWT tolerances must be finite and non-negative")
+    (
+        k_points,
+        normal,
+        pairing,
+        normal_minus,
+        pairing_minus,
+        hermiticity,
+    ) = _prepare_quadratic_problem(
+        exchange,
+        configuration,
+        k_points_frac,
+        anisotropy=anisotropy,
+        hermiticity_tolerance_mev=tolerances["hermiticity_tolerance_mev"],
+        anisotropy_torque_tolerance_mev=tolerances["anisotropy_torque_tolerance_mev"],
+    )
 
     n_k = k_points.shape[0]
     n_site = exchange.n_magnetic_sites
@@ -467,4 +787,10 @@ def solve_isotropic_lswt(
     )
 
 
-__all__ = ["MagnonSpectrum", "solve_isotropic_lswt", "uniform_fractional_mesh"]
+__all__ = [
+    "MagnonDispersion",
+    "MagnonSpectrum",
+    "solve_isotropic_lswt",
+    "solve_isotropic_lswt_energies",
+    "uniform_fractional_mesh",
+]

@@ -1,4 +1,4 @@
-"""Typed QE-namelist configuration for native magnon lifetimes."""
+"""Typed QE-namelist configuration for native magnon calculations."""
 
 from __future__ import annotations
 
@@ -9,7 +9,18 @@ from typing import Any
 import numpy as np
 
 from .derivative import DerivativeASRPolicy
-from .model import MagneticOrder
+from .model import (
+    ExchangeSpinNormalization,
+    MagneticOrder,
+    SingleIonAnisotropy,
+)
+
+_ANISOTROPY_KEYS = {
+    "anisotropy_axis",
+    "anisotropy_mev",
+    "anisotropy_model",
+    "anisotropy_normalization",
+}
 
 
 class MagphInputError(ValueError):
@@ -36,7 +47,23 @@ _LIFETIME_KEYS = {
     "spin_magnitudes",
     "spin_pattern",
     "temperature_k",
-}
+} | _ANISOTROPY_KEYS
+
+_DISPERSION_KEYS = {
+    "exchange_h5",
+    "input_format",
+    "kpath_file",
+    "magnetic_order",
+    "output",
+    "overwrite",
+    "plot",
+    "plot_dpi",
+    "plot_output",
+    "points_per_segment",
+    "quantization_axis",
+    "spin_magnitudes",
+    "spin_pattern",
+} | _ANISOTROPY_KEYS
 
 
 def _sequence(value: Any) -> tuple[Any, ...]:
@@ -117,6 +144,95 @@ def _required(parameters: dict[str, Any], name: str) -> Any:
     return parameters[name]
 
 
+def _positive_integer(value: Any, *, name: str) -> int:
+    if isinstance(value, (bool, np.bool_)):
+        raise MagphInputError(f"{name} must be a positive integer")
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError) as exc:
+        raise MagphInputError(f"{name} must be a positive integer") from exc
+    if not np.isfinite(numeric) or numeric <= 0.0 or numeric != round(numeric):
+        raise MagphInputError(f"{name} must be a positive integer")
+    return int(numeric)
+
+
+@dataclass(frozen=True)
+class SingleIonAnisotropyInput:
+    """Namelist form of uniaxial SIA before the magnetic site count is known."""
+
+    energy_mev: tuple[float, ...]
+    axis: tuple[float, ...]
+    spin_normalization: ExchangeSpinNormalization
+    model: str = "uniaxial"
+
+    def build(self, n_magnetic_sites: int) -> SingleIonAnisotropy:
+        count = int(n_magnetic_sites)
+        if count < 1:
+            raise MagphInputError("n_magnetic_sites must be positive")
+        if len(self.energy_mev) == 1:
+            energy = np.full(count, self.energy_mev[0], dtype=np.float64)
+        elif len(self.energy_mev) == count:
+            energy = np.asarray(self.energy_mev, dtype=np.float64)
+        else:
+            raise MagphInputError(
+                "anisotropy_mev must contain one value or one value per magnetic site"
+            )
+        raw_axis = np.asarray(self.axis, dtype=np.float64)
+        if raw_axis.size == 3:
+            axes = np.tile(raw_axis.reshape(1, 3), (count, 1))
+        elif raw_axis.size == 3 * count:
+            axes = raw_axis.reshape(count, 3)
+        else:
+            raise MagphInputError(
+                "anisotropy_axis must contain one Cartesian axis or one axis "
+                "per magnetic site"
+            )
+        return SingleIonAnisotropy(
+            energy_mev=energy,
+            axis=axes,
+            spin_normalization=self.spin_normalization,
+            model=self.model,
+        )
+
+
+def _anisotropy_input(
+    values: dict[str, Any],
+) -> SingleIonAnisotropyInput | None:
+    present = sorted(set(values) & _ANISOTROPY_KEYS)
+    if not present:
+        return None
+    missing = [
+        name
+        for name in (
+            "anisotropy_model",
+            "anisotropy_mev",
+            "anisotropy_axis",
+            "anisotropy_normalization",
+        )
+        if name not in values
+    ]
+    if missing:
+        raise MagphInputError("single-ion anisotropy requires " + ", ".join(missing))
+    model = str(values["anisotropy_model"]).strip().lower()
+    if model != "uniaxial":
+        raise MagphInputError("anisotropy_model must be 'uniaxial'")
+    try:
+        normalization = ExchangeSpinNormalization(
+            str(values["anisotropy_normalization"]).strip().lower()
+        )
+    except ValueError as exc:
+        choices = ", ".join(item.value for item in ExchangeSpinNormalization)
+        raise MagphInputError(
+            f"anisotropy_normalization must be one of {choices}"
+        ) from exc
+    return SingleIonAnisotropyInput(
+        energy_mev=_float_tuple(values["anisotropy_mev"], name="anisotropy_mev"),
+        axis=_float_tuple(values["anisotropy_axis"], name="anisotropy_axis"),
+        spin_normalization=normalization,
+        model=model,
+    )
+
+
 @dataclass(frozen=True)
 class MagphLifetimeRequest:
     exchange_h5: Path
@@ -127,6 +243,7 @@ class MagphLifetimeRequest:
     spin_magnitudes: tuple[float, ...]
     spin_pattern: tuple[float, ...] | None
     quantization_axis: tuple[float, float, float]
+    anisotropy: SingleIonAnisotropyInput | None
     kmesh: tuple[int, int, int]
     kshift: tuple[float, float, float]
     temperature_k: float
@@ -136,6 +253,22 @@ class MagphLifetimeRequest:
     metric_energy_tolerance_mev: float
     negative_tolerance_mev: float
     require_complete_targets: bool
+    overwrite: bool
+
+
+@dataclass(frozen=True)
+class MagphDispersionRequest:
+    exchange_h5: Path
+    kpath_file: Path
+    output: Path
+    plot_output: Path | None
+    magnetic_order: MagneticOrder
+    spin_magnitudes: tuple[float, ...]
+    spin_pattern: tuple[float, ...] | None
+    quantization_axis: tuple[float, float, float]
+    anisotropy: SingleIonAnisotropyInput | None
+    points_per_segment: int
+    plot_dpi: int
     overwrite: bool
 
 
@@ -236,6 +369,7 @@ def build_lifetime_request(
             quantization_axis[1],
             quantization_axis[2],
         ),
+        anisotropy=_anisotropy_input(values),
         kmesh=kmesh,
         kshift=kshift,
         temperature_k=temperature_k,
@@ -260,4 +394,99 @@ def build_lifetime_request(
     )
 
 
-__all__ = ["MagphInputError", "MagphLifetimeRequest", "build_lifetime_request"]
+def build_dispersion_request(
+    parameters: dict[str, Any],
+    *,
+    prefix: str,
+    savedir: str | Path,
+) -> MagphDispersionRequest:
+    """Validate native magnon-dispersion input without opening scientific files."""
+
+    values = {str(key).strip().lower(): value for key, value in parameters.items()}
+    unknown = sorted(set(values) - _DISPERSION_KEYS)
+    if unknown:
+        raise MagphInputError(
+            "unknown native dispersion parameter(s): " + ", ".join(unknown)
+        )
+    input_format = str(values.pop("input_format", "default")).strip().lower()
+    if input_format not in {"default", "native"}:
+        raise MagphInputError("native dispersion accepts input_format='native' only")
+    exchange_h5 = Path(_required(values, "exchange_h5")).expanduser().resolve()
+    kpath_file = Path(_required(values, "kpath_file")).expanduser().resolve()
+    output = (
+        Path(values.get("output", Path(savedir) / f"{prefix}.dispersion.npz"))
+        .expanduser()
+        .resolve()
+    )
+    if output.suffix.lower() != ".npz":
+        raise MagphInputError("output must use the .npz suffix")
+    plot_enabled = _boolean(values.get("plot", True), name="plot")
+    plot_output = (
+        Path(values.get("plot_output", Path(savedir) / f"{prefix}.dispersion.png"))
+        .expanduser()
+        .resolve()
+        if plot_enabled
+        else None
+    )
+    if plot_output is not None and plot_output.suffix.lower() not in {
+        ".png",
+        ".pdf",
+        ".svg",
+    }:
+        raise MagphInputError("plot_output must use .png, .pdf, or .svg")
+    if not plot_enabled and "plot_output" in values:
+        raise MagphInputError("plot_output cannot be set when plot=.false.")
+    try:
+        magnetic_order = MagneticOrder(
+            str(_required(values, "magnetic_order")).strip().lower()
+        )
+    except ValueError as exc:
+        choices = ", ".join(item.value for item in MagneticOrder)
+        raise MagphInputError(f"magnetic_order must be one of {choices}") from exc
+    spin_magnitudes = _float_tuple(
+        _required(values, "spin_magnitudes"), name="spin_magnitudes"
+    )
+    if any(value <= 0.0 for value in spin_magnitudes):
+        raise MagphInputError("spin_magnitudes must be strictly positive")
+    spin_pattern = (
+        None
+        if "spin_pattern" not in values
+        else _float_tuple(values["spin_pattern"], name="spin_pattern")
+    )
+    quantization_axis = _float_tuple(
+        _required(values, "quantization_axis"),
+        name="quantization_axis",
+        length=3,
+    )
+    if np.linalg.norm(quantization_axis) <= np.finfo(np.float64).eps:
+        raise MagphInputError("quantization_axis must be nonzero")
+    return MagphDispersionRequest(
+        exchange_h5=exchange_h5,
+        kpath_file=kpath_file,
+        output=output,
+        plot_output=plot_output,
+        magnetic_order=magnetic_order,
+        spin_magnitudes=spin_magnitudes,
+        spin_pattern=spin_pattern,
+        quantization_axis=(
+            quantization_axis[0],
+            quantization_axis[1],
+            quantization_axis[2],
+        ),
+        anisotropy=_anisotropy_input(values),
+        points_per_segment=_positive_integer(
+            values.get("points_per_segment", 50), name="points_per_segment"
+        ),
+        plot_dpi=_positive_integer(values.get("plot_dpi", 180), name="plot_dpi"),
+        overwrite=_boolean(values.get("overwrite", False), name="overwrite"),
+    )
+
+
+__all__ = [
+    "MagphDispersionRequest",
+    "MagphInputError",
+    "MagphLifetimeRequest",
+    "SingleIonAnisotropyInput",
+    "build_dispersion_request",
+    "build_lifetime_request",
+]

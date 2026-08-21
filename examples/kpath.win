@@ -1,0 +1,5 @@
+! Explicit material-dependent coordinates belong in the input, never in SLW.
+begin kpoint_path
+G  0.0000000000  0.0000000000  0.0000000000   X  0.5000000000  0.0000000000  0.0000000000
+X  0.5000000000  0.0000000000  0.0000000000   G  0.0000000000  0.0000000000  0.0000000000
+end kpoint_path

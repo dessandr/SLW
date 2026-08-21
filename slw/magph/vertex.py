@@ -16,6 +16,7 @@ from .model import (
     ExchangeSpinNormalization,
     MagneticConfiguration,
     MagneticOrder,
+    SingleIonAnisotropy,
 )
 
 
@@ -363,6 +364,7 @@ def build_scattering_problem(
     *,
     q_chunk_size: int | None = None,
     lswt_options: dict[str, float] | None = None,
+    anisotropy: SingleIonAnisotropy | None = None,
 ) -> MagnonPhononScatteringProblem:
     """Solve the external/internal magnons and rotate one vertex to band space."""
 
@@ -370,9 +372,21 @@ def build_scattering_problem(
     if k.shape != (3,) or not np.all(np.isfinite(k)):
         raise ValueError("external_k_frac must be a finite length-3 vector")
     options = {} if lswt_options is None else dict(lswt_options)
-    external = solve_isotropic_lswt(exchange, configuration, k[None, :], **options)
+    external = solve_isotropic_lswt(
+        exchange,
+        configuration,
+        k[None, :],
+        anisotropy=anisotropy,
+        **options,
+    )
     internal_points = np.mod(k[None, :] + coupling.q_points_frac, 1.0)
-    internal = solve_isotropic_lswt(exchange, configuration, internal_points, **options)
+    internal = solve_isotropic_lswt(
+        exchange,
+        configuration,
+        internal_points,
+        anisotropy=anisotropy,
+        **options,
+    )
     if not np.array_equal(external.metric, internal.metric):
         raise ValueError("external and internal LSWT metrics differ")
     bare = build_bare_isotropic_vertex(

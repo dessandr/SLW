@@ -7,7 +7,14 @@ from pathlib import Path
 
 import numpy as np
 
-from slw.magph.output import LIFETIME_OUTPUT_SCHEMA_VERSION, write_lifetime_npz
+from slw.magph.dispersion import MagnonDispersionResult, MagnonKPath
+from slw.magph.output import (
+    DISPERSION_OUTPUT_SCHEMA_VERSION,
+    LIFETIME_OUTPUT_SCHEMA_VERSION,
+    write_dispersion_npz,
+    write_dispersion_plot,
+    write_lifetime_npz,
+)
 from slw.magph.pipeline import LifetimeGridResult
 
 
@@ -53,6 +60,38 @@ class NativeLifetimeOutputTests(unittest.TestCase):
             with self.assertRaisesRegex(FileExistsError, "already exists"):
                 write_lifetime_npz(output, _result(), metadata={})
             self.assertEqual(output.read_bytes(), b"original")
+
+    def test_dispersion_npz_and_plot_share_the_same_path_data(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = MagnonKPath(
+                source=root / "bands.win",
+                k_points_frac=np.asarray(((0.0, 0.0, 0.0), (0.5, 0.0, 0.0))),
+                x_coordinate_inv_ang=np.asarray((0.0, 1.0)),
+                segment_offsets=np.asarray((0, 2)),
+                tick_positions_inv_ang=np.asarray((0.0, 1.0)),
+                tick_labels=("Γ", "X"),
+                points_per_segment=1,
+            )
+            result = MagnonDispersionResult(
+                path=path,
+                energy_mev=np.asarray(((0.0, 1.0), (2.0, 3.0))),
+                goldstone_mask=np.asarray(((True, False), (False, False))),
+                mpi_size=1,
+            )
+            npz = write_dispersion_npz(
+                root / "bands.npz",
+                result,
+                metadata={"calculation": "dispersion"},
+            )
+            image = write_dispersion_plot(root / "bands.png", result, title="test")
+            assert image.stat().st_size > 0
+            with np.load(npz, allow_pickle=False) as payload:
+                assert (
+                    int(payload["schema_version"]) == DISPERSION_OUTPUT_SCHEMA_VERSION
+                )
+                np.testing.assert_allclose(payload["energy_mev"], result.energy_mev)
+                np.testing.assert_array_equal(payload["tick_labels"], ("Γ", "X"))
 
 
 if __name__ == "__main__":

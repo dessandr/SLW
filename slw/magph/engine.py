@@ -16,12 +16,19 @@ from slw.cli.mpi import MPIContext
 from slw.cli.native import NativeExecutionPlan
 from slw.cli.schema import ParallelConfig, RunConfig
 
-from .config import MagphInputError, MagphLifetimeRequest, build_lifetime_request
+from .config import (
+    MagphDispersionRequest,
+    MagphInputError,
+    MagphLifetimeRequest,
+    build_dispersion_request,
+    build_lifetime_request,
+)
 from .coupling import build_mode_resolved_isotropic_derivative_distributed
 from .derivative import load_exchange_derivative_h5
+from .dispersion import build_wannier90_kpath, compute_magnon_dispersion
 from .lswt import uniform_fractional_mesh
 from .mesh import build_magnon_mesh_cache
-from .output import write_lifetime_npz
+from .output import write_dispersion_npz, write_dispersion_plot, write_lifetime_npz
 from .parallel import CollectiveExecutionError, RankFailure
 from .phonon import load_phonon_cache, zero_point_displacements
 from .pipeline import compute_lifetime_grid
@@ -34,21 +41,37 @@ class MagphRunResult:
     mpi_size: int
     k_point_count: int
     magnetic_site_count: int
+    plot_output: Path | None = None
 
 
-def _validate_parallel(parallel: ParallelConfig) -> None:
+def _validate_parallel(parallel: ParallelConfig, *, calculation: str) -> None:
     if parallel.workers_per_rank != 1:
         raise MagphInputError(
-            "native lifetime currently requires &parallel workers_per_rank=1; "
+            f"native {calculation} currently requires &parallel workers_per_rank=1; "
             "use MPI ranks over external k and threads_per_worker within each rank"
         )
     if parallel.precache_workers is not None:
-        raise MagphInputError("native lifetime does not use &parallel precache_workers")
+        raise MagphInputError(
+            f"native {calculation} does not use &parallel precache_workers"
+        )
     if parallel.numba_threads is not None:
         raise MagphInputError(
-            "native lifetime does not use &parallel numba_threads; "
+            f"native {calculation} does not use &parallel numba_threads; "
             "use threads_per_worker or blas_threads for vectorized contractions"
         )
+    if calculation == "dispersion":
+        chunks = {
+            "q_chunk_size": parallel.q_chunk_size,
+            "bond_chunk_size": parallel.bond_chunk_size,
+            "vertex_q_chunk_size": parallel.vertex_q_chunk_size,
+            "self_energy_q_chunk_size": parallel.self_energy_q_chunk_size,
+            "channel_chunk_size": parallel.channel_chunk_size,
+        }
+        unused = [name for name, value in chunks.items() if value is not None]
+        if unused:
+            raise MagphInputError(
+                "native dispersion does not use &parallel " + ", ".join(unused)
+            )
 
 
 def _rank_failure(rank: int, stage: str, exc: BaseException) -> RankFailure:
@@ -62,6 +85,11 @@ def _rank_failure(rank: int, stage: str, exc: BaseException) -> RankFailure:
 
 def _load_native_problem(request: MagphLifetimeRequest) -> tuple[Any, ...]:
     exchange, exchange_report = load_exchange_h5(request.exchange_h5)
+    anisotropy = (
+        None
+        if request.anisotropy is None
+        else request.anisotropy.build(exchange.n_magnetic_sites)
+    )
     derivative, derivative_report = load_exchange_derivative_h5(
         request.derivative_h5,
         exchange,
@@ -81,6 +109,7 @@ def _load_native_problem(request: MagphLifetimeRequest) -> tuple[Any, ...]:
         spin_pattern=request.spin_pattern,
         spin_magnitudes=spin_magnitudes,
         quantization_axis=request.quantization_axis,
+        anisotropy=anisotropy,
     )
     k_points = uniform_fractional_mesh(request.kmesh, shift=request.kshift)
     return (
@@ -91,6 +120,7 @@ def _load_native_problem(request: MagphLifetimeRequest) -> tuple[Any, ...]:
         phonons,
         zero_point,
         configuration,
+        anisotropy,
         k_points,
     )
 
@@ -158,6 +188,7 @@ def _output_metadata(
     derivative_report: Any,
     phonons: Any,
     configuration: Any,
+    anisotropy: Any,
     coupling: Any,
     magnon_cache: Any,
     mpi_size: int,
@@ -190,9 +221,11 @@ def _output_metadata(
         "phonon_fourier_phase_convention": phonons.fourier_phase_convention,
         "frequency_floor_mev": request.frequency_floor_mev,
         "magnetic_order": request.magnetic_order.value,
+        "magnetic_atom_indices": exchange.magnetic_atom_indices.tolist(),
         "spin_magnitudes": configuration.spin_magnitudes.tolist(),
         "spin_pattern": configuration.spin_pattern.tolist(),
         "quantization_axis": configuration.quantization_axis.tolist(),
+        "single_ion_anisotropy": _anisotropy_metadata(anisotropy),
         "kmesh": list(request.kmesh),
         "kshift": list(request.kshift),
         "q_weight_policy": "uniform_normalized",
@@ -246,7 +279,7 @@ def run_lifetime(
 
     mpi = MPIContext.discover() if context is None else context
     runtime = ParallelConfig() if parallel is None else parallel
-    _validate_parallel(runtime)
+    _validate_parallel(runtime, calculation="lifetime")
     if mpi.size > 1:
         request = mpi.bcast(request if mpi.is_root else None, root=0)
         if request is None:  # pragma: no cover - communicator contract guard
@@ -268,6 +301,7 @@ def run_lifetime(
                 phonons,
                 zero_point,
                 configuration,
+                anisotropy,
                 k_points,
             ) = _load_collectively(request, mpi)
         logger.info(f"magnetic order = {configuration.order.value}")
@@ -318,6 +352,7 @@ def run_lifetime(
                 k_points,
                 k_mesh_shape=request.kmesh,
                 kshift_grid=request.kshift,
+                anisotropy=anisotropy,
                 context=mpi,
             )
 
@@ -369,6 +404,7 @@ def run_lifetime(
                 self_energy_q_chunk_size=runtime.self_energy_q_chunk_size,
                 channel_chunk_size=runtime.channel_chunk_size,
                 magnon_cache=magnon_cache,
+                anisotropy=anisotropy,
                 context=mpi,
                 progress=report_progress,
             )
@@ -387,6 +423,7 @@ def run_lifetime(
                     derivative_report=derivative_report,
                     phonons=phonons,
                     configuration=configuration,
+                    anisotropy=anisotropy,
                     coupling=coupling,
                     magnon_cache=magnon_cache,
                     mpi_size=mpi.size,
@@ -423,6 +460,207 @@ def run_lifetime(
     )
 
 
+def _load_dispersion_problem(request: MagphDispersionRequest) -> tuple[Any, ...]:
+    if not request.overwrite:
+        existing = [
+            path
+            for path in (request.output, request.plot_output)
+            if path is not None and path.exists()
+        ]
+        if existing:
+            rendered = ", ".join(str(path) for path in existing)
+            raise FileExistsError(f"dispersion output already exists: {rendered}")
+    exchange, exchange_report = load_exchange_h5(request.exchange_h5)
+    if exchange.lattice_ang is None:
+        raise MagphInputError(
+            "native dispersion requires lattice_ang in the exchange HDF5 to "
+            "construct the reciprocal-path distance"
+        )
+    spin_magnitudes: float | tuple[float, ...] = request.spin_magnitudes
+    if len(request.spin_magnitudes) == 1:
+        spin_magnitudes = request.spin_magnitudes[0]
+    anisotropy = (
+        None
+        if request.anisotropy is None
+        else request.anisotropy.build(exchange.n_magnetic_sites)
+    )
+    configuration = screen_magnetic_configuration(
+        exchange,
+        order=request.magnetic_order,
+        spin_pattern=request.spin_pattern,
+        spin_magnitudes=spin_magnitudes,
+        quantization_axis=request.quantization_axis,
+        anisotropy=anisotropy,
+    )
+    path = build_wannier90_kpath(
+        request.kpath_file,
+        lattice_ang=exchange.lattice_ang,
+        points_per_segment=request.points_per_segment,
+    )
+    return exchange, exchange_report, configuration, anisotropy, path
+
+
+def _load_dispersion_collectively(
+    request: MagphDispersionRequest,
+    context: MPIContext,
+) -> tuple[Any, ...]:
+    loaded: tuple[Any, ...] | None = None
+    failure: RankFailure | None = None
+    try:
+        loaded = _load_dispersion_problem(request)
+    except Exception as exc:  # noqa: BLE001 - exchange before next collective
+        failure = _rank_failure(context.rank, "magph_dispersion_input", exc)
+    failures = tuple(item for item in context.allgather(failure) if item is not None)
+    if failures:
+        raise CollectiveExecutionError(failures)
+    if loaded is None:  # pragma: no cover - guarded by collective failure
+        raise RuntimeError("native magph dispersion produced no input or failure")
+    return loaded
+
+
+def _anisotropy_metadata(anisotropy: Any) -> dict[str, Any] | None:
+    if anisotropy is None:
+        return None
+    return {
+        "model": anisotropy.model,
+        "energy_mev": anisotropy.energy_mev.tolist(),
+        "axis": anisotropy.axis.tolist(),
+        "spin_normalization": anisotropy.spin_normalization.value,
+        "hamiltonian_sign": anisotropy.hamiltonian_sign,
+    }
+
+
+def run_dispersion(
+    request: MagphDispersionRequest,
+    *,
+    context: MPIContext | None = None,
+    parallel: ParallelConfig | None = None,
+    program: str = "slw_magph.x",
+    verbosity: str = "normal",
+) -> MagphRunResult:
+    """Run an MPI-distributed native magnon-band calculation and plot."""
+
+    mpi = MPIContext.discover() if context is None else context
+    runtime = ParallelConfig() if parallel is None else parallel
+    _validate_parallel(runtime, calculation="dispersion")
+    if mpi.size > 1:
+        request = mpi.bcast(request if mpi.is_root else None, root=0)
+        if request is None:  # pragma: no cover - communicator contract guard
+            raise RuntimeError("rank zero did not broadcast the dispersion request")
+    timers = TimerBook()
+    logger = RunLogger(
+        sys.stdout,
+        rank=mpi.rank,
+        verbosity=verbosity,
+        timers=timers,
+    )
+    with timers.phase("total"):
+        with logger.phase("input_screening", label="Screening magnon-band inputs"):
+            (
+                exchange,
+                exchange_report,
+                configuration,
+                anisotropy,
+                path,
+            ) = _load_dispersion_collectively(request, mpi)
+        logger.info(f"magnetic order = {configuration.order.value}")
+        logger.info(f"magnetic sites = {configuration.n_magnetic_sites}")
+        logger.info(f"path segments  = {path.n_segments}")
+        logger.info(f"path k points  = {path.n_points}")
+        logger.info(
+            "single-ion anisotropy = "
+            + ("none" if anisotropy is None else anisotropy.spin_normalization.value)
+        )
+        with logger.phase(
+            "dispersion",
+            label="Computing MPI-distributed magnon dispersion",
+        ):
+            distributed = compute_magnon_dispersion(
+                exchange,
+                configuration,
+                path,
+                anisotropy=anisotropy,
+                context=mpi,
+            )
+
+        output_failure: RankFailure | None = None
+        if mpi.is_root:
+            try:
+                if distributed.global_result is None:
+                    raise RuntimeError(
+                        "rank zero did not receive the magnon dispersion"
+                    )
+                metadata = {
+                    "calculation": "dispersion",
+                    "exchange_h5": str(request.exchange_h5),
+                    "exchange_dataset": exchange_report.source_dataset,
+                    "exchange_representation": exchange_report.representation.value,
+                    "exchange_convention_origin": exchange_report.convention_origin,
+                    "exchange_kernel_family": exchange.convention.kernel_family,
+                    "magnetic_order": configuration.order.value,
+                    "magnetic_atom_indices": exchange.magnetic_atom_indices.tolist(),
+                    "spin_magnitudes": configuration.spin_magnitudes.tolist(),
+                    "spin_pattern": configuration.spin_pattern.tolist(),
+                    "quantization_axis": configuration.quantization_axis.tolist(),
+                    "single_ion_anisotropy": _anisotropy_metadata(anisotropy),
+                    "kpath_file": str(request.kpath_file),
+                    "points_per_segment": request.points_per_segment,
+                    "fourier_phase_convention": "exp(+i2pi_k_dot_R)",
+                    "exact_goldstone_energy_only": True,
+                    "goldstone_point_count": int(
+                        np.count_nonzero(distributed.global_result.goldstone_mask)
+                    ),
+                    "mpi_size": mpi.size,
+                    "parallel": {
+                        "workers_per_rank": runtime.workers_per_rank,
+                        "threads_per_worker": runtime.threads_per_worker,
+                        "blas_threads": runtime.effective_blas_threads,
+                        "distribution": "kpath_points",
+                    },
+                }
+                with logger.phase("output", label="Writing magnon dispersion"):
+                    write_dispersion_npz(
+                        request.output,
+                        distributed.global_result,
+                        metadata=metadata,
+                        overwrite=request.overwrite,
+                    )
+                    if request.plot_output is not None:
+                        write_dispersion_plot(
+                            request.plot_output,
+                            distributed.global_result,
+                            title=request.output.stem,
+                            dpi=request.plot_dpi,
+                            overwrite=request.overwrite,
+                        )
+            except Exception as exc:  # noqa: BLE001 - release non-root ranks
+                output_failure = _rank_failure(mpi.rank, "magph_dispersion_output", exc)
+        output_failure = mpi.bcast(output_failure, root=0)
+        if output_failure is not None:
+            raise CollectiveExecutionError((output_failure,))
+        logger.info(f"written       = {request.output}")
+        if request.plot_output is not None:
+            logger.info(f"plot          = {request.plot_output}")
+
+    total = timers.get("total")
+    if total is not None and mpi.size > 1:
+        timers.record(
+            "mpi_total",
+            cpu_seconds=mpi.allreduce_sum_float(total.cpu_seconds),
+            wall_seconds=mpi.allreduce_max_float(total.wall_seconds),
+        )
+        logger.timing_summary(program, phase="mpi_total")
+    else:
+        logger.timing_summary(program, phase="total")
+    return MagphRunResult(
+        output=request.output,
+        plot_output=request.plot_output,
+        mpi_size=mpi.size,
+        k_point_count=path.n_points,
+        magnetic_site_count=configuration.n_magnetic_sites,
+    )
+
+
 def _parallel_policy(config: RunConfig, context: MPIContext) -> tuple[bool, str | None]:
     requested = config.parallel.execution
     if requested == "mpi":
@@ -448,24 +686,56 @@ def prepare_run(
     context: MPIContext,
     program: str,
 ) -> NativeExecutionPlan:
-    """Prepare the native lifetime calculation for the common CLI runner."""
+    """Prepare a native magph calculation for the common CLI runner."""
 
-    if calculation != "lifetime" or requested_name != "lifetime":
+    if calculation not in {"dispersion", "lifetime"} or requested_name != calculation:
         raise MagphInputError(
             f"native magph engine does not implement {requested_name!r}"
         )
-    _validate_parallel(config.parallel)
-    request = build_lifetime_request(
+    _validate_parallel(config.parallel, calculation=calculation)
+    all_ranks, warning = _parallel_policy(config, context)
+    execution_context = context if all_ranks else MPIContext()
+    if calculation == "lifetime":
+        lifetime_request = build_lifetime_request(
+            parameters,
+            prefix=config.control.prefix,
+            savedir=config.control.savedir,
+        )
+
+        def run_lifetime_plan() -> int:
+            run_lifetime(
+                lifetime_request,
+                context=execution_context,
+                parallel=config.parallel,
+                program=program,
+                verbosity=config.control.verbosity,
+            )
+            return 0
+
+        return NativeExecutionPlan(
+            backend_label="slw.magph.engine (native lifetime)",
+            run=run_lifetime_plan,
+            all_ranks=all_ranks,
+            warning=warning,
+            summary=(
+                ("magnetic order", lifetime_request.magnetic_order.value),
+                ("k-point mesh", " x ".join(map(str, lifetime_request.kmesh))),
+                ("k-grid shift", ", ".join(map(str, lifetime_request.kshift))),
+                ("workers/rank", config.parallel.workers_per_rank),
+                ("threads/worker", config.parallel.threads_per_worker),
+                ("output", lifetime_request.output),
+            ),
+        )
+
+    dispersion_request = build_dispersion_request(
         parameters,
         prefix=config.control.prefix,
         savedir=config.control.savedir,
     )
-    all_ranks, warning = _parallel_policy(config, context)
-    execution_context = context if all_ranks else MPIContext()
 
-    def run() -> int:
-        run_lifetime(
-            request,
+    def run_dispersion_plan() -> int:
+        run_dispersion(
+            dispersion_request,
             context=execution_context,
             parallel=config.parallel,
             program=program,
@@ -474,17 +744,17 @@ def prepare_run(
         return 0
 
     return NativeExecutionPlan(
-        backend_label="slw.magph.engine (native lifetime)",
-        run=run,
+        backend_label="slw.magph.engine (native dispersion)",
+        run=run_dispersion_plan,
         all_ranks=all_ranks,
         warning=warning,
         summary=(
-            ("magnetic order", request.magnetic_order.value),
-            ("k-point mesh", " x ".join(map(str, request.kmesh))),
-            ("k-grid shift", ", ".join(map(str, request.kshift))),
+            ("magnetic order", dispersion_request.magnetic_order.value),
+            ("k-path", dispersion_request.kpath_file),
+            ("points/segment", dispersion_request.points_per_segment),
             ("workers/rank", config.parallel.workers_per_rank),
             ("threads/worker", config.parallel.threads_per_worker),
-            ("output", request.output),
+            ("output", dispersion_request.output),
         ),
     )
 
@@ -496,7 +766,21 @@ def format_help(
     source: str,
     parameters: dict[str, Any],
 ) -> str:
-    del calculation, requested_name, source, parameters
+    del requested_name, source, parameters
+    if calculation == "dispersion":
+        return (
+            "slw_magph.x calculation='dispersion' (native)\n\n"
+            "Required &magph keys:\n"
+            "  exchange_h5       = canonical static J HDF5\n"
+            "  magnetic_order    = 'fm' or 'collinear_afm'\n"
+            "  spin_magnitudes   = scalar or one value per magnetic site\n"
+            "  quantization_axis = three Cartesian components\n"
+            "  kpath_file        = Wannier90 file/snippet with kpoint_path\n\n"
+            "Optional &magph: spin_pattern, points_per_segment, output, plot,\n"
+            "plot_output, plot_dpi, overwrite, and the complete uniaxial SIA\n"
+            "set anisotropy_model/mev/axis/normalization. MPI distributes path\n"
+            "points.\n"
+        )
     return (
         "slw_magph.x calculation='lifetime' (native)\n\n"
         "Required &magph keys:\n"
@@ -511,11 +795,12 @@ def format_help(
         "  temperature_k     = non-negative temperature\n"
         "  broadening_mev    = positive retarded broadening\n\n"
         "Optional &magph: spin_pattern, frequency_floor_mev, asr_policy,\n"
-        "output, and overwrite. Put worker/thread and q/bond/vertex/\n"
+        "the complete anisotropy_model/mev/axis/normalization set, output, and\n"
+        "overwrite. Put worker/thread and q/bond/vertex/\n"
         "self-energy/channel chunk controls in &parallel.\n"
         "MPI is selected automatically under mpirun; external k points are\n"
         "distributed across ranks and q/mode contractions stay vectorized.\n"
     )
 
 
-__all__ = ["MagphRunResult", "prepare_run", "run_lifetime"]
+__all__ = ["MagphRunResult", "prepare_run", "run_dispersion", "run_lifetime"]

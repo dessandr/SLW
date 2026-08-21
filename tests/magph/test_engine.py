@@ -5,11 +5,12 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import h5py
 import numpy as np
 
 from slw.cli.mpi import MPIContext
-from slw.magph.config import build_lifetime_request
-from slw.magph.engine import run_lifetime
+from slw.magph.config import build_dispersion_request, build_lifetime_request
+from slw.magph.engine import run_dispersion, run_lifetime
 from tests.magph.test_derivative import _write_derivative
 from tests.magph.test_exchange_screening import _write_scalar
 from tests.magph.test_phonon import _write_cache
@@ -44,6 +45,10 @@ class NativeMagphEngineTests(unittest.TestCase):
                     "magnetic_order": "fm",
                     "spin_magnitudes": 1.0,
                     "quantization_axis": (0.0, 0.0, 1.0),
+                    "anisotropy_model": "uniaxial",
+                    "anisotropy_mev": 0.1,
+                    "anisotropy_axis": (0.0, 0.0, 1.0),
+                    "anisotropy_normalization": "unit_vector",
                     "kmesh": (2, 1, 1),
                     "kshift": (0.5, 0.0, 0.0),
                     "temperature_k": 0.0,
@@ -59,6 +64,7 @@ class NativeMagphEngineTests(unittest.TestCase):
             self.assertEqual(result.magnetic_site_count, 1)
             with np.load(output, allow_pickle=False) as payload:
                 self.assertEqual(payload["energy_mev"].shape, (2, 1))
+                np.testing.assert_allclose(payload["energy_mev"], 4.2)
                 np.testing.assert_allclose(payload["gamma_hwhm_mev"], 0.0)
                 self.assertTrue(np.all(np.isinf(payload["lifetime_ps"])))
                 metadata = json.loads(str(payload["metadata_json"]))
@@ -75,12 +81,69 @@ class NativeMagphEngineTests(unittest.TestCase):
                     "q_block_streaming",
                 )
                 self.assertFalse(metadata["algorithm"]["full_vertex_materialized"])
+                self.assertEqual(
+                    metadata["single_ion_anisotropy"]["spin_normalization"],
+                    "unit_vector",
+                )
                 self.assertEqual(metadata["union_kq_mesh"], [2, 1, 1])
                 self.assertGreater(
                     metadata["cache_bytes_per_rank"]["coupling"],
                     0,
                 )
                 self.assertGreater(metadata["cache_bytes_per_rank"]["lswt"], 0)
+
+    def test_native_dispersion_writes_exact_path_and_sia_provenance(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            exchange = root / "J.h5"
+            kpath = root / "bands.win"
+            output = root / "dispersion.npz"
+            _write_scalar(
+                exchange,
+                [2.0, 2.0],
+                atom_i=[0, 0],
+                atom_j=[0, 0],
+                shifts=[(1, 0, 0), (-1, 0, 0)],
+            )
+            with h5py.File(exchange, "r+") as handle:
+                handle["basic_data"].create_dataset("lattice_ang", data=np.eye(3))
+            kpath.write_text(
+                """begin kpoint_path
+G 0 0 0 X 0.5 0 0
+end kpoint_path
+""",
+                encoding="utf-8",
+            )
+            request = build_dispersion_request(
+                {
+                    "exchange_h5": exchange,
+                    "kpath_file": kpath,
+                    "output": output,
+                    "plot": False,
+                    "points_per_segment": 2,
+                    "magnetic_order": "fm",
+                    "spin_magnitudes": 2.0,
+                    "quantization_axis": (0.0, 0.0, 1.0),
+                    "anisotropy_model": "uniaxial",
+                    "anisotropy_mev": 0.1,
+                    "anisotropy_axis": (0.0, 0.0, 1.0),
+                    "anisotropy_normalization": "unit_vector",
+                },
+                prefix="sample",
+                savedir=root,
+            )
+            result = run_dispersion(
+                request,
+                context=MPIContext(),
+                verbosity="quiet",
+            )
+            assert result.output == output.resolve()
+            assert result.plot_output is None
+            with np.load(output, allow_pickle=False) as payload:
+                np.testing.assert_allclose(payload["energy_mev"][:, 0], (0.1, 2.1, 4.1))
+                metadata = json.loads(str(payload["metadata_json"]))
+                assert metadata["single_ion_anisotropy"]["energy_mev"] == [0.1]
+                assert metadata["parallel"]["distribution"] == "kpath_points"
 
 
 if __name__ == "__main__":

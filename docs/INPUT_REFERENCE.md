@@ -647,11 +647,12 @@ The backend paths shown below are quarantined implementation details. Historical
 `slw.magph.<module>` commands are not preserved or re-exported; use this stage
 executable for all active magph drivers.
 
-> **Current-registry boundary:** `calculation='lifetime'` is the first native
-> magph command. It uses the strict FM/AFM, unit, phase, and `J_iso` screening
-> contract in [MAGPH_DESIGN.md](MAGPH_DESIGN.md), with automatic external-k MPI
-> distribution. The other calculations in this section remain quarantined
-> compatibility backends.
+> **Current-registry boundary:** `calculation='dispersion'` and
+> `calculation='lifetime'` are native magph commands. They share the strict
+> FM/AFM, SIA, unit, phase, and `J_iso` screening contract in
+> [MAGPH_DESIGN.md](MAGPH_DESIGN.md), with automatic MPI k distribution. The
+> other calculations in this section remain quarantined compatibility
+> backends.
 
 > **Legacy absolute-unit warning:** the compatibility vertex uses an amu
 > zero-point prefactor with qe2pert polarizations normalized by masses in
@@ -669,6 +670,7 @@ particular, native lifetime distributes external k points with MPI and requires
 
 | `calculation` | Backend source | MPI | Purpose |
 |---|---|---:|---|
+| `dispersion` | native | yes | Compute magnon bands, including exact Goldstone energies, and an optional plot |
 | `hybrid` | default | no | Build and diagonalize the hybrid magnon-phonon Hamiltonian |
 | `berry` | default | no | Compute hybrid-band Berry curvature on a reciprocal-space plane |
 | `spectral` | default | yes | Run the MPI-aware magnon-phonon spectral solver |
@@ -678,6 +680,45 @@ particular, native lifetime distributes external k points with MPI and requires
 | `rotational_coupling` | default | no | Analyze rotational and chiral magnon-phonon coupling |
 | `chirality_plane` | default | yes | Run restartable MPI chirality analysis on a reciprocal-space plane |
 | `prepare_lifetime` | default | no | Create a compatibility manifest for lifetime and spectral solvers |
+
+### `calculation='dispersion'`
+
+**Runtime requirements:** A canonical scalar-exchange HDF5 with
+`basic_data/lattice_ang`, an explicit FM or bipartite-AFM state, and a file
+containing a Wannier90 `begin/end kpoint_path` block. No material path is
+built into the solver. Optional uniaxial single-ion anisotropy follows
+`H_SIA=-K(s.n)^2`; positive K is easy-axis. Exact AFM Goldstone points are
+accepted because this calculation returns energies only, not paraunitary
+eigenvectors.
+
+**MPI:** Interpolated path points are divided into balanced contiguous rank
+blocks. Dense eigensolvers remain vectorized/rank-local, and only rank zero
+writes the final products.
+
+**Outputs:** One atomic NPZ containing fractional k points, inverse-Angstrom
+path distance, magnon energies in meV, Goldstone flags, segment/tick data, and
+JSON provenance. `plot=.true.` additionally writes an atomic PNG, PDF, or SVG.
+
+Backend: `slw.magph.engine:prepare_run`.
+
+| Namelist key | Type | Required | Default | Meaning |
+|---|---|---:|---|---|
+| `exchange_h5` | path | yes | — | Canonical static scalar-exchange HDF5 including `lattice_ang`. |
+| `magnetic_order` | enum {fm, collinear_afm} | yes | — | Explicit magnetic order. |
+| `spin_magnitudes` | float or float list | yes | — | Positive spin magnitude, scalar-broadcast or one per magnetic site. |
+| `spin_pattern` | float list | conditional | FM all +1; AFM +1,-1 | Explicit collinear signs. |
+| `quantization_axis` | float[3] | yes | — | Nonzero Cartesian spin quantization axis. |
+| `anisotropy_model` | enum {uniaxial} | conditional | none | Required as a complete SIA set when anisotropy is supplied. |
+| `anisotropy_mev` | float or float list | conditional | none | K in `H_SIA=-K(s.n)^2`; scalar-broadcast or one per HDF5 magnetic-site-map entry. |
+| `anisotropy_axis` | float[3] or flattened site axes | conditional | none | One Cartesian uniaxial direction or one per HDF5 magnetic-site-map entry. |
+| `anisotropy_normalization` | enum {unit_vector, spin_operator} | conditional | none | Defines the spin variable `s` in the SIA Hamiltonian. |
+| `kpath_file` | path | yes | — | File containing a Wannier90 `kpoint_path` block. |
+| `points_per_segment` | int | no | 50 | Positive interpolation count per path segment. |
+| `output` | path | no | `${savedir}/${prefix}.dispersion.npz` | Native dispersion NPZ. |
+| `plot` | boolean | no | .true. | Write a noninteractive band plot. |
+| `plot_output` | path | conditional | `${savedir}/${prefix}.dispersion.png` | PNG, PDF, or SVG path when plotting. |
+| `plot_dpi` | int | no | 180 | Positive raster resolution; ignored by vector formats. |
+| `overwrite` | boolean | no | .false. | Atomically replace existing products. |
 
 ### `calculation='hybrid'`
 
@@ -836,7 +877,9 @@ derivative ASR, phonon mass normalization, and q mesh are screened before any
 LSWT calculation. `J_iso` is admitted only with compatible `dJ_iso/du` and is
 promoted internally to `J_iso I` without granting tensor capabilities. FM
 supports any positive number of magnetic sublattices; the initial AFM route is
-restricted to exactly two collinear opposite sublattices.
+restricted to exactly two collinear opposite sublattices. The initial FM
+lifetime channel contract accepts collinear SIA that does not generate
+anomalous FM terms; energy-only dispersion has the broader Nambu treatment.
 
 **MPI:** `execution='auto'` uses every discovered MPI rank. The mode-resolved
 `dJ/du` coupling cache is constructed with balanced q-point ownership and then
@@ -868,6 +911,10 @@ Backend: `slw.magph.engine:prepare_run`.
 | `spin_magnitudes` | float or float list | yes | — | Positive spin magnitude broadcast from a scalar or supplied per magnetic site. |
 | `spin_pattern` | float list | conditional | FM all +1; AFM +1,-1 | Explicit collinear signs when overriding the canonical pattern. |
 | `quantization_axis` | float[3] | yes | — | Nonzero Cartesian quantization axis. |
+| `anisotropy_model` | enum {uniaxial} | conditional | none | Complete optional single-ion anisotropy model. |
+| `anisotropy_mev` | float or float list | conditional | none | K in `H_SIA=-K(s.n)^2`; scalar-broadcast or one per HDF5 magnetic-site-map entry. |
+| `anisotropy_axis` | float[3] or flattened site axes | conditional | none | One uniaxial direction or one per HDF5 magnetic-site-map entry. |
+| `anisotropy_normalization` | enum {unit_vector, spin_operator} | conditional | none | Explicit spin variable used by the SIA Hamiltonian. |
 | `kmesh` | int[3] | yes | — | Positive uniform external-k mesh. |
 | `kshift` | float[3] | yes | — | Explicit grid-unit shift; required to avoid hidden Gamma/Goldstone policy. |
 | `temperature_k` | float | yes | — | Non-negative temperature in kelvin. |

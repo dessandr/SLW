@@ -24,6 +24,12 @@
   magnetic_order = 'fm',
   spin_magnitudes = 1.0,
   quantization_axis = 0.0, 0.0, 1.0,
+  ! Optional static single-ion anisotropy uses the same magnon Hamiltonian as
+  ! the dispersion and lifetime stages. Supply the complete set together:
+  ! anisotropy_model = 'uniaxial',
+  ! anisotropy_mev = 0.05,
+  ! anisotropy_axis = 0.0, 0.0, 1.0,
+  ! anisotropy_normalization = 'unit_vector',
   kmesh = 4, 4, 4,
   kshift = 0.5, 0.5, 0.5,
   temperature_k = 300.0,

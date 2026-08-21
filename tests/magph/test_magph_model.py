@@ -9,6 +9,7 @@ from slw.magph.model import (
     ExchangeConvention,
     ExchangeSpinNormalization,
     MagneticOrder,
+    SingleIonAnisotropy,
 )
 from slw.magph.screening import load_exchange_h5, screen_magnetic_configuration
 
@@ -132,3 +133,22 @@ def test_magnetic_configuration_constructor_enforces_semantic_invariants(
         replace(state, bosonic_metric=np.asarray([1.0, -1.0]))
     with pytest.raises(TypeError, match="boolean"):
         replace(state, locally_stable=1)
+
+
+def test_single_ion_anisotropy_is_normalized_and_immutable() -> None:
+    anisotropy = SingleIonAnisotropy(
+        energy_mev=(0.1, -0.2),
+        axis=((0.0, 0.0, 2.0), (0.0, 3.0, 0.0)),
+        spin_normalization="unit_vector",
+    )
+    np.testing.assert_allclose(
+        anisotropy.axis,
+        ((0.0, 0.0, 1.0), (0.0, 1.0, 0.0)),
+    )
+    assert anisotropy.spin_normalization is ExchangeSpinNormalization.UNIT_VECTOR
+    assert not anisotropy.energy_mev.flags.writeable
+    assert not anisotropy.axis.flags.writeable
+    with pytest.raises(ValueError, match="nonzero"):
+        replace(anisotropy, axis=np.zeros((2, 3)))
+    with pytest.raises(ValueError, match="uniaxial"):
+        replace(anisotropy, model="cubic")

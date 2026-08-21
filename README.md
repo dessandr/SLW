@@ -30,8 +30,8 @@ python -m pip install -e '.[mpi,phonon,kpath]'
   `dJ/du`, symmetry/ASR checks, SOC/spin-flip construction, and diagnostics.
 - `slw.soc`: typed atomic-SOC manifold input and the two TB2J spinor layouts;
   abandoned fitting and visualization experiments live under `slw.soc.legacy`.
-- `slw.magph`: native exchange/phonon screening and dimension-generic
-  self-energy, scattering-rate, and lifetime numerical APIs.
+- `slw.magph`: native exchange/phonon/SIA screening, MPI magnon dispersion,
+  and dimension-generic self-energy, scattering-rate, and lifetime APIs.
 - `slw.magph.legacy`: quarantined EPR adapters, numerical kernels, MPI
   runners, analysis tools, and plotting code retained behind that stage.
 - `slw.interactions`: Wannier-gauge reference density and intersite-V tools.
@@ -107,7 +107,7 @@ processes attach to it. For a multi-node run, using one rank per node avoids
 replicating that cache within a node; bind at least
 `workers_per_rank*threads_per_worker` cores to each rank. Other exchange modes
 still require `workers_per_rank=1` under MPI. The same canonical `&parallel`
-names control native magph lifetime and are translated at retained magph
+names control native magph dispersion/lifetime and are translated at retained magph
 backend boundaries; backend-specific `nproc` and chunk spellings are not part
 of the public namelist.
 
@@ -115,7 +115,7 @@ Historical magph modules are likewise quarantined under `slw.magph.legacy`.
 The retained compatibility drivers live in `slw.magph.legacy.reference`;
 helper and post-processing modules remain one level above them. Old
 `slw.magph.<module>` paths have no compatibility shims and are not public
-interfaces. `slw_magph.x` lifetime now uses only native typed modules; the
+interfaces. `slw_magph.x` dispersion and lifetime now use only native typed modules; the
 remaining registered magph calculations still use the compatibility boundary.
 
 See [docs/SCOPE.md](docs/SCOPE.md) for the extraction boundary and retained

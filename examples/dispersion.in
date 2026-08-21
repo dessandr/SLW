@@ -1,0 +1,35 @@
+&control
+  calculation = 'dispersion',
+  prefix = 'sample',
+  outdir = './slw-tmp',
+  verbosity = 'normal'
+/
+
+&parallel
+  ! Path points are distributed across MPI ranks. Dense eigensolvers use the
+  ! rank-local BLAS thread count; no nested process pool is created.
+  execution = 'auto',
+  workers_per_rank = 1,
+  threads_per_worker = 1
+/
+
+&magph
+  exchange_h5 = '${savedir}/sample.j.h5',
+  magnetic_order = 'collinear_afm',
+  spin_magnitudes = 1.0, 1.0,
+  spin_pattern = 1.0, -1.0,
+  quantization_axis = 0.0, 0.0, 1.0,
+
+  ! H_SIA = -K (s.n)^2. Positive K is easy-axis. Replace this illustrative
+  ! value with a physical input, or remove all four anisotropy keys for K=0.
+  anisotropy_model = 'uniaxial',
+  anisotropy_mev = 0.05,
+  anisotropy_axis = 0.0, 0.0, 1.0,
+  anisotropy_normalization = 'unit_vector',
+
+  kpath_file = './examples/kpath.win',
+  points_per_segment = 50,
+  output = '${savedir}/sample.dispersion.npz',
+  plot = .true.,
+  plot_output = '${savedir}/sample.dispersion.png'
+/

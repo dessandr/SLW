@@ -11,7 +11,12 @@ from slw.cli.mpi import MPIContext
 
 from .coupling import ModeResolvedExchangeDerivative
 from .lswt import solve_isotropic_lswt, uniform_fractional_mesh
-from .model import ExchangeModel, MagneticConfiguration, MagneticOrder
+from .model import (
+    ExchangeModel,
+    MagneticConfiguration,
+    MagneticOrder,
+    SingleIonAnisotropy,
+)
 from .parallel import distributed_array_map
 
 
@@ -202,6 +207,7 @@ def build_magnon_mesh_cache(
     root: int = 0,
     mesh_tolerance: float = 1.0e-8,
     lswt_options: dict[str, float] | None = None,
+    anisotropy: SingleIonAnisotropy | None = None,
 ) -> MagnonMeshCache:
     """Solve each unique uniform ``k+q`` point once and broadcast the cache."""
 
@@ -253,6 +259,7 @@ def build_magnon_mesh_cache(
             exchange,
             configuration,
             union_points[indices],
+            anisotropy=anisotropy,
             **options,
         )
         packed = np.empty(

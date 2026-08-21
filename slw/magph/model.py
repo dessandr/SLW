@@ -47,6 +47,66 @@ class MagneticOrder(str, Enum):
 
 
 @dataclass(frozen=True)
+class SingleIonAnisotropy:
+    """Canonical uniaxial single-ion anisotropy for magnetic sites.
+
+    The Hamiltonian is
+
+    ``H_SIA = -sum_i K_i (s_i dot axis_i)^2``
+
+    where ``s_i`` is either the unit spin direction or the dimensionless spin
+    operator according to ``spin_normalization``.  Positive ``K_i`` therefore
+    denotes an easy axis and negative ``K_i`` an easy plane.  Values and axes
+    are stored per local magnetic site so downstream LSWT kernels never infer
+    broadcasting or site order.
+    """
+
+    energy_mev: NDArray[np.float64]
+    axis: NDArray[np.float64]
+    spin_normalization: ExchangeSpinNormalization
+    model: str = "uniaxial"
+    hamiltonian_sign: str = "minus"
+
+    def __post_init__(self) -> None:
+        energy = _readonly_array(
+            "anisotropy energy_mev", self.energy_mev, dtype=np.float64, ndim=1
+        )
+        if energy.size == 0:
+            raise ValueError("single-ion anisotropy must contain at least one site")
+        axes = _readonly_array(
+            "anisotropy axis",
+            self.axis,
+            dtype=np.float64,
+            shape=(energy.size, 3),
+        )
+        _require_finite("anisotropy energy_mev", energy)
+        _require_finite("anisotropy axis", axes)
+        norms = np.linalg.norm(axes, axis=1)
+        if np.any(norms <= np.finfo(np.float64).eps):
+            raise ValueError("single-ion anisotropy axes must be nonzero")
+        axes = np.array(axes / norms[:, None], dtype=np.float64, copy=True)
+        axes.setflags(write=False)
+        normalization = ExchangeSpinNormalization(self.spin_normalization)
+        model = str(self.model).strip().lower()
+        if model != "uniaxial":
+            raise ValueError("native single-ion anisotropy model must be 'uniaxial'")
+        sign = str(self.hamiltonian_sign).strip().lower()
+        if sign != "minus":
+            raise ValueError(
+                "native single-ion anisotropy requires hamiltonian_sign='minus'"
+            )
+        object.__setattr__(self, "energy_mev", energy)
+        object.__setattr__(self, "axis", axes)
+        object.__setattr__(self, "spin_normalization", normalization)
+        object.__setattr__(self, "model", model)
+        object.__setattr__(self, "hamiltonian_sign", sign)
+
+    @property
+    def n_magnetic_sites(self) -> int:
+        return int(self.energy_mev.size)
+
+
+@dataclass(frozen=True)
 class ExchangeConvention:
     """Explicit Hamiltonian and real-space convention for one J payload.
 
@@ -480,7 +540,11 @@ class ExchangeScreeningReport:
 
 @dataclass(frozen=True)
 class MagneticConfiguration:
-    """A validated collinear reference state for the native workflow."""
+    """A validated collinear reference state for the native workflow.
+
+    ``local_exchange_field_mev`` retains its original public field name but is
+    the angular effective field of the screened exchange plus optional SIA.
+    """
 
     order: MagneticOrder
     spin_pattern: NDArray[np.float64]
