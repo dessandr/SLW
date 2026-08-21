@@ -31,5 +31,6 @@
   points_per_segment = 50,
   output = '${savedir}/sample.dispersion.npz',
   plot = .true.,
-  plot_output = '${savedir}/sample.dispersion.png'
+  plot_output = '${savedir}/sample.dispersion.png',
+  restart_mode = 'error'
 /

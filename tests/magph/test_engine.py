@@ -4,6 +4,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import h5py
 import numpy as np
@@ -11,6 +12,7 @@ import numpy as np
 from slw.cli.mpi import MPIContext
 from slw.magph.config import build_dispersion_request, build_lifetime_request
 from slw.magph.engine import run_dispersion, run_lifetime
+from slw.magph.parallel import CollectiveExecutionError
 from tests.magph.test_derivative import _write_derivative
 from tests.magph.test_exchange_screening import _write_scalar
 from tests.magph.test_phonon import _write_cache
@@ -98,6 +100,7 @@ class NativeMagphEngineTests(unittest.TestCase):
             exchange = root / "J.h5"
             kpath = root / "bands.win"
             output = root / "dispersion.npz"
+            plot_output = root / "dispersion.png"
             _write_scalar(
                 exchange,
                 [2.0, 2.0],
@@ -114,21 +117,23 @@ end kpoint_path
 """,
                 encoding="utf-8",
             )
+            parameters = {
+                "exchange_h5": exchange,
+                "kpath_file": kpath,
+                "output": output,
+                "plot": True,
+                "plot_output": plot_output,
+                "points_per_segment": 2,
+                "magnetic_order": "fm",
+                "spin_magnitudes": 2.0,
+                "quantization_axis": (0.0, 0.0, 1.0),
+                "anisotropy_model": "uniaxial",
+                "anisotropy_mev": 0.1,
+                "anisotropy_axis": (0.0, 0.0, 1.0),
+                "anisotropy_normalization": "unit_vector",
+            }
             request = build_dispersion_request(
-                {
-                    "exchange_h5": exchange,
-                    "kpath_file": kpath,
-                    "output": output,
-                    "plot": False,
-                    "points_per_segment": 2,
-                    "magnetic_order": "fm",
-                    "spin_magnitudes": 2.0,
-                    "quantization_axis": (0.0, 0.0, 1.0),
-                    "anisotropy_model": "uniaxial",
-                    "anisotropy_mev": 0.1,
-                    "anisotropy_axis": (0.0, 0.0, 1.0),
-                    "anisotropy_normalization": "unit_vector",
-                },
+                parameters,
                 prefix="sample",
                 savedir=root,
             )
@@ -138,12 +143,60 @@ end kpoint_path
                 verbosity="quiet",
             )
             assert result.output == output.resolve()
-            assert result.plot_output is None
+            assert result.plot_output == plot_output.resolve()
+            assert plot_output.is_file()
             with np.load(output, allow_pickle=False) as payload:
                 np.testing.assert_allclose(payload["energy_mev"][:, 0], (0.1, 2.1, 4.1))
                 metadata = json.loads(str(payload["metadata_json"]))
                 assert metadata["single_ion_anisotropy"]["energy_mev"] == [0.1]
                 assert metadata["parallel"]["distribution"] == "kpath_points"
+                assert len(metadata["restart_signature"]) == 64
+
+            restart_request = build_dispersion_request(
+                {**parameters, "restart_mode": "restart"},
+                prefix="sample",
+                savedir=root,
+            )
+            plot_output.unlink()
+            with patch(
+                "slw.magph.engine.compute_magnon_dispersion",
+                side_effect=AssertionError("completed restart must not recompute"),
+            ):
+                restarted = run_dispersion(
+                    restart_request,
+                    context=MPIContext(),
+                    verbosity="quiet",
+                )
+            self.assertEqual(restarted.k_point_count, 3)
+            self.assertTrue(plot_output.is_file())
+
+            mismatch_request = build_dispersion_request(
+                {**parameters, "points_per_segment": 3, "restart_mode": "restart"},
+                prefix="sample",
+                savedir=root,
+            )
+            with self.assertRaisesRegex(
+                CollectiveExecutionError, "restart signature.*does not match"
+            ):
+                run_dispersion(
+                    mismatch_request,
+                    context=MPIContext(),
+                    verbosity="quiet",
+                )
+
+            output.write_bytes(b"stale output")
+            scratch_request = build_dispersion_request(
+                {**parameters, "restart_mode": "from_scratch"},
+                prefix="sample",
+                savedir=root,
+            )
+            run_dispersion(
+                scratch_request,
+                context=MPIContext(),
+                verbosity="quiet",
+            )
+            with np.load(output, allow_pickle=False) as payload:
+                self.assertEqual(payload["energy_mev"].shape, (3, 1))
 
 
 if __name__ == "__main__":

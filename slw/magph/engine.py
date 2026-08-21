@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import sys
 from collections import Counter
 from dataclasses import dataclass
@@ -20,15 +22,27 @@ from .config import (
     MagphDispersionRequest,
     MagphInputError,
     MagphLifetimeRequest,
+    RestartMode,
     build_dispersion_request,
     build_lifetime_request,
 )
 from .coupling import build_mode_resolved_isotropic_derivative_distributed
 from .derivative import load_exchange_derivative_h5
-from .dispersion import build_wannier90_kpath, compute_magnon_dispersion
+from .dispersion import (
+    MagnonDispersionResult,
+    MagnonKPath,
+    build_wannier90_kpath,
+    compute_magnon_dispersion,
+)
 from .lswt import uniform_fractional_mesh
 from .mesh import build_magnon_mesh_cache
-from .output import write_dispersion_npz, write_dispersion_plot, write_lifetime_npz
+from .output import (
+    DISPERSION_OUTPUT_SCHEMA_VERSION,
+    LIFETIME_OUTPUT_SCHEMA_VERSION,
+    write_dispersion_npz,
+    write_dispersion_plot,
+    write_lifetime_npz,
+)
 from .parallel import CollectiveExecutionError, RankFailure
 from .phonon import load_phonon_cache, zero_point_displacements
 from .pipeline import compute_lifetime_grid
@@ -42,6 +56,239 @@ class MagphRunResult:
     k_point_count: int
     magnetic_site_count: int
     plot_output: Path | None = None
+
+
+def _source_stamp(path: Path) -> dict[str, Any]:
+    resolved = path.expanduser().resolve()
+    stat = resolved.stat()
+    return {
+        "path": str(resolved),
+        "size": int(stat.st_size),
+        "mtime_ns": int(stat.st_mtime_ns),
+    }
+
+
+def _anisotropy_signature(value: Any) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    return {
+        "model": value.model,
+        "energy_mev": list(value.energy_mev),
+        "axis": list(value.axis),
+        "spin_normalization": value.spin_normalization.value,
+    }
+
+
+def _request_signature(
+    request: MagphLifetimeRequest | MagphDispersionRequest,
+) -> str:
+    """Hash scientific inputs and source-file identities for safe restart reuse."""
+
+    common: dict[str, Any] = {
+        "exchange_h5": _source_stamp(request.exchange_h5),
+        "magnetic_order": request.magnetic_order.value,
+        "spin_magnitudes": list(request.spin_magnitudes),
+        "spin_pattern": None
+        if request.spin_pattern is None
+        else list(request.spin_pattern),
+        "quantization_axis": list(request.quantization_axis),
+        "single_ion_anisotropy": _anisotropy_signature(request.anisotropy),
+    }
+    if isinstance(request, MagphLifetimeRequest):
+        payload = {
+            **common,
+            "calculation": "lifetime",
+            "derivative_h5": _source_stamp(request.derivative_h5),
+            "phonon_cache": _source_stamp(request.phonon_cache),
+            "kmesh": list(request.kmesh),
+            "kshift": list(request.kshift),
+            "temperature_k": request.temperature_k,
+            "broadening_mev": request.broadening_mev,
+            "frequency_floor_mev": request.frequency_floor_mev,
+            "asr_policy": request.asr_policy.value,
+            "metric_energy_tolerance_mev": request.metric_energy_tolerance_mev,
+            "negative_tolerance_mev": request.negative_tolerance_mev,
+            "require_complete_targets": request.require_complete_targets,
+        }
+    else:
+        payload = {
+            **common,
+            "calculation": "dispersion",
+            "kpath_file": _source_stamp(request.kpath_file),
+            "points_per_segment": request.points_per_segment,
+        }
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _completed_payload(
+    path: Path,
+    *,
+    calculation: str,
+    schema_version: int,
+    restart_signature: str,
+) -> tuple[dict[str, Any], dict[str, np.ndarray]]:
+    try:
+        with np.load(path, allow_pickle=False) as source:
+            schema = np.asarray(source["schema_version"])
+            if schema.size != 1 or int(schema.reshape(())) != schema_version:
+                raise ValueError(
+                    f"expected schema_version={schema_version}, got {schema.tolist()}"
+                )
+            metadata = json.loads(str(np.asarray(source["metadata_json"]).reshape(())))
+            if not isinstance(metadata, dict):
+                raise TypeError("metadata_json must decode to an object")
+            arrays = {name: np.array(source[name], copy=True) for name in source.files}
+    except Exception as exc:
+        raise ValueError(
+            f"invalid completed {calculation} output {path}: {exc}"
+        ) from exc
+    if metadata.get("calculation") != calculation:
+        raise ValueError(
+            f"restart output {path} has calculation={metadata.get('calculation')!r}, "
+            f"expected {calculation!r}"
+        )
+    recorded = metadata.get("restart_signature")
+    if recorded != restart_signature:
+        reason = "missing" if recorded is None else "does not match the current input"
+        raise ValueError(
+            f"restart signature {reason} in {path}; use "
+            "restart_mode='from_scratch' to replace it"
+        )
+    return metadata, arrays
+
+
+def _restart_dispersion_result(
+    request: MagphDispersionRequest,
+    metadata: dict[str, Any],
+    arrays: dict[str, np.ndarray],
+) -> MagnonDispersionResult:
+    required = {
+        "energy_mev",
+        "goldstone_mask",
+        "k_points_frac",
+        "segment_offsets",
+        "tick_labels",
+        "tick_positions_inv_ang",
+        "x_coordinate_inv_ang",
+    }
+    missing = sorted(required.difference(arrays))
+    if missing:
+        raise ValueError("completed dispersion is missing " + ", ".join(missing))
+    path = MagnonKPath(
+        source=request.kpath_file,
+        k_points_frac=arrays["k_points_frac"],
+        x_coordinate_inv_ang=arrays["x_coordinate_inv_ang"],
+        segment_offsets=arrays["segment_offsets"],
+        tick_positions_inv_ang=arrays["tick_positions_inv_ang"],
+        tick_labels=tuple(str(value) for value in arrays["tick_labels"].tolist()),
+        points_per_segment=request.points_per_segment,
+    )
+    return MagnonDispersionResult(
+        path=path,
+        energy_mev=arrays["energy_mev"],
+        goldstone_mask=arrays["goldstone_mask"],
+        mpi_size=int(metadata.get("mpi_size", 1)),
+    )
+
+
+def _existing_output_policy(
+    request: MagphLifetimeRequest | MagphDispersionRequest,
+    context: MPIContext,
+) -> MagphRunResult | None:
+    """Apply one root-decided output policy and broadcast the result or error."""
+
+    reused: MagphRunResult | None = None
+    failure: RankFailure | None = None
+    if context.is_root:
+        try:
+            auxiliaries = (
+                (request.plot_output,)
+                if isinstance(request, MagphDispersionRequest)
+                and request.plot_output is not None
+                else ()
+            )
+            existing = tuple(
+                path for path in (request.output, *auxiliaries) if path.exists()
+            )
+            if request.restart_mode is RestartMode.ERROR and existing:
+                rendered = ", ".join(str(path) for path in existing)
+                raise FileExistsError(f"native magph output already exists: {rendered}")
+            if request.restart_mode is RestartMode.RESTART:
+                if not request.output.exists():
+                    if existing:
+                        raise FileExistsError(
+                            "restart found auxiliary output without the primary NPZ: "
+                            + ", ".join(str(path) for path in existing)
+                        )
+                else:
+                    signature = _request_signature(request)
+                    calculation = (
+                        "dispersion"
+                        if isinstance(request, MagphDispersionRequest)
+                        else "lifetime"
+                    )
+                    schema = (
+                        DISPERSION_OUTPUT_SCHEMA_VERSION
+                        if calculation == "dispersion"
+                        else LIFETIME_OUTPUT_SCHEMA_VERSION
+                    )
+                    metadata, arrays = _completed_payload(
+                        request.output,
+                        calculation=calculation,
+                        schema_version=schema,
+                        restart_signature=signature,
+                    )
+                    if isinstance(request, MagphDispersionRequest):
+                        result = _restart_dispersion_result(request, metadata, arrays)
+                        if (
+                            request.plot_output is not None
+                            and not request.plot_output.exists()
+                        ):
+                            write_dispersion_plot(
+                                request.plot_output,
+                                result,
+                                title=request.output.stem,
+                                dpi=request.plot_dpi,
+                                overwrite=False,
+                            )
+                        k_count = result.path.n_points
+                    else:
+                        if "k_points_frac" not in arrays or "energy_mev" not in arrays:
+                            raise ValueError(
+                                "completed lifetime output is missing k_points_frac or energy_mev"
+                            )
+                        k_points = np.asarray(arrays["k_points_frac"])
+                        energy = np.asarray(arrays["energy_mev"])
+                        if k_points.ndim != 2 or k_points.shape[1:] != (3,):
+                            raise ValueError(
+                                "completed lifetime k_points_frac is invalid"
+                            )
+                        if energy.ndim != 2 or energy.shape[0] != k_points.shape[0]:
+                            raise ValueError("completed lifetime energy_mev is invalid")
+                        k_count = int(k_points.shape[0])
+                    magnetic_atoms = metadata.get("magnetic_atom_indices")
+                    if not isinstance(magnetic_atoms, list) or not magnetic_atoms:
+                        raise ValueError(
+                            "completed output lacks magnetic_atom_indices provenance"
+                        )
+                    reused = MagphRunResult(
+                        output=request.output,
+                        plot_output=(
+                            request.plot_output
+                            if isinstance(request, MagphDispersionRequest)
+                            else None
+                        ),
+                        mpi_size=context.size,
+                        k_point_count=k_count,
+                        magnetic_site_count=len(magnetic_atoms),
+                    )
+        except Exception as exc:  # noqa: BLE001 - release all ranks together
+            failure = _rank_failure(context.rank, "magph_restart", exc)
+    reused, failure = context.bcast((reused, failure), root=0)
+    if failure is not None:
+        raise CollectiveExecutionError((failure,))
+    return reused
 
 
 def _validate_parallel(parallel: ParallelConfig, *, calculation: str) -> None:
@@ -291,6 +538,10 @@ def run_lifetime(
         verbosity=verbosity,
         timers=timers,
     )
+    reused = _existing_output_policy(request, mpi)
+    if reused is not None:
+        logger.info(f"restart      = reused completed {request.output}")
+        return reused
     with timers.phase("total"):
         with logger.phase("input_screening", label="Screening native inputs"):
             (
@@ -428,6 +679,8 @@ def run_lifetime(
                     magnon_cache=magnon_cache,
                     mpi_size=mpi.size,
                 )
+                metadata["restart_signature"] = _request_signature(request)
+                metadata["restart_mode"] = request.restart_mode.value
                 with logger.phase("output", label="Writing lifetime output"):
                     write_lifetime_npz(
                         request.output,
@@ -461,15 +714,6 @@ def run_lifetime(
 
 
 def _load_dispersion_problem(request: MagphDispersionRequest) -> tuple[Any, ...]:
-    if not request.overwrite:
-        existing = [
-            path
-            for path in (request.output, request.plot_output)
-            if path is not None and path.exists()
-        ]
-        if existing:
-            rendered = ", ".join(str(path) for path in existing)
-            raise FileExistsError(f"dispersion output already exists: {rendered}")
     exchange, exchange_report = load_exchange_h5(request.exchange_h5)
     if exchange.lattice_ang is None:
         raise MagphInputError(
@@ -554,6 +798,10 @@ def run_dispersion(
         verbosity=verbosity,
         timers=timers,
     )
+    reused = _existing_output_policy(request, mpi)
+    if reused is not None:
+        logger.info(f"restart      = reused completed {request.output}")
+        return reused
     with timers.phase("total"):
         with logger.phase("input_screening", label="Screening magnon-band inputs"):
             (
@@ -605,6 +853,8 @@ def run_dispersion(
                     "single_ion_anisotropy": _anisotropy_metadata(anisotropy),
                     "kpath_file": str(request.kpath_file),
                     "points_per_segment": request.points_per_segment,
+                    "restart_mode": request.restart_mode.value,
+                    "restart_signature": _request_signature(request),
                     "fourier_phase_convention": "exp(+i2pi_k_dot_R)",
                     "exact_goldstone_energy_only": True,
                     "goldstone_point_count": int(
@@ -777,7 +1027,7 @@ def format_help(
             "  quantization_axis = three Cartesian components\n"
             "  kpath_file        = Wannier90 file/snippet with kpoint_path\n\n"
             "Optional &magph: spin_pattern, points_per_segment, output, plot,\n"
-            "plot_output, plot_dpi, overwrite, and the complete uniaxial SIA\n"
+            "plot_output, plot_dpi, restart_mode, and the complete uniaxial SIA\n"
             "set anisotropy_model/mev/axis/normalization. MPI distributes path\n"
             "points.\n"
         )
@@ -796,7 +1046,7 @@ def format_help(
         "  broadening_mev    = positive retarded broadening\n\n"
         "Optional &magph: spin_pattern, frequency_floor_mev, asr_policy,\n"
         "the complete anisotropy_model/mev/axis/normalization set, output, and\n"
-        "overwrite. Put worker/thread and q/bond/vertex/\n"
+        "restart_mode. Put worker/thread and q/bond/vertex/\n"
         "self-energy/channel chunk controls in &parallel.\n"
         "MPI is selected automatically under mpirun; external k points are\n"
         "distributed across ranks and q/mode contractions stay vectorized.\n"

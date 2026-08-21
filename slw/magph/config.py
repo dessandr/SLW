@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +28,14 @@ class MagphInputError(ValueError):
     """Raised when native magnon--phonon input is incomplete or ambiguous."""
 
 
+class RestartMode(str, Enum):
+    """Output policy for one native magph calculation."""
+
+    ERROR = "error"
+    RESTART = "restart"
+    FROM_SCRATCH = "from_scratch"
+
+
 _LIFETIME_KEYS = {
     "asr_policy",
     "broadening_mev",
@@ -44,6 +53,7 @@ _LIFETIME_KEYS = {
     "phonon_cache",
     "quantization_axis",
     "require_complete_targets",
+    "restart_mode",
     "spin_magnitudes",
     "spin_pattern",
     "temperature_k",
@@ -61,6 +71,7 @@ _DISPERSION_KEYS = {
     "plot_output",
     "points_per_segment",
     "quantization_axis",
+    "restart_mode",
     "spin_magnitudes",
     "spin_pattern",
 } | _ANISOTROPY_KEYS
@@ -123,6 +134,27 @@ def _finite_scalar(
     if nonnegative and result < 0.0:
         raise MagphInputError(f"{name} must be non-negative")
     return result
+
+
+def _restart_mode(values: dict[str, Any]) -> RestartMode:
+    """Parse the native output policy, retaining ``overwrite`` as an alias."""
+
+    if "restart_mode" in values and "overwrite" in values:
+        raise MagphInputError(
+            "restart_mode and the deprecated overwrite key are mutually exclusive"
+        )
+    if "overwrite" in values:
+        return (
+            RestartMode.FROM_SCRATCH
+            if _boolean(values["overwrite"], name="overwrite")
+            else RestartMode.ERROR
+        )
+    raw = str(values.get("restart_mode", RestartMode.ERROR.value)).strip().lower()
+    try:
+        return RestartMode(raw)
+    except ValueError as exc:
+        choices = ", ".join(mode.value for mode in RestartMode)
+        raise MagphInputError(f"restart_mode must be one of {choices}") from exc
 
 
 def _boolean(value: Any, *, name: str) -> bool:
@@ -253,7 +285,13 @@ class MagphLifetimeRequest:
     metric_energy_tolerance_mev: float
     negative_tolerance_mev: float
     require_complete_targets: bool
-    overwrite: bool
+    restart_mode: RestartMode
+
+    @property
+    def overwrite(self) -> bool:
+        """Whether atomic writers may replace completed products."""
+
+        return self.restart_mode is RestartMode.FROM_SCRATCH
 
 
 @dataclass(frozen=True)
@@ -269,7 +307,13 @@ class MagphDispersionRequest:
     anisotropy: SingleIonAnisotropyInput | None
     points_per_segment: int
     plot_dpi: int
-    overwrite: bool
+    restart_mode: RestartMode
+
+    @property
+    def overwrite(self) -> bool:
+        """Whether atomic writers may replace completed products."""
+
+        return self.restart_mode is RestartMode.FROM_SCRATCH
 
 
 def build_lifetime_request(
@@ -390,7 +434,7 @@ def build_lifetime_request(
             values.get("require_complete_targets", True),
             name="require_complete_targets",
         ),
-        overwrite=_boolean(values.get("overwrite", False), name="overwrite"),
+        restart_mode=_restart_mode(values),
     )
 
 
@@ -478,7 +522,7 @@ def build_dispersion_request(
             values.get("points_per_segment", 50), name="points_per_segment"
         ),
         plot_dpi=_positive_integer(values.get("plot_dpi", 180), name="plot_dpi"),
-        overwrite=_boolean(values.get("overwrite", False), name="overwrite"),
+        restart_mode=_restart_mode(values),
     )
 
 
@@ -486,6 +530,7 @@ __all__ = [
     "MagphDispersionRequest",
     "MagphInputError",
     "MagphLifetimeRequest",
+    "RestartMode",
     "SingleIonAnisotropyInput",
     "build_dispersion_request",
     "build_lifetime_request",

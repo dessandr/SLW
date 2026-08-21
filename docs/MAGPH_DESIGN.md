@@ -373,12 +373,21 @@ paraunitary transform is claimed.
   points_per_segment = 50,
   output = '${savedir}/sample.dispersion.npz',
   plot = .true.,
-  plot_output = '${savedir}/sample.dispersion.png'
+  plot_output = '${savedir}/sample.dispersion.png',
+  restart_mode = 'error'
 /
 ```
 
 Remove all four `anisotropy_*` keys for a zero-SIA model. Supplying only part
 of the SIA contract is an input error.
+
+Both native calculations use `restart_mode='error'|'restart'|'from_scratch'`.
+`error` preserves no-clobber behavior. `restart` checks the output schema and
+a SHA-256 signature over the scientific parameters plus source-file path,
+size, and modification time before reusing a completed NPZ; dispersion also
+regenerates a missing plot from that NPZ. `from_scratch` recomputes and
+atomically replaces completed products. Partial lifetime checkpoints are not
+yet part of the native output contract.
 
 ## Native lifetime output v1
 

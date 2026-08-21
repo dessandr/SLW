@@ -35,5 +35,6 @@
   temperature_k = 300.0,
   broadening_mev = 0.2,
   asr_policy = 'fail',
-  output = '${savedir}/sample.lifetime.npz'
+  output = '${savedir}/sample.lifetime.npz',
+  restart_mode = 'error'
 /

@@ -6,6 +6,7 @@ from pathlib import Path
 
 from slw.magph.config import (
     MagphInputError,
+    RestartMode,
     build_dispersion_request,
     build_lifetime_request,
 )
@@ -96,6 +97,30 @@ class NativeMagphConfigTests(unittest.TestCase):
                 Path(directory).resolve() / "mn.dispersion.png",
             )
             self.assertEqual(request.points_per_segment, 50)
+            self.assertIs(request.restart_mode, RestartMode.ERROR)
+
+    def test_restart_mode_and_deprecated_overwrite_alias_are_explicit(self) -> None:
+        parameters = _parameters()
+        parameters["restart_mode"] = "restart"
+        request = build_lifetime_request(parameters, prefix="slw", savedir=".")
+        self.assertIs(request.restart_mode, RestartMode.RESTART)
+        self.assertFalse(request.overwrite)
+
+        parameters = _parameters()
+        parameters["overwrite"] = True
+        request = build_lifetime_request(parameters, prefix="slw", savedir=".")
+        self.assertIs(request.restart_mode, RestartMode.FROM_SCRATCH)
+        self.assertTrue(request.overwrite)
+
+        parameters["restart_mode"] = "from_scratch"
+        with self.assertRaisesRegex(MagphInputError, "mutually exclusive"):
+            build_lifetime_request(parameters, prefix="slw", savedir=".")
+
+    def test_invalid_restart_mode_is_rejected(self) -> None:
+        parameters = _parameters()
+        parameters["restart_mode"] = "append"
+        with self.assertRaisesRegex(MagphInputError, "error, restart, from_scratch"):
+            build_lifetime_request(parameters, prefix="slw", savedir=".")
 
 
 if __name__ == "__main__":

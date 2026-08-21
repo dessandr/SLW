@@ -57,3 +57,8 @@ slw_magph.x -in examples/lifetime.in --dry-run
 `kpath.win`. Its single-ion anisotropy is an illustrative input, not a
 material default: positive `K` follows `H_SIA=-K(s.n)^2` and the chosen
 `unit_vector` or `spin_operator` normalization is mandatory.
+
+Native dispersion and lifetime use `restart_mode='error'` by default. Select
+`restart` to validate and reuse a completed NPZ, or `from_scratch` to
+atomically replace an existing result. Native lifetime does not yet resume a
+partial self-energy grid.

@@ -718,7 +718,8 @@ Backend: `slw.magph.engine:prepare_run`.
 | `plot` | boolean | no | .true. | Write a noninteractive band plot. |
 | `plot_output` | path | conditional | `${savedir}/${prefix}.dispersion.png` | PNG, PDF, or SVG path when plotting. |
 | `plot_dpi` | int | no | 180 | Positive raster resolution; ignored by vector formats. |
-| `overwrite` | boolean | no | .false. | Atomically replace existing products. |
+| `restart_mode` | enum {error, restart, from_scratch} | no | error | `error` is no-clobber; `restart` validates and reuses a completed NPZ (and recreates a missing plot); `from_scratch` atomically replaces existing products. |
+| `overwrite` | boolean | deprecated | .false. | Compatibility alias: `.true.` maps to `restart_mode='from_scratch'`, `.false.` maps to `error`. It cannot be combined with `restart_mode`. |
 
 ### `calculation='hybrid'`
 
@@ -925,7 +926,8 @@ Backend: `slw.magph.engine:prepare_run`.
 | `negative_tolerance_mev` | float | no | 0 | Roundoff tolerance for slightly negative HWHM only. |
 | `require_complete_targets` | boolean | no | .true. | Require `dJ/du` targets for every phonon atom. |
 | `output` | path | no | `${savedir}/${prefix}.lifetime.npz` | Native lifetime NPZ. |
-| `overwrite` | boolean | no | .false. | Allow atomic replacement of an existing output. |
+| `restart_mode` | enum {error, restart, from_scratch} | no | error | `error` is no-clobber; `restart` validates and reuses a completed NPZ; `from_scratch` atomically replaces it. Native lifetime has no partial checkpoint shards yet. |
+| `overwrite` | boolean | deprecated | .false. | Compatibility alias for `error`/`from_scratch`; mutually exclusive with `restart_mode`. |
 
 Native lifetime resource controls are all in `&parallel`. It requires
 `workers_per_rank=1`, distributes external k points over MPI ranks, and uses
