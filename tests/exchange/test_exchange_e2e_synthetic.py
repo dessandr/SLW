@@ -269,6 +269,53 @@ class SyntheticExchangeEndToEndTests(unittest.TestCase):
                 for got, want in zip(actual, expected, strict=True):
                     np.testing.assert_allclose(got, want, rtol=1.0e-11, atol=1.0e-11)
 
+    def test_scalar_dj_spectral_matches_direct_in_serial_and_mpi(self) -> None:
+        options = {
+            "eph_unit": "ev",
+            "targets": "0",
+            "axes": "x",
+            "qmesh": (1, 1, 1),
+            "ddelta_mode": "onsite",
+            "no_symmetry_orbits": True,
+        }
+        direct = self._request("dj", "direct_g_kernel", g_kernel="direct", **options)
+        execute(direct)
+        with h5py.File(direct.output.h5_path) as handle:
+            expected = self._numeric_group_payload(handle, "dJ_r")
+            self.assertEqual(handle["basic_data/g_kernel"].asstr()[()], "direct")
+
+        spectral = self._request(
+            "dj", "spectral_g_kernel", g_kernel="spectral", **options
+        )
+        execute(spectral)
+        with h5py.File(spectral.output.h5_path) as handle:
+            serial_actual = self._numeric_group_payload(handle, "dJ_r")
+            self.assertEqual(handle["basic_data/g_kernel"].asstr()[()], "spectral")
+            self.assertEqual(
+                handle["basic_data/g_basis"].asstr()[()], "complete_eigen"
+            )
+            self.assertEqual(
+                handle["basic_data/electronic_subspace"].asstr()[()],
+                "complete_wannier",
+            )
+
+        parallel = self._request(
+            "dj", "spectral_g_kernel_mpi", g_kernel="spectral", **options
+        )
+        self._execute_two_ranks(parallel)
+        with h5py.File(parallel.output.h5_path) as handle:
+            mpi_actual = self._numeric_group_payload(handle, "dJ_r")
+            self.assertEqual(handle["basic_data/g_kernel"].asstr()[()], "spectral")
+            self.assertEqual(int(handle["basic_data/mpi_size"][()]), 2)
+
+        self.assertEqual(len(expected), len(serial_actual))
+        self.assertEqual(len(expected), len(mpi_actual))
+        for want, serial_got, mpi_got in zip(
+            expected, serial_actual, mpi_actual, strict=True
+        ):
+            np.testing.assert_allclose(serial_got, want, rtol=1.0e-11, atol=1.0e-11)
+            np.testing.assert_allclose(mpi_got, want, rtol=1.0e-11, atol=1.0e-11)
+
     def test_scalar_dj_rank_local_workers_match_single_worker(self) -> None:
         options = {
             "eph_unit": "ev",
@@ -282,7 +329,9 @@ class SyntheticExchangeEndToEndTests(unittest.TestCase):
         with h5py.File(serial.output.h5_path) as handle:
             expected = self._numeric_group_payload(handle, "dJ_r")
 
-        hybrid = self._request("dj", "hybrid_worker", nproc=2, **options)
+        hybrid = self._request(
+            "dj", "hybrid_worker", nproc=2, g_kernel="spectral", **options
+        )
         stdout = io.StringIO()
         with contextlib.redirect_stdout(stdout):
             execute(

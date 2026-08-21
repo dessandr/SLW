@@ -207,6 +207,25 @@ class ExchangeEngineTests(unittest.TestCase):
                     _axis_list(namespace.axes), list(axes.replace(",", ""))
                 )
 
+    def test_scalar_dj_g_kernel_defaults_to_direct_at_kernel_boundary(self):
+        request = build_exchange_request(
+            "dj",
+            _parameters(),
+            prefix="toy",
+            savedir="/tmp/toy.save",
+        )
+        _, _, namespace = build_namespace(request)
+        self.assertEqual(namespace.g_kernel, "direct")
+
+        spectral = build_exchange_request(
+            "dj",
+            {**_parameters(), "g_kernel": "spectral"},
+            prefix="toy",
+            savedir="/tmp/toy.save",
+        )
+        _, _, spectral_namespace = build_namespace(spectral)
+        self.assertEqual(spectral_namespace.g_kernel, "spectral")
+
     def test_spinor_groupby_and_soc_card_reach_native_namespace(self):
         parameters = {
             "input_format": "wannier",

@@ -2,8 +2,8 @@
 
 This path intentionally avoids materializing legacy g_real payloads.  It
 pre-caches H(k), eigensystems, bond phases, k+q maps, and EPR g(k,q), then
-assembles the dG terms in momentum space.  dDelta terms are scaffolded but not
-included yet.
+assembles the dG terms in momentum space with either a direct full-matrix or
+an exact complete-eigenbasis projected kernel.
 """
 
 from __future__ import annotations
@@ -279,6 +279,83 @@ def _precompute_eigensystem(hk_up, hk_dn, slices, efermi):
         tr = float(np.real(np.trace(delta[sid])))
         signs[sid] = -1.0 if tr < 0.0 else 1.0
     return {"evals": evals, "coeffs": coeffs, "delta": delta, "signs": signs}
+
+
+def _rotate_g_to_eigenbasis(g_wannier, coeffs, kq_map):
+    """Rotate complete-basis ``g(k,q)`` once as ``C(k+q)^H g C(k)``.
+
+    No band selection is performed.  The q loop bounds transient memory while
+    both matrix products remain batched over the complete k mesh and use the
+    configured BLAS thread pool.
+    """
+    g = np.asarray(g_wannier, dtype=np.complex128)
+    c = np.asarray(coeffs, dtype=np.complex128)
+    kq = np.asarray(kq_map, dtype=np.int64)
+    if g.ndim != 4 or g.shape[-1] != g.shape[-2]:
+        raise ValueError(f"g_wannier must have shape (nq,nk,nw,nw), got {g.shape}")
+    nq, nk, nw, _ = g.shape
+    if c.shape != (nk, nw, nw):
+        raise ValueError(
+            f"coeffs must have shape {(nk, nw, nw)} for g_wannier, got {c.shape}"
+        )
+    if kq.shape != (nq, nk):
+        raise ValueError(f"kq_map must have shape {(nq, nk)}, got {kq.shape}")
+    if np.any(kq < 0) or np.any(kq >= nk):
+        raise ValueError("kq_map contains an out-of-range k-point index")
+
+    rotated = np.empty_like(g)
+    c_dagger = np.swapaxes(np.conjugate(c), -1, -2)
+    for iq in range(nq):
+        left = np.matmul(c_dagger[kq[iq]], g[iq])
+        rotated[iq] = np.matmul(left, c)
+    return rotated
+
+
+def _spectral_projected_blocks(
+    coeffs,
+    inverse,
+    g_band_q,
+    kq_indices,
+    slices,
+    endpoint_pairs,
+):
+    """Return exact endpoint blocks of ``G(k+q) g(k,q) G(k)``.
+
+    ``g_band_q`` must contain the complete eigenbasis rotation.  Multiplying
+    the two diagonal resolvents is elementwise, after which only requested
+    orbital-row and orbital-column blocks are assembled.  This is algebraically
+    identical to the direct full-matrix product.
+    """
+    c = np.asarray(coeffs, dtype=np.complex128)
+    inv = np.asarray(inverse, dtype=np.complex128)
+    g_band = np.asarray(g_band_q, dtype=np.complex128)
+    kq = np.asarray(kq_indices, dtype=np.int64)
+    if c.ndim != 3 or c.shape[-1] != c.shape[-2]:
+        raise ValueError(f"coeffs must have shape (nk,nw,nw), got {c.shape}")
+    nk, nw, _ = c.shape
+    if inv.shape != (nk, nw):
+        raise ValueError(f"inverse must have shape {(nk, nw)}, got {inv.shape}")
+    if g_band.shape != (nk, nw, nw):
+        raise ValueError(f"g_band_q must have shape {(nk, nw, nw)}, got {g_band.shape}")
+    if kq.shape != (nk,) or np.any(kq < 0) or np.any(kq >= nk):
+        raise ValueError(f"kq_indices must contain {nk} valid k-point indices")
+
+    pairs = tuple(dict.fromkeys((int(i), int(j)) for i, j in endpoint_pairs))
+    for site in {item for pair in pairs for item in pair}:
+        if site not in slices:
+            raise ValueError(f"missing orbital slice for magnetic site {site}")
+
+    weighted = inv[kq, :, None] * g_band * inv[:, None, :]
+    left_products = {}
+    right_factors = {}
+    blocks = {}
+    for li, lj in pairs:
+        if li not in left_products:
+            left_products[li] = np.matmul(c[kq, slices[li], :], weighted)
+        if lj not in right_factors:
+            right_factors[lj] = np.swapaxes(np.conjugate(c[:, slices[lj], :]), -1, -2)
+        blocks[(li, lj)] = np.matmul(left_products[li], right_factors[lj])
+    return blocks
 
 
 def _phase_cache_key(kind, vectors):
@@ -800,6 +877,22 @@ def _precache(args, labels, target_ids, axes, slices, pair_meta):
                     gu = g_cache[("up", ia0, ax, False)]
                     gd = g_cache[("down", ia0, ax, False)]
                 ddelta_cache[(ia0, ax)] = 0.5 * (gu - gd)
+    # Onsite-only entries have served their sole purpose in dDelta.  Do not
+    # retain them in the integration payload.
+    g_cache = {key: value for key, value in g_cache.items() if not key[3]}
+    g_kernel = str(getattr(args, "g_kernel", "direct")).lower()
+    if g_kernel not in {"direct", "spectral"}:
+        raise ValueError(f"Unsupported scalar dJ GgG kernel {g_kernel!r}")
+    if g_kernel == "spectral":
+        print(
+            "[dJ-epr-kspace] rotate complete g(k,q) cache to the electronic eigenbasis",
+            flush=True,
+        )
+        for key in tuple(g_cache):
+            spin = key[0]
+            g_cache[key] = _rotate_g_to_eigenbasis(
+                g_cache[key], eig["coeffs"][spin], kq
+            )
     return {
         "kpts": kpts,
         "qpts": qpts,
@@ -814,6 +907,7 @@ def _precache(args, labels, target_ids, axes, slices, pair_meta):
         "g": g_cache,
         "ddelta": ddelta_cache,
         "ddelta_mode": onsite_mode,
+        "g_kernel": g_kernel,
     }
 
 
@@ -828,6 +922,9 @@ def _compute_chunk(energy_chunk):
     g_cache = st["g"]
     ddelta_cache = st.get("ddelta", {})
     ddelta_mode = str(st.get("ddelta_mode", "off")).lower()
+    g_kernel = str(st.get("g_kernel", "direct")).lower()
+    if g_kernel not in {"direct", "spectral"}:
+        raise ValueError(f"Unsupported scalar dJ GgG kernel {g_kernel!r}")
     target_ids = st["target_ids"]
     axes = st["axes"]
     nk = phase_R.shape[1]
@@ -838,6 +935,10 @@ def _compute_chunk(energy_chunk):
         for ia in target_ids
         for ax in axes
     }
+    endpoint_pairs = tuple(
+        dict.fromkeys((int(meta["li"]), int(meta["lj"])) for meta in pair_meta)
+    )
+    reverse_endpoint_pairs = tuple((lj, li) for li, lj in endpoint_pairs)
 
     for z, dz in energy_chunk:
         inv_u = 1.0 / (z - eig["evals"]["up"])
@@ -878,10 +979,32 @@ def _compute_chunk(energy_chunk):
                 gd = g_cache[("down", ia, ax, False)]
                 ddelta = ddelta_cache.get((ia, ax))
                 for iq in range(nq):
-                    Gu_kq = Gu[kq_map[iq]]
-                    Gd_kq = Gd[kq_map[iq]]
-                    dGu = Gu_kq @ gu[iq] @ Gu
-                    dGd = Gd_kq @ gd[iq] @ Gd
+                    if g_kernel == "direct":
+                        Gu_kq = Gu[kq_map[iq]]
+                        Gd_kq = Gd[kq_map[iq]]
+                        dGu = Gu_kq @ gu[iq] @ Gu
+                        dGd = Gd_kq @ gd[iq] @ Gd
+                        dGu_blocks = None
+                        dGd_blocks = None
+                    else:
+                        dGu = None
+                        dGd = None
+                        dGu_blocks = _spectral_projected_blocks(
+                            eig["coeffs"]["up"],
+                            inv_u,
+                            gu[iq],
+                            kq_map[iq],
+                            slices,
+                            endpoint_pairs,
+                        )
+                        dGd_blocks = _spectral_projected_blocks(
+                            eig["coeffs"]["down"],
+                            inv_d,
+                            gd[iq],
+                            kq_map[iq],
+                            slices,
+                            reverse_endpoint_pairs,
+                        )
                     for ip, meta in enumerate(pair_meta):
                         li = int(meta["li"])
                         lj = int(meta["lj"])
@@ -889,13 +1012,21 @@ def _compute_chunk(energy_chunk):
                         sl_j = slices[lj]
                         ph = phase_R[ip] * wk
                         endpoint_phase = bond_target_q_phase[iq, ip]
-                        dGRu = np.einsum(
-                            "k,kij->ij", ph, dGu[:, sl_i, sl_j], optimize=True
+                        up_block = (
+                            dGu[:, sl_i, sl_j]
+                            if dGu is not None
+                            else dGu_blocks[(li, lj)]
                         )
+                        down_block = (
+                            dGd[:, sl_j, sl_i]
+                            if dGd is not None
+                            else dGd_blocks[(lj, li)]
+                        )
+                        dGRu = np.einsum("k,kij->ij", ph, up_block, optimize=True)
                         dGRd = endpoint_phase * np.einsum(
                             "k,kji->ji",
                             np.conjugate(ph),
-                            dGd[:, sl_j, sl_i],
+                            down_block,
                             optimize=True,
                         )
                         Di = eig["delta"][li]
@@ -1035,6 +1166,7 @@ def _compute_dj(
         "g": pre["g"],
         "ddelta": pre.get("ddelta", {}),
         "ddelta_mode": pre.get("ddelta_mode", "off"),
+        "g_kernel": pre.get("g_kernel", "direct"),
         "slices": slices,
         "pair_meta": pair_meta,
         "target_ids": target_ids,
@@ -1206,7 +1338,10 @@ def _write_outputs(
         f.write(f"# EPR up: {os.path.abspath(args.epr_up)}\n")
         f.write(f"# EPR dn: {os.path.abspath(args.epr_dn)}\n")
         f.write(f"# H unit={args.hr_unit} eph unit={args.eph_unit}\n")
-        f.write(f"# g_transform={args.g_transform} rp_idx={tuple(args.rp_idx)}\n")
+        f.write(
+            f"# g_transform={args.g_transform} g_kernel={args.g_kernel} "
+            f"rp_idx={tuple(args.rp_idx)}\n"
+        )
         f.write(f"# terms: dG + dDelta_mode={args.ddelta_mode}\n")
         f.write(
             f"# kmesh={tuple(args.kmesh)} nE={args.empoints} nproc={args.nproc} n_chunks={exe_info['n_chunks']} elapsed_s={elapsed:.2f}\n\n"
@@ -1359,6 +1494,15 @@ def _write_h5(
         )
         put_string(basic, "local_worker_backend", exe_info["local_worker_backend"])
         put_string(basic, "g_transform", args.g_transform)
+        put_string(basic, "g_kernel", getattr(args, "g_kernel", "direct"))
+        put_string(
+            basic,
+            "g_basis",
+            "complete_eigen"
+            if getattr(args, "g_kernel", "direct") == "spectral"
+            else "wannier",
+        )
+        put_string(basic, "electronic_subspace", "complete_wannier")
         put_string(basic, "ddelta_mode", getattr(args, "ddelta_mode", "off"))
         basic.create_dataset(
             "elapsed_s", data=np.array(float(elapsed), dtype=np.float64)
@@ -1544,6 +1688,7 @@ def run(args, comm=None):
             f"mpi_ranks={size} workers_per_rank={int(args.nproc)} "
             f"threads_per_worker={int(args.omp_threads)} "
             f"precache_workers={int(args.precache_workers)} "
+            f"g_kernel={args.g_kernel!s} "
             f"affinity_cpus_per_rank={available_cpus}",
             flush=True,
         )
@@ -1552,7 +1697,8 @@ def run(args, comm=None):
         f"[dJ-epr-kspace] assemble dJ: bonds={len(pair_meta)} "
         f"targets={len(target_ids)} axes={axes} nE={len(energy_mesh)} "
         f"local_nE={len(local_energy_mesh)} mpi={size} "
-        f"local_workers={int(args.nproc)} omp_threads={int(args.omp_threads)}",
+        f"local_workers={int(args.nproc)} omp_threads={int(args.omp_threads)} "
+        f"g_kernel={args.g_kernel!s}",
         flush=True,
     )
     local_info = {}
@@ -1719,6 +1865,16 @@ def main():
         choices=["kq", "k_only_rp"],
         default="kq",
         help="kq: FT ep_hop over Re and Rp; k_only_rp: keep selected Rp real-space and FT only Re",
+    )
+    ap.add_argument(
+        "--g_kernel",
+        choices=["direct", "spectral"],
+        default="direct",
+        help=(
+            "G(k+q) g(k,q) G(k) assembly: direct is the full-matrix "
+            "reference; spectral rotates g once to the complete eigenbasis "
+            "and assembles only magnetic-endpoint blocks"
+        ),
     )
     ap.add_argument("--n_shells", type=int, default=1)
     ap.add_argument("--d_max", type=float, default=20.0)

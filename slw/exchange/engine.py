@@ -348,6 +348,7 @@ def prepare_run(
                 ("local workers/rank", int(options.get("nproc", 1))),
                 ("threads/worker", int(options.get("omp_threads", 1))),
                 ("precache workers", int(options.get("precache_workers", 1))),
+                ("GgG kernel", str(options.get("g_kernel", "direct"))),
             )
         )
     summary = tuple(summary_items)

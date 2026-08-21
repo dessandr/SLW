@@ -144,6 +144,7 @@ _DJ_SCALAR_DEFAULTS: dict[str, Any] = {
     "qmesh": None,
     "rp_idx": (0, 0, 0),
     "g_transform": "kq",
+    "g_kernel": "direct",
     "n_shells": 1,
     "d_max": 20.0,
     "emin": -25.0,

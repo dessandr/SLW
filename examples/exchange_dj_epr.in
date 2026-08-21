@@ -27,6 +27,9 @@
   targets = 'all',
   axes = 'xyz',
   g_transform = 'kq',
+  ! direct is the full-matrix reference. spectral is an exact full-band
+  ! eigenbasis assembly that computes only magnetic-endpoint GgG blocks.
+  g_kernel = 'direct',
   ddelta_mode = 'off',
   n_shells = 1,
   integrator = 'contour',

@@ -282,12 +282,14 @@ class ExchangeConfigTests(unittest.TestCase):
                 qmesh=[2, 1, 1],
                 nproc=4,
                 ddelta_mode="onsite",
+                g_kernel="spectral",
             ),
             prefix="d",
             savedir="save",
         )
         self.assertEqual(request.options["qmesh"], (2, 1, 1))
         self.assertEqual(request.options["nproc"], 4)
+        self.assertEqual(request.options["g_kernel"], "spectral")
         self.assertEqual(pickle.loads(pickle.dumps(request)), request)
 
         with self.assertRaisesRegex(ExchangeInputError, "unknown or unsupported"):
@@ -373,6 +375,11 @@ class ExchangeConfigTests(unittest.TestCase):
             ("j", {"input_format": "epr", "integrator": "garbage"}, "integrator"),
             ("j", {"input_format": "epr", "nproc": 0}, "nproc"),
             ("dj", {"input_format": "epr", "qmesh": [2, 0, 1]}, "qmesh"),
+            (
+                "dj",
+                {"input_format": "epr", "g_kernel": "truncated"},
+                "g_kernel",
+            ),
             (
                 "j_tensor",
                 {"input_format": "epr", "spin_direction": [0.0, 0.0, 0.0]},

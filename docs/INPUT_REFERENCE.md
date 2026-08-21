@@ -516,7 +516,13 @@ Native engine: `slw.exchange.engine`; numerical kernel:
 every axis. `targets` defaults to every crystal atom. With
 `g_transform='k_only_rp'`, only the selected `rp_idx` is retained instead of a
 q mesh. Target atoms, displacement axes, q mesh, and Rp selection should be
-explicit for production work.
+explicit for production work. `g_kernel='direct'` is the full-Wannier-matrix
+reference implementation. `g_kernel='spectral'` performs the exact identity
+`G(k+q) g(k,q) G(k) = C(k+q) D(k+q) [C(k+q)^H g(k,q) C(k)] D(k) C(k)^H`
+using every electronic eigenstate, then assembles only the requested magnetic
+endpoint blocks. It does not truncate bands or change the physical expression.
+Converged production comparisons against `direct` are recommended before
+making `spectral` the default.
 
 **Outputs:** `${savedir}/${prefix}.dj.txt`, `.all_bonds.tsv`, and `.h5`. HDF5
 contains displacement metadata and target/bond datasets shaped `(nRp, 3)` in
@@ -543,6 +549,7 @@ Native engine: `slw.exchange.engine`; numerical kernel:
 | `qmesh` | int[3] | no | none / runtime | Output q mesh; default EPR basic_data/qc_dim<br>CLI aliases: `--qmesh` |
 | `rp_idx` | int[3] | no | `[0, 0, 0]` | Advanced native-kernel option.<br>CLI aliases: `--rp_idx` |
 | `g_transform` | enum {kq, k_only_rp} | no | `kq` | kq: FT ep_hop over Re and Rp; k_only_rp: keep selected Rp real-space and FT only Re<br>CLI aliases: `--g_transform` |
+| `g_kernel` | enum {direct, spectral} | no | `direct` | Select exact GgG assembly. `direct` forms the full Wannier-space product; `spectral` rotates g once in the complete eigenbasis and forms only magnetic-endpoint blocks.<br>CLI aliases: `--g_kernel` |
 | `n_shells` | int | no | `1` | Advanced native-kernel option.<br>CLI aliases: `--n_shells` |
 | `d_max` | float | no | `20.0` | Advanced native-kernel option.<br>CLI aliases: `--d_max` |
 | `emin` | float | no | `-25.0` | Advanced native-kernel option.<br>CLI aliases: `--emin` |
