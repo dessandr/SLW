@@ -282,10 +282,20 @@ $$
 \mathbf D=-\frac{\boldsymbol\Sigma-\boldsymbol\Sigma^\dagger}{2i}.
 $$
 
-The implementation vectorizes mode/channel contractions and chunks q/bond or
-q/channel axes by explicit input sizes. MPI decomposition is over independent
-external k points with deterministic normalized weights and rank-0
-metadata/output coordination.
+The production lifetime path distributes the `dJ/du` to phonon-mode coupling
+contraction over q points, assembles it deterministically, and broadcasts the
+completed `Lambda(q,mode,bond)` cache. It then forms the exact uniform
+`lcm(kmesh,qmesh)` union mesh. Its LSWT eigensystems are likewise distributed
+across MPI ranks, assembled, and broadcast once, so repeated `k+q` points are
+never diagonalized separately for every external k. External k points then
+remain the independent MPI work axis. Within each rank, a q block is transformed
+into the band basis and contracted immediately into the on-shell self-energy;
+the full `(Nq,Nmode,Ninternal,Nexternal)` vertex is not materialized.
+Mode/channel contractions and q/bond or q/channel chunks remain vectorized, q
+weights are normalized globally before slicing, and only rank zero coordinates
+final metadata/output. The two broadcast caches are currently replicated once
+per MPI rank; their actual rank and maximum-node footprints are printed at run
+time and recorded in output metadata.
 
 ## Native lifetime output v1
 
@@ -296,12 +306,12 @@ The registered lifetime product records:
 - HWHM, FWHM, rate, and lifetime with the conventions and units above;
 - temperature, broadening, spin state, exchange/dJ/phonon source paths,
   exchange representation/kernel, derivative ASR outcome, phonon mass/schema
-  convention, k mesh/shift, and MPI size.
+  convention, k mesh/shift, union `k+q` mesh, streaming algorithm, and MPI size.
 
-Full signed internal-channel arrays, q weights, and optional q/mode-resolved
-contributions are retained inside the typed calculation boundary but are not
-yet serialized in output schema v1. Adding them requires a schema-version
-increment.
+The separate typed diagnostic API can still materialize full signed
+internal-channel arrays and q/mode-resolved contributions for regression work;
+the production streaming path does not retain them. Serializing such optional
+diagnostics requires a schema-version increment.
 
 One canonical scientific container and a small human-readable run summary are
 preferred over per-rank final files. Parallel shards are temporary products
@@ -346,7 +356,9 @@ input file:
 `execution='auto'` selects all discovered MPI ranks. AFM input changes
 `magnetic_order` to `collinear_afm` and, in the initial gate, supplies exactly
 two opposite spin-pattern entries. `kshift` is deliberately explicit because
-an exact AFM Goldstone point requires a separate regularization policy.
+an exact AFM Goldstone point requires a separate regularization policy. Set at
+least one of `vertex_q_chunk_size` or `self_energy_q_chunk_size` to bound the
+largest streamed q block; when both are present the smaller value is used.
 
 ## Migration roadmap and legacy boundary
 

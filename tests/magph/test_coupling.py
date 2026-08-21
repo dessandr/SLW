@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+import concurrent.futures
 import unittest
 from pathlib import Path
 
 import numpy as np
 
-from slw.magph.coupling import build_mode_resolved_isotropic_derivative
+from slw.cli.mpi import MPIContext
+from slw.magph.coupling import (
+    build_mode_resolved_isotropic_derivative,
+    build_mode_resolved_isotropic_derivative_distributed,
+)
 from slw.magph.derivative import ExchangeDerivativeModel
 from slw.magph.model import (
     ExchangeConvention,
@@ -20,6 +25,7 @@ from slw.magph.phonon import (
     PhononMassUnit,
     zero_point_displacements,
 )
+from tests.magph.test_parallel import _CollectiveState, _ThreadComm
 
 
 def _exchange() -> ExchangeModel:
@@ -125,6 +131,44 @@ class ModeResolvedCouplingTests(unittest.TestCase):
             bond_chunk_size=1,
         )
         np.testing.assert_array_equal(full.lambda_mev, chunked.lambda_mev)
+
+    def test_two_rank_q_distribution_matches_serial_cache(self) -> None:
+        exchange = _exchange()
+        phonons = _phonons()
+        zero_point = zero_point_displacements(phonons)
+        derivative = _derivative(exchange)
+        serial = build_mode_resolved_isotropic_derivative(
+            exchange,
+            derivative,
+            phonons,
+            zero_point,
+            q_chunk_size=1,
+            bond_chunk_size=1,
+        )
+        state = _CollectiveState(2)
+
+        def run_rank(rank: int):
+            return build_mode_resolved_isotropic_derivative_distributed(
+                exchange,
+                derivative,
+                phonons,
+                zero_point,
+                q_chunk_size=1,
+                bond_chunk_size=1,
+                context=MPIContext(
+                    comm=_ThreadComm(state, rank),
+                    rank=rank,
+                    size=2,
+                ),
+            )
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+            futures = [executor.submit(run_rank, rank) for rank in range(2)]
+            distributed = [future.result(timeout=5.0) for future in futures]
+
+        for result in distributed:
+            np.testing.assert_array_equal(result.lambda_mev, serial.lambda_mev)
+            self.assertFalse(result.lambda_mev.flags.writeable)
 
     def test_partial_target_coverage_is_fail_closed_by_default(self) -> None:
         exchange = _exchange()

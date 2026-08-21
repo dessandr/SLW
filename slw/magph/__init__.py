@@ -1,15 +1,16 @@
 """Native public API for exchange-based magnon--phonon observables.
 
 The array kernels and strict data contracts here are independent of the
-quarantined compatibility drivers under :mod:`slw.magph.legacy`.  The current
-``slw_magph.x`` registry remains compatibility-backed until native LSWT and
-vertex construction complete their FM/AFM parity gates.
+quarantined compatibility drivers under :mod:`slw.magph.legacy`.  Native
+``calculation='lifetime'`` has completed its initial FM/AFM gate; unrelated
+registry calculations remain compatibility-backed until replaced explicitly.
 """
 
 from .config import MagphInputError, MagphLifetimeRequest, build_lifetime_request
 from .coupling import (
     ModeResolvedExchangeDerivative,
     build_mode_resolved_isotropic_derivative,
+    build_mode_resolved_isotropic_derivative_distributed,
 )
 from .derivative import (
     DerivativeASRPolicy,
@@ -25,6 +26,7 @@ from .lifetime import (
     linewidth_observables,
 )
 from .lswt import MagnonSpectrum, solve_isotropic_lswt, uniform_fractional_mesh
+from .mesh import MagnonMeshCache, build_magnon_mesh_cache
 from .model import (
     ExchangeCapability,
     ExchangeConvention,
@@ -63,6 +65,7 @@ from .screening import load_exchange_h5, screen_magnetic_configuration
 from .self_energy import (
     OnShellSelfEnergyResult,
     SelfEnergyResult,
+    accumulate_onshell_self_energy_diagonal_block,
     bose_occupation,
     compute_onshell_self_energy_diagonal,
     compute_retarded_self_energy,
@@ -71,7 +74,9 @@ from .self_energy import (
 from .vertex import (
     MagnonPhononScatteringProblem,
     build_bare_isotropic_vertex,
+    build_bare_isotropic_vertex_block,
     build_scattering_problem,
+    iter_bare_isotropic_vertex_blocks,
 )
 
 __all__ = (
@@ -95,6 +100,7 @@ __all__ = (
     "LifetimeResult",
     "MagneticConfiguration",
     "MagneticOrder",
+    "MagnonMeshCache",
     "MagnonPhononScatteringProblem",
     "MagnonSpectrum",
     "MagphInputError",
@@ -107,11 +113,15 @@ __all__ = (
     "PhononMassUnit",
     "SelfEnergyResult",
     "ZeroPointDisplacement",
+    "accumulate_onshell_self_energy_diagonal_block",
     "balanced_partition",
     "bose_occupation",
     "build_bare_isotropic_vertex",
+    "build_bare_isotropic_vertex_block",
     "build_lifetime_request",
+    "build_magnon_mesh_cache",
     "build_mode_resolved_isotropic_derivative",
+    "build_mode_resolved_isotropic_derivative_distributed",
     "build_scattering_problem",
     "compute_lifetime",
     "compute_lifetime_grid",
@@ -119,6 +129,7 @@ __all__ = (
     "compute_retarded_self_energy",
     "distributed_array_map",
     "evaluate_scattering_problem",
+    "iter_bare_isotropic_vertex_blocks",
     "lifetime_from_onshell_self_energy",
     "linewidth_observables",
     "load_exchange_derivative_h5",

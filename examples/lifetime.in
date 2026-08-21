@@ -21,8 +21,12 @@
   temperature_k = 300.0,
   broadening_mev = 0.2,
   asr_policy = 'fail',
+  ! q points are distributed across MPI ranks; this bounds each rank's local
+  ! dJ/du-to-mode contraction block.
   q_chunk_size = 64,
   bond_chunk_size = 64,
+  ! The production path streams the smaller of these two q blocks directly
+  ! into the on-shell self-energy; it never allocates the full vertex tensor.
   vertex_q_chunk_size = 64,
   self_energy_q_chunk_size = 64,
   output = '${savedir}/sample.lifetime.npz'

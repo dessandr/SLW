@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import numpy as np
@@ -15,10 +16,20 @@ from .lifetime import (
     lifetime_from_onshell_self_energy,
     linewidth_observables,
 )
+from .mesh import MagnonMeshCache, build_magnon_mesh_cache
 from .model import ExchangeModel, MagneticConfiguration
 from .parallel import DistributedArrayResult, distributed_array_map
-from .self_energy import OnShellSelfEnergyResult, compute_onshell_self_energy_diagonal
-from .vertex import MagnonPhononScatteringProblem, build_scattering_problem
+from .self_energy import (
+    OnShellSelfEnergyResult,
+    accumulate_onshell_self_energy_diagonal_block,
+    compute_onshell_self_energy_diagonal,
+    normalize_q_weights,
+)
+from .vertex import (
+    MagnonPhononScatteringProblem,
+    build_scattering_problem,
+    iter_bare_isotropic_vertex_blocks,
+)
 
 
 def _readonly(value: object, *, dtype: np.dtype) -> np.ndarray:
@@ -189,8 +200,12 @@ def compute_lifetime_grid(
     self_energy_q_chunk_size: int | None = None,
     channel_chunk_size: int | None = None,
     lswt_options: dict[str, float] | None = None,
+    k_mesh_shape: tuple[int, int, int] | None = None,
+    kshift_grid: ArrayLike | None = None,
+    magnon_cache: MagnonMeshCache | None = None,
     context: MPIContext | None = None,
     root: int = 0,
+    progress: Callable[[int, int], None] | None = None,
 ) -> DistributedLifetimeGridResult:
     """Compute physical magnon lifetimes with external-k MPI distribution.
 
@@ -205,32 +220,112 @@ def compute_lifetime_grid(
     if not np.all(np.isfinite(k_points)):
         raise ValueError("k_points_frac contains non-finite values")
     physical_count = configuration.n_magnetic_sites
+    normalized_weights = normalize_q_weights(q_weights, coupling.nq)
+    if magnon_cache is not None:
+        if magnon_cache.nk != k_points.shape[0] or magnon_cache.nq != coupling.nq:
+            raise ValueError("magnon_cache does not match the k/q calculation mesh")
+        if magnon_cache.nchannel != configuration.n_channels:
+            raise ValueError("magnon_cache does not match the magnetic channels")
+    elif k_mesh_shape is not None or kshift_grid is not None:
+        if k_mesh_shape is None or kshift_grid is None:
+            raise ValueError("k_mesh_shape and kshift_grid must be supplied together")
+        magnon_cache = build_magnon_mesh_cache(
+            exchange,
+            configuration,
+            coupling,
+            k_points,
+            k_mesh_shape=k_mesh_shape,
+            kshift_grid=kshift_grid,
+            context=context,
+            root=root,
+            lswt_options=lswt_options,
+        )
+
+    q_blocks = [
+        value
+        for value in (vertex_q_chunk_size, self_energy_q_chunk_size)
+        if value is not None
+    ]
+    streaming_q_block = (
+        coupling.nq if not q_blocks else min(int(value) for value in q_blocks)
+    )
+    if streaming_q_block < 1:
+        raise ValueError("streaming q block size must be positive")
+
+    def evaluate_streaming(global_index: int) -> tuple[np.ndarray, np.ndarray]:
+        if magnon_cache is None:  # pragma: no cover - caller branch guard
+            raise RuntimeError("streaming lifetime evaluation lacks a magnon cache")
+        external_union = magnon_cache.external_union_index(global_index)
+        external_energy = magnon_cache.signed_energies_mev[
+            external_union, :physical_count
+        ]
+        external_transform = magnon_cache.transformation[
+            external_union, :, :physical_count
+        ]
+        sigma = np.zeros(physical_count, dtype=np.complex128)
+        for q_start, q_stop, bare in iter_bare_isotropic_vertex_blocks(
+            exchange,
+            configuration,
+            coupling,
+            k_points[global_index],
+            q_chunk_size=streaming_q_block,
+        ):
+            internal_union = magnon_cache.internal_union_indices(
+                global_index, q_start, q_stop
+            )
+            internal_transform = magnon_cache.transformation[internal_union]
+            band_vertex = np.einsum(
+                "qai,qmij,jb->qmab",
+                np.swapaxes(internal_transform.conj(), 1, 2),
+                bare,
+                external_transform,
+                optimize=True,
+            )
+            sigma += accumulate_onshell_self_energy_diagonal_block(
+                external_energy,
+                band_vertex,
+                magnon_cache.signed_energies_mev[internal_union],
+                coupling.phonon_energy_mev[q_start:q_stop],
+                temperature_k=temperature_k,
+                broadening_mev=broadening_mev,
+                metric=magnon_cache.metric,
+                normalized_q_weights=normalized_weights[q_start:q_stop],
+                metric_energy_tolerance_mev=metric_energy_tolerance_mev,
+                channel_chunk_size=channel_chunk_size,
+            )
+        return external_energy, sigma
 
     def worker(indices: NDArray[np.int64]) -> NDArray[np.float64]:
         packed = np.empty((indices.size, physical_count, 3), dtype=np.float64)
         for local_index, global_index in enumerate(indices):
-            problem = build_scattering_problem(
-                exchange,
-                configuration,
-                coupling,
-                k_points[int(global_index)],
-                q_chunk_size=vertex_q_chunk_size,
-                lswt_options=lswt_options,
-            )
-            evaluated = evaluate_scattering_problem(
-                problem,
-                temperature_k=temperature_k,
-                broadening_mev=broadening_mev,
-                q_weights=q_weights,
-                metric_energy_tolerance_mev=metric_energy_tolerance_mev,
-                negative_tolerance_mev=negative_tolerance_mev,
-                q_chunk_size=self_energy_q_chunk_size,
-                channel_chunk_size=channel_chunk_size,
-            )
-            sigma = evaluated.physical_sigma_mev
-            packed[local_index, :, 0] = problem.external_energy_mev[:physical_count]
+            if magnon_cache is None:
+                problem = build_scattering_problem(
+                    exchange,
+                    configuration,
+                    coupling,
+                    k_points[int(global_index)],
+                    q_chunk_size=vertex_q_chunk_size,
+                    lswt_options=lswt_options,
+                )
+                evaluated = evaluate_scattering_problem(
+                    problem,
+                    temperature_k=temperature_k,
+                    broadening_mev=broadening_mev,
+                    q_weights=q_weights,
+                    metric_energy_tolerance_mev=metric_energy_tolerance_mev,
+                    negative_tolerance_mev=negative_tolerance_mev,
+                    q_chunk_size=self_energy_q_chunk_size,
+                    channel_chunk_size=channel_chunk_size,
+                )
+                energy = problem.external_energy_mev[:physical_count]
+                sigma = evaluated.physical_sigma_mev
+            else:
+                energy, sigma = evaluate_streaming(int(global_index))
+            packed[local_index, :, 0] = energy
             packed[local_index, :, 1] = sigma.real
             packed[local_index, :, 2] = sigma.imag
+            if progress is not None:
+                progress(local_index + 1, indices.size)
         return packed
 
     distributed: DistributedArrayResult = distributed_array_map(

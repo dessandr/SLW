@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import sys
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
+from socket import gethostname
 from typing import Any
 
 import numpy as np
@@ -15,9 +17,10 @@ from slw.cli.native import NativeExecutionPlan
 from slw.cli.schema import RunConfig
 
 from .config import MagphInputError, MagphLifetimeRequest, build_lifetime_request
-from .coupling import build_mode_resolved_isotropic_derivative
+from .coupling import build_mode_resolved_isotropic_derivative_distributed
 from .derivative import load_exchange_derivative_h5
 from .lswt import uniform_fractional_mesh
+from .mesh import build_magnon_mesh_cache
 from .output import write_lifetime_npz
 from .parallel import CollectiveExecutionError, RankFailure
 from .phonon import load_phonon_cache, zero_point_displacements
@@ -64,15 +67,6 @@ def _load_native_problem(request: MagphLifetimeRequest) -> tuple[Any, ...]:
         spin_magnitudes=spin_magnitudes,
         quantization_axis=request.quantization_axis,
     )
-    coupling = build_mode_resolved_isotropic_derivative(
-        exchange,
-        derivative,
-        phonons,
-        zero_point,
-        require_complete_targets=request.require_complete_targets,
-        q_chunk_size=request.q_chunk_size,
-        bond_chunk_size=request.bond_chunk_size,
-    )
     k_points = uniform_fractional_mesh(request.kmesh, shift=request.kshift)
     return (
         exchange,
@@ -80,8 +74,8 @@ def _load_native_problem(request: MagphLifetimeRequest) -> tuple[Any, ...]:
         derivative,
         derivative_report,
         phonons,
+        zero_point,
         configuration,
-        coupling,
         k_points,
     )
 
@@ -104,6 +98,41 @@ def _load_collectively(
     return loaded
 
 
+def _array_storage_bytes(*values: Any) -> int:
+    return sum(int(np.asarray(value).nbytes) for value in values)
+
+
+def _format_storage(byte_count: int) -> str:
+    value = float(byte_count)
+    units = ("B", "KiB", "MiB", "GiB", "TiB")
+    unit = units[0]
+    for candidate in units:
+        unit = candidate
+        if value < 1024.0 or candidate == units[-1]:
+            break
+        value /= 1024.0
+    return f"{value:.2f} {unit}"
+
+
+def _cache_storage(coupling: Any, magnon_cache: Any) -> tuple[int, int]:
+    coupling_bytes = _array_storage_bytes(
+        coupling.q_points_frac,
+        coupling.phonon_energy_mev,
+        coupling.lambda_mev,
+        coupling.target_atom_indices,
+        coupling.frequency_regularized,
+    )
+    lswt_bytes = _array_storage_bytes(
+        magnon_cache.union_points_frac,
+        magnon_cache.signed_energies_mev,
+        magnon_cache.transformation,
+        magnon_cache.metric,
+        magnon_cache.external_k_grid_indices,
+        magnon_cache.q_grid_indices,
+    )
+    return coupling_bytes, lswt_bytes
+
+
 def _output_metadata(
     request: MagphLifetimeRequest,
     *,
@@ -113,8 +142,11 @@ def _output_metadata(
     derivative_report: Any,
     phonons: Any,
     configuration: Any,
+    coupling: Any,
+    magnon_cache: Any,
     mpi_size: int,
 ) -> dict[str, Any]:
+    coupling_bytes, lswt_bytes = _cache_storage(coupling, magnon_cache)
     return {
         "calculation": "lifetime",
         "exchange_h5": str(request.exchange_h5),
@@ -157,6 +189,26 @@ def _output_metadata(
             "self_energy_q": request.self_energy_q_chunk_size,
             "self_energy_channel": request.channel_chunk_size,
         },
+        "algorithm": {
+            "coupling": "mpi_q_distributed_cache",
+            "lswt": "uniform_k_plus_q_union_cache",
+            "vertex_self_energy": "q_block_streaming",
+            "full_vertex_materialized": False,
+            "mpi_distribution": "external_k",
+        },
+        "union_kq_mesh": [
+            int(np.lcm(k_value, q_value))
+            for k_value, q_value in zip(
+                request.kmesh,
+                derivative.q_mesh_shape,
+                strict=True,
+            )
+        ],
+        "cache_bytes_per_rank": {
+            "coupling": coupling_bytes,
+            "lswt": lswt_bytes,
+            "total": coupling_bytes + lswt_bytes,
+        },
         "mpi_size": int(mpi_size),
     }
 
@@ -190,18 +242,91 @@ def run_lifetime(
                 derivative,
                 derivative_report,
                 phonons,
+                zero_point,
                 configuration,
-                coupling,
                 k_points,
             ) = _load_collectively(request, mpi)
         logger.info(f"magnetic order = {configuration.order.value}")
         logger.info(f"magnetic sites = {configuration.n_magnetic_sites}")
         logger.info(f"k-point count  = {k_points.shape[0]}")
-        logger.info(f"phonon q count = {coupling.nq}")
+        logger.info(f"phonon q count = {phonons.nq}")
+
+        with logger.phase(
+            "coupling_cache",
+            label="Building MPI-distributed mode coupling cache",
+        ):
+            coupling = build_mode_resolved_isotropic_derivative_distributed(
+                exchange,
+                derivative,
+                phonons,
+                zero_point,
+                require_complete_targets=request.require_complete_targets,
+                q_chunk_size=request.q_chunk_size,
+                bond_chunk_size=request.bond_chunk_size,
+                context=mpi,
+            )
+        union_mesh = tuple(
+            int(np.lcm(k_value, q_value))
+            for k_value, q_value in zip(
+                request.kmesh,
+                derivative.q_mesh_shape,
+                strict=True,
+            )
+        )
+        logger.info(
+            "unique k+q mesh = "
+            + " x ".join(map(str, union_mesh))
+            + f" ({int(np.prod(union_mesh))} LSWT points)"
+        )
         logger.info(
             "k distribution = balanced contiguous rank blocks; "
-            "q/mode contraction = rank-local vectorized"
+            "vertex/self-energy = rank-local q-block streaming"
         )
+
+        with logger.phase(
+            "lswt_cache",
+            label="Precomputing unique k+q magnon mesh",
+        ):
+            magnon_cache = build_magnon_mesh_cache(
+                exchange,
+                configuration,
+                coupling,
+                k_points,
+                k_mesh_shape=request.kmesh,
+                kshift_grid=request.kshift,
+                context=mpi,
+            )
+
+        coupling_bytes, lswt_bytes = _cache_storage(coupling, magnon_cache)
+        cache_bytes_per_rank = coupling_bytes + lswt_bytes
+        hostnames = mpi.allgather(gethostname())
+        maximum_ranks_per_node = max(Counter(hostnames).values())
+        logger.info(
+            "persistent cache/rank = coupling "
+            f"{_format_storage(coupling_bytes)} + LSWT "
+            f"{_format_storage(lswt_bytes)} = "
+            f"{_format_storage(cache_bytes_per_rank)}"
+        )
+        logger.info(
+            "maximum replicated cache/node = "
+            f"{_format_storage(cache_bytes_per_rank * maximum_ranks_per_node)} "
+            f"({maximum_ranks_per_node} rank(s)/node)"
+        )
+
+        def report_progress(completed: int, total: int) -> None:
+            if total < 1:
+                return
+            label = (
+                "external k (balanced-rank estimate)" if mpi.size > 1 else "external k"
+            )
+            logger.progress(
+                label,
+                completed,
+                total,
+                every=max(1, total // 20),
+                min_interval=1.0,
+                force=completed == total,
+            )
 
         with logger.phase(
             "self_energy",
@@ -219,7 +344,9 @@ def run_lifetime(
                 vertex_q_chunk_size=request.vertex_q_chunk_size,
                 self_energy_q_chunk_size=request.self_energy_q_chunk_size,
                 channel_chunk_size=request.channel_chunk_size,
+                magnon_cache=magnon_cache,
                 context=mpi,
+                progress=report_progress,
             )
 
         output_failure: RankFailure | None = None
@@ -235,6 +362,8 @@ def run_lifetime(
                     derivative_report=derivative_report,
                     phonons=phonons,
                     configuration=configuration,
+                    coupling=coupling,
+                    magnon_cache=magnon_cache,
                     mpi_size=mpi.size,
                 )
                 with logger.phase("output", label="Writing lifetime output"):

@@ -57,6 +57,7 @@ NATIVE_MODULES = {
     "engine.py",
     "lifetime.py",
     "lswt.py",
+    "mesh.py",
     "model.py",
     "output.py",
     "parallel.py",

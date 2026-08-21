@@ -433,34 +433,17 @@ def compute_onshell_self_energy_diagonal(
 
     for q_start in range(0, nq, q_block):
         q_stop = min(q_start + q_block, nq)
-        vertex_q = vertex[q_start:q_stop]
-        energy_q = internal_energy[q_start:q_stop, None, :]
-        phonon_q = phonon_energy[q_start:q_stop, :, None]
-        occupation_internal = bose_occupation(energy_q, temperature)
-        occupation_phonon = bose_occupation(phonon_q, temperature)
-        weighted_metric = (
-            weights[q_start:q_stop, None, None] * metric_diag[None, None, :]
+        sigma_diagonal += _onshell_diagonal_partial_validated(
+            external_energy,
+            vertex[q_start:q_stop],
+            internal_energy[q_start:q_stop],
+            phonon_energy[q_start:q_stop],
+            temperature_k=temperature,
+            broadening_mev=broadening,
+            metric=metric_diag,
+            normalized_q_weights=weights[q_start:q_stop],
+            channel_chunk_size=channel_block,
         )
-
-        for channel_start in range(0, nexternal, channel_block):
-            channel_stop = min(channel_start + channel_block, nexternal)
-            frequency = external_energy[channel_start:channel_stop, None, None, None]
-            denominator_emission = (
-                frequency + 1j * broadening - energy_q[None] - phonon_q[None]
-            )
-            denominator_absorption = (
-                frequency + 1j * broadening - energy_q[None] + phonon_q[None]
-            )
-            thermal = weighted_metric[None] * (
-                (occupation_phonon[None] + 1.0 + occupation_internal[None])
-                / denominator_emission
-                + (occupation_phonon[None] - occupation_internal[None])
-                / denominator_absorption
-            )
-            vertex_squared = np.abs(vertex_q[..., channel_start:channel_stop]) ** 2
-            sigma_diagonal[channel_start:channel_stop] += np.einsum(
-                "cqvl,qvlc->c", thermal, vertex_squared, optimize=True
-            )
 
     return OnShellSelfEnergyResult(
         external_energy_mev=_readonly_copy(external_energy, dtype=np.dtype(np.float64)),
@@ -476,9 +459,131 @@ def compute_onshell_self_energy_diagonal(
     )
 
 
+def _onshell_diagonal_partial_validated(
+    external_energy: np.ndarray,
+    vertex: np.ndarray,
+    internal_energy: np.ndarray,
+    phonon_energy: np.ndarray,
+    *,
+    temperature_k: float,
+    broadening_mev: float,
+    metric: np.ndarray,
+    normalized_q_weights: np.ndarray,
+    channel_chunk_size: int,
+) -> np.ndarray:
+    """Accumulate one already-validated q block with global q weights."""
+
+    nexternal = external_energy.size
+    energy_q = internal_energy[:, None, :]
+    phonon_q = phonon_energy[:, :, None]
+    occupation_internal = bose_occupation(energy_q, temperature_k)
+    occupation_phonon = bose_occupation(phonon_q, temperature_k)
+    weighted_metric = normalized_q_weights[:, None, None] * metric[None, None, :]
+    partial = np.zeros(nexternal, dtype=np.complex128)
+    for channel_start in range(0, nexternal, channel_chunk_size):
+        channel_stop = min(channel_start + channel_chunk_size, nexternal)
+        frequency = external_energy[channel_start:channel_stop, None, None, None]
+        denominator_emission = (
+            frequency + 1j * broadening_mev - energy_q[None] - phonon_q[None]
+        )
+        denominator_absorption = (
+            frequency + 1j * broadening_mev - energy_q[None] + phonon_q[None]
+        )
+        thermal = weighted_metric[None] * (
+            (occupation_phonon[None] + 1.0 + occupation_internal[None])
+            / denominator_emission
+            + (occupation_phonon[None] - occupation_internal[None])
+            / denominator_absorption
+        )
+        vertex_squared = np.abs(vertex[..., channel_start:channel_stop]) ** 2
+        partial[channel_start:channel_stop] += np.einsum(
+            "cqvl,qvlc->c", thermal, vertex_squared, optimize=True
+        )
+    return partial
+
+
+def accumulate_onshell_self_energy_diagonal_block(
+    external_energy_mev: object,
+    vertex_mev: object,
+    internal_energy_mev: object,
+    phonon_energy_mev: object,
+    *,
+    temperature_k: float,
+    broadening_mev: float,
+    metric: object,
+    normalized_q_weights: object,
+    metric_energy_tolerance_mev: float = 0.0,
+    channel_chunk_size: int | None = None,
+) -> np.ndarray:
+    """Return a partial on-shell diagonal for one streaming q block.
+
+    ``normalized_q_weights`` must be sliced from one globally normalized q
+    quadrature.  It is deliberately not renormalized within the block.
+    """
+
+    external_energy = _validate_real_array(
+        "external_energy_mev", external_energy_mev, ndim=1
+    )
+    broadening = _validate_positive_scalar("broadening_mev", broadening_mev)
+    temperature = _validate_nonnegative_scalar("temperature_k", temperature_k)
+    metric_tolerance = _validate_nonnegative_scalar(
+        "metric_energy_tolerance_mev", metric_energy_tolerance_mev
+    )
+    vertex = np.asarray(vertex_mev, dtype=np.complex128)
+    if vertex.ndim != 4 or any(size < 1 for size in vertex.shape):
+        raise ValueError(
+            "vertex_mev must have nonempty shape (nq_block,nmode,ninternal,nexternal)"
+        )
+    if not np.all(np.isfinite(vertex)):
+        raise ValueError("vertex_mev contains non-finite values")
+    nq, nmode, ninternal, nexternal = vertex.shape
+    if external_energy.shape != (nexternal,):
+        raise ValueError("external_energy_mev does not match the vertex")
+    internal_energy = _validate_real_array(
+        "internal_energy_mev", internal_energy_mev, ndim=2
+    )
+    if internal_energy.shape != (nq, ninternal):
+        raise ValueError("internal_energy_mev does not match the vertex")
+    phonon_energy = _validate_real_array("phonon_energy_mev", phonon_energy_mev, ndim=2)
+    if phonon_energy.shape != (nq, nmode):
+        raise ValueError("phonon_energy_mev does not match the vertex")
+    if np.any(phonon_energy < 0.0) or (
+        temperature > 0.0 and np.any(phonon_energy <= 0.0)
+    ):
+        raise ValueError("phonon_energy_mev contains an invalid mode")
+    metric_diag = _validate_real_array("metric", metric, ndim=1)
+    if metric_diag.shape != (ninternal,) or not np.all(
+        np.isin(metric_diag, (-1.0, 1.0))
+    ):
+        raise ValueError("metric must contain one +/-1 value per internal channel")
+    metric_energy = internal_energy * metric_diag[None, :]
+    if float(np.min(metric_energy)) < -metric_tolerance:
+        raise ValueError("internal energies are inconsistent with the BdG metric")
+    weights = _validate_real_array("normalized_q_weights", normalized_q_weights, ndim=1)
+    if weights.shape != (nq,) or np.any(weights < 0.0):
+        raise ValueError("normalized_q_weights must be non-negative per q point")
+    channel_block = _validate_chunk_size(
+        "channel_chunk_size", channel_chunk_size, nexternal
+    )
+    result = _onshell_diagonal_partial_validated(
+        external_energy,
+        vertex,
+        internal_energy,
+        phonon_energy,
+        temperature_k=temperature,
+        broadening_mev=broadening,
+        metric=metric_diag,
+        normalized_q_weights=weights,
+        channel_chunk_size=channel_block,
+    )
+    result.setflags(write=False)
+    return result
+
+
 __all__ = [
     "OnShellSelfEnergyResult",
     "SelfEnergyResult",
+    "accumulate_onshell_self_energy_diagonal_block",
     "bose_occupation",
     "compute_onshell_self_energy_diagonal",
     "compute_retarded_self_energy",

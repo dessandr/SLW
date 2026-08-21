@@ -5,6 +5,7 @@ import numpy as np
 from slw.core.constants import KB_MEV_PER_K
 from slw.magph.legacy.numerics import compute_self_energy_at_frequencies
 from slw.magph.self_energy import (
+    accumulate_onshell_self_energy_diagonal_block,
     bose_occupation,
     compute_onshell_self_energy_diagonal,
     compute_retarded_self_energy,
@@ -328,6 +329,44 @@ class RetardedSelfEnergyTests(unittest.TestCase):
         np.testing.assert_allclose(
             direct.gamma_hwhm_mev,
             -np.imag(expected),
+            rtol=2.0e-13,
+            atol=2.0e-13,
+        )
+
+    def test_streamed_q_blocks_preserve_global_quadrature(self):
+        _, vertex, internal, phonon, metric, weights = _random_problem(913)
+        external = np.array([0.8, 2.3, 6.1])
+        normalized_weights = normalize_q_weights(weights, vertex.shape[0])
+        direct = compute_onshell_self_energy_diagonal(
+            external,
+            vertex,
+            internal,
+            phonon,
+            temperature_k=42.0,
+            broadening_mev=0.11,
+            metric=metric,
+            q_weights=weights,
+            q_chunk_size=2,
+            channel_chunk_size=2,
+        )
+
+        streamed = np.zeros(external.size, dtype=np.complex128)
+        for start, stop in ((0, 2), (2, vertex.shape[0])):
+            streamed += accumulate_onshell_self_energy_diagonal_block(
+                external,
+                vertex[start:stop],
+                internal[start:stop],
+                phonon[start:stop],
+                temperature_k=42.0,
+                broadening_mev=0.11,
+                metric=metric,
+                normalized_q_weights=normalized_weights[start:stop],
+                channel_chunk_size=2,
+            )
+
+        np.testing.assert_allclose(
+            streamed,
+            direct.sigma_diagonal_mev,
             rtol=2.0e-13,
             atol=2.0e-13,
         )

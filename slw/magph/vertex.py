@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import dataclass
 
 import numpy as np
@@ -169,16 +170,12 @@ def _unit_exchange_coefficients(
     )
 
 
-def build_bare_isotropic_vertex(
+def _validate_vertex_inputs(
     exchange: ExchangeModel,
     configuration: MagneticConfiguration,
     coupling: ModeResolvedExchangeDerivative,
     external_k_frac: ArrayLike,
-    *,
-    q_chunk_size: int | None = None,
-) -> NDArray[np.complex128]:
-    """Build the cell-gauge site/Nambu vertex for all phonon q and modes."""
-
+) -> tuple[NDArray[np.float64], int]:
     if exchange.representation is not ExchangeRepresentation.ISOTROPIC:
         raise NotImplementedError(
             "native bare vertex currently supports isotropic exchange"
@@ -192,9 +189,27 @@ def build_bare_isotropic_vertex(
     n_channel = n_site if configuration.order is MagneticOrder.FM else 2 * n_site
     if configuration.n_channels != n_channel:
         raise ValueError("magnetic configuration has an inconsistent channel count")
-    q_chunk = coupling.nq if q_chunk_size is None else int(q_chunk_size)
-    if q_chunk < 1:
-        raise ValueError("q_chunk_size must be positive")
+    return k, n_channel
+
+
+def _build_bare_isotropic_vertex_block(
+    exchange: ExchangeModel,
+    configuration: MagneticConfiguration,
+    coupling: ModeResolvedExchangeDerivative,
+    k: NDArray[np.float64],
+    q_start: int,
+    q_stop: int,
+    coefficients: tuple[
+        NDArray[np.complex128],
+        NDArray[np.complex128],
+        NDArray[np.complex128],
+        NDArray[np.complex128],
+        NDArray[np.float64],
+        NDArray[np.float64],
+    ],
+) -> NDArray[np.complex128]:
+    n_site = exchange.n_magnetic_sites
+    n_channel = configuration.n_channels
     (
         normal_ij,
         normal_ji,
@@ -202,56 +217,142 @@ def build_bare_isotropic_vertex(
         pair_annihilate,
         longitudinal_i,
         longitudinal_j,
-    ) = _unit_exchange_coefficients(exchange, configuration)
+    ) = coefficients
     shifts = exchange.cell_shift.astype(np.float64, copy=False)
     phase_k = np.exp(2.0j * np.pi * (shifts @ k))
+    q_points = coupling.q_points_frac[q_start:q_stop]
+    phase_minus_q = np.exp(-2.0j * np.pi * (q_points @ shifts.T))
+    phase_minus_kq = phase_minus_q * phase_k.conj()[None, :]
+    lambda_chunk = coupling.lambda_mev[q_start:q_stop]
+    block = np.zeros(
+        (q_stop - q_start, coupling.nmode, n_channel, n_channel),
+        dtype=np.complex128,
+    )
+    for bond in range(exchange.n_bonds):
+        i = int(exchange.bond_i[bond])
+        j = int(exchange.bond_j[bond])
+        amplitude = lambda_chunk[:, :, bond]
+        block[:, :, i, i] += amplitude * longitudinal_i[bond]
+        block[:, :, j, j] += (
+            amplitude * longitudinal_j[bond] * phase_minus_q[:, bond, None]
+        )
+        block[:, :, i, j] += amplitude * normal_ij[bond] * phase_k[bond]
+        block[:, :, j, i] += amplitude * normal_ji[bond] * phase_minus_kq[:, bond, None]
+        if configuration.order is MagneticOrder.COLLINEAR_AFM:
+            block[:, :, n_site + i, n_site + i] += amplitude * longitudinal_i[bond]
+            block[:, :, n_site + j, n_site + j] += (
+                amplitude * longitudinal_j[bond] * phase_minus_q[:, bond, None]
+            )
+            block[:, :, n_site + i, n_site + j] += (
+                amplitude * normal_ji[bond] * phase_k[bond]
+            )
+            block[:, :, n_site + j, n_site + i] += (
+                amplitude * normal_ij[bond] * phase_minus_kq[:, bond, None]
+            )
+            block[:, :, i, n_site + j] += amplitude * pair_create[bond] * phase_k[bond]
+            block[:, :, j, n_site + i] += (
+                amplitude * pair_create[bond] * phase_minus_kq[:, bond, None]
+            )
+            block[:, :, n_site + i, j] += (
+                amplitude * pair_annihilate[bond] * phase_k[bond]
+            )
+            block[:, :, n_site + j, i] += (
+                amplitude * pair_annihilate[bond] * phase_minus_kq[:, bond, None]
+            )
+    return block
+
+
+def build_bare_isotropic_vertex_block(
+    exchange: ExchangeModel,
+    configuration: MagneticConfiguration,
+    coupling: ModeResolvedExchangeDerivative,
+    external_k_frac: ArrayLike,
+    q_start: int,
+    q_stop: int,
+) -> NDArray[np.complex128]:
+    """Build one contiguous q block of the cell-gauge site/Nambu vertex."""
+
+    k, _n_channel = _validate_vertex_inputs(
+        exchange, configuration, coupling, external_k_frac
+    )
+    start = int(q_start)
+    stop = int(q_stop)
+    if start < 0 or stop <= start or stop > coupling.nq:
+        raise IndexError("q block is outside the mode-resolved coupling")
+    block = _build_bare_isotropic_vertex_block(
+        exchange,
+        configuration,
+        coupling,
+        k,
+        start,
+        stop,
+        _unit_exchange_coefficients(exchange, configuration),
+    )
+    block.setflags(write=False)
+    return block
+
+
+def build_bare_isotropic_vertex(
+    exchange: ExchangeModel,
+    configuration: MagneticConfiguration,
+    coupling: ModeResolvedExchangeDerivative,
+    external_k_frac: ArrayLike,
+    *,
+    q_chunk_size: int | None = None,
+) -> NDArray[np.complex128]:
+    """Build the cell-gauge site/Nambu vertex for all phonon q and modes."""
+
+    _k, n_channel = _validate_vertex_inputs(
+        exchange, configuration, coupling, external_k_frac
+    )
+    q_chunk = coupling.nq if q_chunk_size is None else int(q_chunk_size)
+    if q_chunk < 1:
+        raise ValueError("q_chunk_size must be positive")
     output = np.zeros(
         (coupling.nq, coupling.nmode, n_channel, n_channel), dtype=np.complex128
     )
-    for q_start in range(0, coupling.nq, q_chunk):
-        q_stop = min(q_start + q_chunk, coupling.nq)
-        q_points = coupling.q_points_frac[q_start:q_stop]
-        phase_minus_q = np.exp(-2.0j * np.pi * (q_points @ shifts.T))
-        phase_minus_kq = phase_minus_q * phase_k.conj()[None, :]
-        lambda_chunk = coupling.lambda_mev[q_start:q_stop]
-        block = output[q_start:q_stop]
-        for bond in range(exchange.n_bonds):
-            i = int(exchange.bond_i[bond])
-            j = int(exchange.bond_j[bond])
-            amplitude = lambda_chunk[:, :, bond]
-            block[:, :, i, i] += amplitude * longitudinal_i[bond]
-            block[:, :, j, j] += (
-                amplitude * longitudinal_j[bond] * phase_minus_q[:, bond, None]
-            )
-            block[:, :, i, j] += amplitude * normal_ij[bond] * phase_k[bond]
-            block[:, :, j, i] += (
-                amplitude * normal_ji[bond] * phase_minus_kq[:, bond, None]
-            )
-            if configuration.order is MagneticOrder.COLLINEAR_AFM:
-                block[:, :, n_site + i, n_site + i] += amplitude * longitudinal_i[bond]
-                block[:, :, n_site + j, n_site + j] += (
-                    amplitude * longitudinal_j[bond] * phase_minus_q[:, bond, None]
-                )
-                block[:, :, n_site + i, n_site + j] += (
-                    amplitude * normal_ji[bond] * phase_k[bond]
-                )
-                block[:, :, n_site + j, n_site + i] += (
-                    amplitude * normal_ij[bond] * phase_minus_kq[:, bond, None]
-                )
-                block[:, :, i, n_site + j] += (
-                    amplitude * pair_create[bond] * phase_k[bond]
-                )
-                block[:, :, j, n_site + i] += (
-                    amplitude * pair_create[bond] * phase_minus_kq[:, bond, None]
-                )
-                block[:, :, n_site + i, j] += (
-                    amplitude * pair_annihilate[bond] * phase_k[bond]
-                )
-                block[:, :, n_site + j, i] += (
-                    amplitude * pair_annihilate[bond] * phase_minus_kq[:, bond, None]
-                )
+    for q_start, q_stop, block in iter_bare_isotropic_vertex_blocks(
+        exchange,
+        configuration,
+        coupling,
+        external_k_frac,
+        q_chunk_size=q_chunk,
+    ):
+        output[q_start:q_stop] = block
     output.setflags(write=False)
     return output
+
+
+def iter_bare_isotropic_vertex_blocks(
+    exchange: ExchangeModel,
+    configuration: MagneticConfiguration,
+    coupling: ModeResolvedExchangeDerivative,
+    external_k_frac: ArrayLike,
+    *,
+    q_chunk_size: int,
+) -> Iterator[tuple[int, int, NDArray[np.complex128]]]:
+    """Yield bare q blocks while reusing static bond coefficients."""
+
+    k, _n_channel = _validate_vertex_inputs(
+        exchange, configuration, coupling, external_k_frac
+    )
+    q_chunk = int(q_chunk_size)
+    if q_chunk < 1:
+        raise ValueError("q_chunk_size must be positive")
+    coefficients = _unit_exchange_coefficients(exchange, configuration)
+    for q_start in range(0, coupling.nq, q_chunk):
+        q_stop = min(q_start + q_chunk, coupling.nq)
+        block = _build_bare_isotropic_vertex_block(
+            exchange,
+            configuration,
+            coupling,
+            k,
+            q_start,
+            q_stop,
+            coefficients,
+        )
+        block.setflags(write=False)
+        yield q_start, q_stop, block
 
 
 def build_scattering_problem(
@@ -306,5 +407,7 @@ def build_scattering_problem(
 __all__ = [
     "MagnonPhononScatteringProblem",
     "build_bare_isotropic_vertex",
+    "build_bare_isotropic_vertex_block",
     "build_scattering_problem",
+    "iter_bare_isotropic_vertex_blocks",
 ]

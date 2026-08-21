@@ -816,11 +816,19 @@ promoted internally to `J_iso I` without granting tensor capabilities. FM
 supports any positive number of magnetic sublattices; the initial AFM route is
 restricted to exactly two collinear opposite sublattices.
 
-**MPI:** `execution='auto'` uses every discovered MPI rank and distributes a
-balanced contiguous block of external k points to each rank. q points, phonon
-modes, and channel contractions remain vectorized and chunked within a rank.
-Only rank zero assembles and writes the scientific output. Collective Python
-failures are exchanged before the next gather.
+**MPI:** `execution='auto'` uses every discovered MPI rank. The mode-resolved
+`dJ/du` coupling cache is constructed with balanced q-point ownership and then
+broadcast. The exact uniform `lcm(kmesh,qmesh)` union of all required `k+q`
+points is diagonalized with the same distributed-assemble-broadcast pattern.
+External k points are then distributed in balanced contiguous blocks. Within a
+rank, each q block is built in the exchange-bond/site-Nambu representation,
+rotated only for the required physical external channels, and accumulated
+immediately into the on-shell self-energy; the full vertex is not allocated. q
+weights are normalized over the complete grid before block slicing. Only rank
+zero assembles and writes the scientific output, and collective Python failures
+are exchanged before the next gather. The coupling and union-LSWT caches are
+currently replicated per MPI rank; their actual per-rank and maximum-node sizes
+are printed at run time.
 
 **Outputs:** One atomic, no-clobber-by-default NPZ containing fractional k
 points, physical magnon energies, complex on-shell self-energy, HWHM, FWHM,
@@ -846,10 +854,10 @@ Backend: `slw.magph.engine:prepare_run`.
 | `asr_policy` | enum {fail, report, project} | no | fail | Derivative acoustic-sum-rule policy. Projection is recorded in provenance. |
 | `metric_energy_tolerance_mev` | float | no | 0 | Explicit signed-BdG energy tolerance. |
 | `negative_tolerance_mev` | float | no | 0 | Roundoff tolerance for slightly negative HWHM only. |
-| `q_chunk_size` | int | no | full q axis | q chunk for `dJ/du` to phonon-mode contraction. |
+| `q_chunk_size` | int | no | rank-local q axis | q chunk inside each rank's distributed `dJ/du` to phonon-mode contraction. |
 | `bond_chunk_size` | int | no | all bonds | Bond chunk for mode coupling. |
-| `vertex_q_chunk_size` | int | no | full q axis | q chunk for band-basis vertex construction. |
-| `self_energy_q_chunk_size` | int | no | full q axis | q chunk for self-energy contraction. |
+| `vertex_q_chunk_size` | int | no | full q axis | Upper bound for the streamed band-basis vertex q block. |
+| `self_energy_q_chunk_size` | int | no | full q axis | Upper bound for the streamed self-energy q block; the smaller of this and `vertex_q_chunk_size` is used. |
 | `channel_chunk_size` | int | no | all channels | External-channel chunk for on-shell self-energy. |
 | `require_complete_targets` | boolean | no | .true. | Require `dJ/du` targets for every phonon atom. |
 | `output` | path | no | `${savedir}/${prefix}.lifetime.npz` | Native lifetime NPZ. |

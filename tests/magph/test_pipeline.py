@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import concurrent.futures
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import numpy as np
 
@@ -19,6 +21,8 @@ from slw.magph.pipeline import (
 )
 from slw.magph.screening import screen_magnetic_configuration
 from slw.magph.vertex import build_scattering_problem
+from tests.magph.test_parallel import _CollectiveState, _ThreadComm
+from tests.magph.test_vertex import _model
 
 
 def _fm_chain() -> ExchangeModel:
@@ -113,6 +117,180 @@ class NativeLifetimePipelineTests(unittest.TestCase):
         np.testing.assert_allclose(result.scattering_rate_ps_inv, 0.0)
         self.assertTrue(np.all(np.isinf(result.lifetime_ps)))
         self.assertFalse(result.energy_mev.flags.writeable)
+
+    def test_streaming_fm_matches_materialized_vertex_route(self) -> None:
+        coupling = ModeResolvedExchangeDerivative(
+            q_points_frac=np.asarray(((0.0, 0.0, 0.0), (0.5, 0.0, 0.0))),
+            phonon_energy_mev=np.full((2, 1), 5.0),
+            lambda_mev=np.full((2, 1, 2), 0.1, dtype=np.complex128),
+            target_atom_indices=np.asarray((0,)),
+            target_coverage_complete=True,
+            frequency_regularized=np.zeros((2, 1), dtype=bool),
+            q_mesh_shape=(2, 1, 1),
+        )
+        k_points = np.column_stack(
+            (((np.arange(4) + 0.5) / 4.0), np.zeros(4), np.zeros(4))
+        )
+        common = {
+            "temperature_k": 0.0,
+            "broadening_mev": 0.2,
+            "vertex_q_chunk_size": 1,
+            "self_energy_q_chunk_size": 1,
+            "channel_chunk_size": 1,
+            "context": MPIContext(),
+        }
+        materialized = compute_lifetime_grid(
+            self.exchange,
+            self.configuration,
+            coupling,
+            k_points,
+            **common,
+        )
+        with mock.patch(
+            "slw.magph.pipeline.build_scattering_problem",
+            side_effect=AssertionError("streaming route materialized a full vertex"),
+        ):
+            streaming = compute_lifetime_grid(
+                self.exchange,
+                self.configuration,
+                coupling,
+                k_points,
+                k_mesh_shape=(4, 1, 1),
+                kshift_grid=(0.5, 0.0, 0.0),
+                **common,
+            )
+        assert materialized.global_result is not None
+        assert streaming.global_result is not None
+        np.testing.assert_allclose(
+            streaming.global_result.energy_mev,
+            materialized.global_result.energy_mev,
+        )
+        np.testing.assert_allclose(
+            streaming.global_result.self_energy_onshell_mev,
+            materialized.global_result.self_energy_onshell_mev,
+            rtol=1.0e-12,
+            atol=1.0e-12,
+        )
+
+    def test_streaming_afm_matches_materialized_vertex_route(self) -> None:
+        exchange = _model(afm=True)
+        configuration = screen_magnetic_configuration(
+            exchange,
+            order="collinear_afm",
+            spin_magnitudes=1.0,
+        )
+        coupling = ModeResolvedExchangeDerivative(
+            q_points_frac=np.asarray(((0.0, 0.0, 0.0), (0.5, 0.0, 0.0))),
+            phonon_energy_mev=np.full((2, 1), 5.0),
+            lambda_mev=np.full((2, 1, 4), 0.1, dtype=np.complex128),
+            target_atom_indices=np.asarray((0, 1)),
+            target_coverage_complete=True,
+            frequency_regularized=np.zeros((2, 1), dtype=bool),
+            q_mesh_shape=(2, 1, 1),
+        )
+        k_points = np.column_stack(
+            (((np.arange(4) + 0.5) / 4.0), np.zeros(4), np.zeros(4))
+        )
+        common = {
+            "temperature_k": 0.0,
+            "broadening_mev": 0.2,
+            "vertex_q_chunk_size": 1,
+            "self_energy_q_chunk_size": 1,
+            "channel_chunk_size": 1,
+            "context": MPIContext(),
+        }
+        materialized = compute_lifetime_grid(
+            exchange,
+            configuration,
+            coupling,
+            k_points,
+            **common,
+        )
+        streaming = compute_lifetime_grid(
+            exchange,
+            configuration,
+            coupling,
+            k_points,
+            k_mesh_shape=(4, 1, 1),
+            kshift_grid=(0.5, 0.0, 0.0),
+            **common,
+        )
+        assert materialized.global_result is not None
+        assert streaming.global_result is not None
+        np.testing.assert_allclose(
+            streaming.global_result.energy_mev,
+            materialized.global_result.energy_mev,
+        )
+        np.testing.assert_allclose(
+            streaming.global_result.self_energy_onshell_mev,
+            materialized.global_result.self_energy_onshell_mev,
+            rtol=1.0e-11,
+            atol=1.0e-11,
+        )
+
+    def test_two_rank_streaming_pipeline_matches_serial(self) -> None:
+        coupling = ModeResolvedExchangeDerivative(
+            q_points_frac=np.asarray(((0.0, 0.0, 0.0), (0.5, 0.0, 0.0))),
+            phonon_energy_mev=np.full((2, 1), 5.0),
+            lambda_mev=np.full((2, 1, 2), 0.1, dtype=np.complex128),
+            target_atom_indices=np.asarray((0,)),
+            target_coverage_complete=True,
+            frequency_regularized=np.zeros((2, 1), dtype=bool),
+            q_mesh_shape=(2, 1, 1),
+        )
+        k_points = np.column_stack(
+            (((np.arange(4) + 0.5) / 4.0), np.zeros(4), np.zeros(4))
+        )
+        common = {
+            "temperature_k": 0.0,
+            "broadening_mev": 0.2,
+            "vertex_q_chunk_size": 1,
+            "self_energy_q_chunk_size": 1,
+            "channel_chunk_size": 1,
+            "k_mesh_shape": (4, 1, 1),
+            "kshift_grid": (0.5, 0.0, 0.0),
+        }
+        serial = compute_lifetime_grid(
+            self.exchange,
+            self.configuration,
+            coupling,
+            k_points,
+            context=MPIContext(),
+            **common,
+        )
+        state = _CollectiveState(2)
+
+        def run_rank(rank: int):
+            return compute_lifetime_grid(
+                self.exchange,
+                self.configuration,
+                coupling,
+                k_points,
+                context=MPIContext(
+                    comm=_ThreadComm(state, rank),
+                    rank=rank,
+                    size=2,
+                ),
+                **common,
+            )
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+            futures = [executor.submit(run_rank, rank) for rank in range(2)]
+            distributed = [future.result(timeout=5.0) for future in futures]
+
+        assert serial.global_result is not None
+        assert distributed[0].global_result is not None
+        self.assertIsNone(distributed[1].global_result)
+        np.testing.assert_allclose(
+            distributed[0].global_result.energy_mev,
+            serial.global_result.energy_mev,
+        )
+        np.testing.assert_allclose(
+            distributed[0].global_result.self_energy_onshell_mev,
+            serial.global_result.self_energy_onshell_mev,
+        )
+        np.testing.assert_array_equal(distributed[0].local_indices, (0, 1))
+        np.testing.assert_array_equal(distributed[1].local_indices, (2, 3))
 
 
 if __name__ == "__main__":

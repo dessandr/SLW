@@ -18,55 +18,69 @@ class _CollectiveState:
     def __init__(self, size: int):
         self.size = size
         self.condition = threading.Condition()
-        self.allgather_values: dict[int, object] = {}
-        self.allgather_result: list[object] | None = None
-        self.gather_values: dict[int, object] = {}
-        self.gather_result: list[object] | None = None
-        self.broadcast_ready = False
-        self.broadcast_value: object = None
+        self.allgather_values: dict[int, dict[int, object]] = {}
+        self.allgather_results: dict[int, list[object]] = {}
+        self.gather_values: dict[int, dict[int, object]] = {}
+        self.gather_results: dict[int, list[object]] = {}
+        self.broadcast_values: dict[int, object] = {}
 
 
 class _ThreadComm:
     def __init__(self, state: _CollectiveState, rank: int):
         self.state = state
         self.rank = rank
+        self.allgather_generation = 0
+        self.gather_generation = 0
+        self.broadcast_generation = 0
 
     def allgather(self, value):
         state = self.state
+        generation = self.allgather_generation
         with state.condition:
-            state.allgather_values[self.rank] = value
-            if len(state.allgather_values) == state.size:
-                state.allgather_result = [
-                    state.allgather_values[index] for index in range(state.size)
+            values = state.allgather_values.setdefault(generation, {})
+            values[self.rank] = value
+            if len(values) == state.size:
+                state.allgather_results[generation] = [
+                    values[index] for index in range(state.size)
                 ]
                 state.condition.notify_all()
             else:
-                state.condition.wait_for(lambda: state.allgather_result is not None)
-            return list(state.allgather_result)
+                state.condition.wait_for(lambda: generation in state.allgather_results)
+            result = list(state.allgather_results[generation])
+        self.allgather_generation += 1
+        return result
 
     def gather(self, value, root=0):
         state = self.state
+        generation = self.gather_generation
         with state.condition:
-            state.gather_values[self.rank] = value
-            if len(state.gather_values) == state.size:
-                state.gather_result = [
-                    state.gather_values[index] for index in range(state.size)
+            values = state.gather_values.setdefault(generation, {})
+            values[self.rank] = value
+            if len(values) == state.size:
+                state.gather_results[generation] = [
+                    values[index] for index in range(state.size)
                 ]
                 state.condition.notify_all()
             else:
-                state.condition.wait_for(lambda: state.gather_result is not None)
-            return list(state.gather_result) if self.rank == root else None
+                state.condition.wait_for(lambda: generation in state.gather_results)
+            result = (
+                list(state.gather_results[generation]) if self.rank == root else None
+            )
+        self.gather_generation += 1
+        return result
 
     def bcast(self, value, root=0):
         state = self.state
+        generation = self.broadcast_generation
         with state.condition:
             if self.rank == root:
-                state.broadcast_value = value
-                state.broadcast_ready = True
+                state.broadcast_values[generation] = value
                 state.condition.notify_all()
             else:
-                state.condition.wait_for(lambda: state.broadcast_ready)
-            return state.broadcast_value
+                state.condition.wait_for(lambda: generation in state.broadcast_values)
+            result = state.broadcast_values[generation]
+        self.broadcast_generation += 1
+        return result
 
 
 class NativeMagphParallelTests(unittest.TestCase):

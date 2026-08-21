@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -60,6 +61,26 @@ class NativeMagphEngineTests(unittest.TestCase):
                 self.assertEqual(payload["energy_mev"].shape, (2, 1))
                 np.testing.assert_allclose(payload["gamma_hwhm_mev"], 0.0)
                 self.assertTrue(np.all(np.isinf(payload["lifetime_ps"])))
+                metadata = json.loads(str(payload["metadata_json"]))
+                self.assertEqual(
+                    metadata["algorithm"]["coupling"],
+                    "mpi_q_distributed_cache",
+                )
+                self.assertEqual(
+                    metadata["algorithm"]["lswt"],
+                    "uniform_k_plus_q_union_cache",
+                )
+                self.assertEqual(
+                    metadata["algorithm"]["vertex_self_energy"],
+                    "q_block_streaming",
+                )
+                self.assertFalse(metadata["algorithm"]["full_vertex_materialized"])
+                self.assertEqual(metadata["union_kq_mesh"], [2, 1, 1])
+                self.assertGreater(
+                    metadata["cache_bytes_per_rank"]["coupling"],
+                    0,
+                )
+                self.assertGreater(metadata["cache_bytes_per_rank"]["lswt"], 0)
 
 
 if __name__ == "__main__":
