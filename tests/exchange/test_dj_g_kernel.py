@@ -5,6 +5,7 @@ import unittest
 import numpy as np
 
 from slw.exchange.kernels.dj_epr import (
+    _partition_derivative_work,
     _rotate_g_to_eigenbasis,
     _spectral_projected_blocks,
 )
@@ -22,6 +23,41 @@ def _random_unitaries(rng: np.random.Generator, nk: int, nw: int) -> np.ndarray:
 
 
 class ScalarDjGKernelTests(unittest.TestCase):
+    def test_mpi_partition_distributes_cache_before_excess_rank_energy(self) -> None:
+        work_items = tuple((target, axis) for target in range(4) for axis in "xyz")
+        energies = tuple(range(23))
+
+        assigned: dict[tuple[int, str], list[int]] = {
+            item: [] for item in work_items
+        }
+        for rank in range(20):
+            local_items, local_energy, replicas = _partition_derivative_work(
+                work_items,
+                energies,
+                rank,
+                20,
+            )
+            self.assertEqual(len(local_items), 1)
+            self.assertIn(replicas, (1, 2))
+            assigned[local_items[0]].extend(local_energy)
+
+        for values in assigned.values():
+            self.assertEqual(sorted(values), list(energies))
+
+        ownership = []
+        for rank in range(4):
+            local_items, local_energy, replicas = _partition_derivative_work(
+                work_items,
+                energies,
+                rank,
+                4,
+            )
+            self.assertEqual(len(local_items), 3)
+            self.assertEqual(local_energy, energies)
+            self.assertEqual(replicas, 1)
+            ownership.extend(local_items)
+        self.assertEqual(sorted(ownership), sorted(work_items))
+
     def test_complete_spectral_endpoint_blocks_match_direct_ggg(self) -> None:
         rng = np.random.default_rng(810_2026)
         nk, nq, nw = 4, 3, 7

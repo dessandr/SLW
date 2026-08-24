@@ -97,14 +97,14 @@ only to `slw.exchange.kernels`; archived wrappers are not entered by
 `ltensor=.true.|.false.` through the stage executable.
 
 All four exchange modes participate in MPI when `execution='auto'` discovers
-more than one rank. Scalar/tensor J and scalar dJ split the energy integration;
-tensor dJ splits target/displacement-axis tasks. Rank 0 alone writes the final
-products. Use `workers_per_rank=1` in `&parallel` per MPI rank; serial runs may
-raise it for local multiprocessing. Scalar dJ additionally supports hybrid MPI
-with `workers_per_rank>1`:
-each rank creates one POSIX shared-memory EPC cache and clean local worker
-processes attach to it. For a multi-node run, using one rank per node avoids
-replicating that cache within a node; bind at least
+more than one rank. Scalar/tensor J split the energy integration. Scalar dJ
+distributes target/displacement-axis cache ownership first and uses excess
+ranks to split energy; tensor dJ splits target/displacement-axis tasks. Rank 0
+alone writes the final products. Use `workers_per_rank=1` in `&parallel` per
+MPI rank; serial runs may raise it for local multiprocessing. Scalar dJ
+additionally supports hybrid MPI with `workers_per_rank>1`: each rank publishes
+only its assigned EPC cache entries in POSIX shared memory and clean local
+worker processes attach to them. Bind at least
 `workers_per_rank*threads_per_worker` cores to each rank. Other exchange modes
 still require `workers_per_rank=1` under MPI. The same canonical `&parallel`
 names control native magph dispersion/lifetime and are translated at retained magph

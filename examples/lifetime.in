@@ -20,7 +20,13 @@
 &magph
   exchange_h5 = '${savedir}/sample.j.h5',
   derivative_h5 = '${savedir}/sample.dj.h5',
+  ! Reuse this cache when present. If it is absent, rank 0 builds it from
+  ! phonon_epr on the dJ q-mesh before the MPI lifetime calculation starts.
   phonon_cache = '${savedir}/phonon_cache.npz',
+  phonon_epr = './sample_epr.h5',
+  phonon_loto = 'auto',
+  phonon_imaginary_tolerance_mev = 1.0d-6,
+  phonon_cache_compressed = .false.,
   magnetic_order = 'fm',
   spin_magnitudes = 1.0,
   quantization_axis = 0.0, 0.0, 1.0,
@@ -35,6 +41,8 @@
   temperature_k = 300.0,
   broadening_mev = 0.2,
   asr_policy = 'fail',
+  ! Static J may include more shells than dJ. Missing long-range dJ bonds are
+  ! retained as exact zero vertex entries and recorded in NPZ provenance.
   output = '${savedir}/sample.lifetime.npz',
   restart_mode = 'error'
 /

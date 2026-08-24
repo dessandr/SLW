@@ -215,9 +215,14 @@ their provenance in the native lifetime product:
 4. **Magnon stability:** check the FM Hermitian or AFM bosonic-BdG spectrum on
    the actual calculation mesh, including metric normalization and imaginary
    parts.
-5. **Dynamic coupling:** match the static and derivative bond/site maps, check
-   `dJ/du` units (normally meV/angstrom), derivative acoustic-sum-rule status,
-   phonon q-grid and phase convention, and phonon stability.
+5. **Dynamic coupling:** require the derivative bond map to be a
+   directed-mate-complete subset of the static map, embed absent static bonds as
+   exact zero derivatives, and check `dJ/du` units (normally meV/angstrom),
+   rank-zero space-group covariance provenance when present, derivative
+   acoustic-sum-rule status, phonon q-grid and phase convention, and phonon
+   stability. Consequently a longer-range static `J` model can build LSWT while
+   a shorter-range `dJ/du` model supplies the vertex. Derivative bonds that are
+   not present in static `J` are rejected.
 
 Phonon mass handling is especially strict. Schema-v3 caches accepted by the
 native route store the cell-gauge displacement polarization
@@ -398,7 +403,9 @@ The registered lifetime product records:
 - HWHM, FWHM, rate, and lifetime with the conventions and units above;
 - temperature, broadening, spin state, exchange/dJ/phonon source paths,
   exchange representation/kernel, derivative ASR outcome, phonon mass/schema
-  convention, k mesh/shift, union `k+q` mesh, streaming algorithm, and MPI size.
+  convention, derivative space-group covariance provenance,
+  explicit/static/zero-filled derivative bond counts, k mesh/shift, union `k+q`
+  mesh, streaming algorithm, and MPI size.
 
 The separate typed diagnostic API can still materialize full signed
 internal-channel arrays and q/mode-resolved contributions for regression work;
@@ -435,6 +442,8 @@ input file:
   exchange_h5 = './input/J.h5',
   derivative_h5 = './input/dJ.h5',
   phonon_cache = './input/phonons.npz',
+  phonon_epr = './input/sample_epr.h5',
+  phonon_loto = 'auto',
   magnetic_order = 'fm',
   spin_magnitudes = 2.5,
   spin_pattern = 1,

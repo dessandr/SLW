@@ -220,6 +220,36 @@ class SyntheticExchangeEndToEndTests(unittest.TestCase):
             self.assertEqual(int(handle["basic_data/mpi_size"][()]), 2)
         np.testing.assert_allclose(actual, expected, rtol=1.0e-12, atol=1.0e-12)
 
+    def test_full_scalar_dj_records_rank_zero_covariant_projection(self) -> None:
+        request = self._request(
+            "dj",
+            "scalar_dj_covariant",
+            eph_unit="ev",
+            targets="all",
+            axes="xyz",
+            qmesh=(1, 1, 1),
+        )
+
+        run_exchange(
+            request,
+            context=MPIContext(),
+            execution="serial",
+            verbosity="quiet",
+        )
+
+        with h5py.File(request.output.h5_path) as handle:
+            self.assertEqual(handle.attrs["covariant_symmetry_policy"], "project")
+            self.assertEqual(int(handle.attrs["covariant_symmetry_applied"]), 1)
+            self.assertTrue(bool(handle["symmetry/applied"][()]))
+            self.assertGreater(int(handle["symmetry/n_operations"][()]), 0)
+            self.assertEqual(
+                handle["symmetry/transformation"].asstr()[()],
+                "polar_vector_with_target_bond_and_periodic_Rp",
+            )
+            self.assertTrue(
+                np.isfinite(handle["symmetry/max_abs_residual_raw_mev_per_ang"][()])
+            )
+
     def test_two_rank_tensor_j_and_scalar_dj_match_serial(self) -> None:
         cases = (
             (
@@ -315,6 +345,38 @@ class SyntheticExchangeEndToEndTests(unittest.TestCase):
         ):
             np.testing.assert_allclose(serial_got, want, rtol=1.0e-11, atol=1.0e-11)
             np.testing.assert_allclose(mpi_got, want, rtol=1.0e-11, atol=1.0e-11)
+
+    def test_scalar_dj_mpi_distributes_multiple_target_axis_caches(self) -> None:
+        options = {
+            "eph_unit": "ev",
+            "targets": "all",
+            "axes": "xyz",
+            "qmesh": (1, 1, 1),
+            "ddelta_mode": "onsite",
+            "g_kernel": "spectral",
+            "no_symmetry_orbits": True,
+            "covariant_symmetry": "none",
+        }
+        serial = self._request("dj", "distributed_cache_serial", **options)
+        execute(serial)
+        with h5py.File(serial.output.h5_path) as handle:
+            expected = self._numeric_group_payload(handle, "dJ_r")
+
+        parallel = self._request("dj", "distributed_cache_mpi", **options)
+        self._execute_two_ranks(parallel)
+        with h5py.File(parallel.output.h5_path) as handle:
+            actual = self._numeric_group_payload(handle, "dJ_r")
+            basic = handle["basic_data"]
+            self.assertEqual(
+                basic["cache_distribution"].asstr()[()],
+                "target_axis_then_energy",
+            )
+            self.assertGreater(int(basic["cache_bytes_per_rank_max"][()]), 0)
+            self.assertGreater(int(basic["cache_bytes_per_node_max"][()]), 0)
+
+        self.assertEqual(len(actual), len(expected))
+        for got, want in zip(actual, expected, strict=True):
+            np.testing.assert_allclose(got, want, rtol=1.0e-11, atol=1.0e-11)
 
     def test_scalar_dj_rank_local_workers_match_single_worker(self) -> None:
         options = {

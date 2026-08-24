@@ -37,14 +37,81 @@ class NativeMagphConfigTests(unittest.TestCase):
             self.assertEqual(request.kmesh, (4, 3, 2))
             self.assertEqual(request.kshift, (0.5, 0.5, 0.5))
             self.assertEqual(request.spin_magnitudes, (2.5,))
+            self.assertEqual(request.exchange_reciprocity_atol_mev, 1.0e-8)
+            self.assertEqual(
+                request.derivative_reciprocity_atol_mev_per_ang,
+                1.0e-8,
+            )
+            self.assertIsNone(request.phonon_epr)
+            self.assertEqual(request.phonon_loto, "auto")
+            self.assertEqual(request.phonon_imaginary_tolerance_mev, 1.0e-6)
+            self.assertFalse(request.phonon_cache_compressed)
             self.assertEqual(
                 request.output, Path(directory).resolve() / "mn.lifetime.npz"
             )
+
+    def test_epr_only_input_gets_a_savedir_cache_path(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            parameters = _parameters()
+            del parameters["phonon_cache"]
+            parameters.update(
+                {
+                    "phonon_epr": "sample_epr.h5",
+                    "phonon_loto": "none",
+                    "phonon_imaginary_tolerance_mev": 2.0e-6,
+                    "phonon_cache_compressed": True,
+                }
+            )
+            request = build_lifetime_request(
+                parameters, prefix="mn", savedir=directory
+            )
+            self.assertEqual(
+                request.phonon_cache,
+                Path(directory).resolve() / "mn.phonon.npz",
+            )
+            self.assertEqual(
+                request.phonon_epr, Path("sample_epr.h5").resolve()
+            )
+            self.assertEqual(request.phonon_loto, "none")
+            self.assertEqual(request.phonon_imaginary_tolerance_mev, 2.0e-6)
+            self.assertTrue(request.phonon_cache_compressed)
+
+    def test_lifetime_requires_a_cache_or_epr_source(self) -> None:
+        parameters = _parameters()
+        del parameters["phonon_cache"]
+        with self.assertRaisesRegex(MagphInputError, "phonon_cache or phonon_epr"):
+            build_lifetime_request(parameters, prefix="slw", savedir=".")
+
+    def test_phonon_build_controls_are_strict(self) -> None:
+        parameters = _parameters()
+        parameters["phonon_loto"] = "guess"
+        with self.assertRaisesRegex(MagphInputError, "phonon_loto"):
+            build_lifetime_request(parameters, prefix="slw", savedir=".")
+
+        parameters = _parameters()
+        parameters["phonon_imaginary_tolerance_mev"] = -1.0
+        with self.assertRaisesRegex(MagphInputError, "non-negative"):
+            build_lifetime_request(parameters, prefix="slw", savedir=".")
 
     def test_explicit_kshift_is_required(self) -> None:
         parameters = _parameters()
         del parameters["kshift"]
         with self.assertRaisesRegex(MagphInputError, "requires kshift"):
+            build_lifetime_request(parameters, prefix="slw", savedir=".")
+
+    def test_reciprocity_tolerances_are_explicit_nonnegative_inputs(self) -> None:
+        parameters = _parameters()
+        parameters["exchange_reciprocity_atol_mev"] = 1.0e-6
+        parameters["derivative_reciprocity_atol_mev_per_ang"] = 2.0e-6
+        request = build_lifetime_request(parameters, prefix="slw", savedir=".")
+        self.assertEqual(request.exchange_reciprocity_atol_mev, 1.0e-6)
+        self.assertEqual(
+            request.derivative_reciprocity_atol_mev_per_ang,
+            2.0e-6,
+        )
+
+        parameters["exchange_reciprocity_atol_mev"] = -1.0
+        with self.assertRaisesRegex(MagphInputError, "non-negative"):
             build_lifetime_request(parameters, prefix="slw", savedir=".")
 
     def test_unknown_parameter_is_rejected(self) -> None:

@@ -27,13 +27,17 @@ from .config import (
     build_lifetime_request,
 )
 from .coupling import build_mode_resolved_isotropic_derivative_distributed
-from .derivative import load_exchange_derivative_h5
+from .derivative import (
+    load_exchange_derivative_h5,
+    read_exchange_derivative_q_mesh,
+)
 from .dispersion import (
     MagnonDispersionResult,
     MagnonKPath,
     build_wannier90_kpath,
     compute_magnon_dispersion,
 )
+from .epr_phonon import EPRPhononBuildReport, write_epr_phonon_cache
 from .lswt import uniform_fractional_mesh
 from .mesh import build_magnon_mesh_cache
 from .output import (
@@ -100,12 +104,28 @@ def _request_signature(
             "calculation": "lifetime",
             "derivative_h5": _source_stamp(request.derivative_h5),
             "phonon_cache": _source_stamp(request.phonon_cache),
+            "phonon_epr": (
+                None
+                if request.phonon_epr is None
+                else _source_stamp(request.phonon_epr)
+            ),
+            "phonon_loto": request.phonon_loto,
+            "phonon_imaginary_tolerance_mev": (
+                request.phonon_imaginary_tolerance_mev
+            ),
+            "phonon_cache_compressed": request.phonon_cache_compressed,
             "kmesh": list(request.kmesh),
             "kshift": list(request.kshift),
             "temperature_k": request.temperature_k,
             "broadening_mev": request.broadening_mev,
             "frequency_floor_mev": request.frequency_floor_mev,
             "asr_policy": request.asr_policy.value,
+            "exchange_reciprocity_atol_mev": (
+                request.exchange_reciprocity_atol_mev
+            ),
+            "derivative_reciprocity_atol_mev_per_ang": (
+                request.derivative_reciprocity_atol_mev_per_ang
+            ),
             "metric_energy_tolerance_mev": request.metric_energy_tolerance_mev,
             "negative_tolerance_mev": request.negative_tolerance_mev,
             "require_complete_targets": request.require_complete_targets,
@@ -330,8 +350,73 @@ def _rank_failure(rank: int, stage: str, exc: BaseException) -> RankFailure:
     )
 
 
+def _ensure_phonon_cache(
+    request: MagphLifetimeRequest,
+    context: MPIContext,
+    parallel: ParallelConfig,
+    logger: RunLogger,
+) -> EPRPhononBuildReport | None:
+    """Create a missing EPR-derived cache once on rank zero."""
+
+    report: EPRPhononBuildReport | None = None
+    failure: RankFailure | None = None
+    if context.is_root:
+        try:
+            if request.phonon_cache.is_file():
+                logger.info(f"phonon cache = reusing {request.phonon_cache}")
+            else:
+                if request.phonon_cache.exists():
+                    raise ValueError(
+                        "phonon_cache exists but is not a regular file: "
+                        f"{request.phonon_cache}"
+                    )
+                if request.phonon_epr is None:
+                    raise FileNotFoundError(
+                        f"phonon cache not found: {request.phonon_cache}; "
+                        "set phonon_epr to build it automatically"
+                    )
+                q_mesh = read_exchange_derivative_q_mesh(request.derivative_h5)
+                logger.info(
+                    "phonon cache = absent; building from EPR on rank 0"
+                )
+                logger.info(
+                    "phonon q mesh = " + " x ".join(map(str, q_mesh))
+                )
+                report = write_epr_phonon_cache(
+                    request.phonon_epr,
+                    request.phonon_cache,
+                    q_mesh_shape=q_mesh,
+                    q_chunk_size=parallel.q_chunk_size,
+                    loto_mode=request.phonon_loto,
+                    imaginary_tolerance_mev=(
+                        request.phonon_imaginary_tolerance_mev
+                    ),
+                    compressed=request.phonon_cache_compressed,
+                )
+        except Exception as exc:  # noqa: BLE001 - release every rank together
+            failure = _rank_failure(context.rank, "phonon_cache_build", exc)
+    report, failure = context.bcast((report, failure), root=0)
+    if failure is not None:
+        raise CollectiveExecutionError((failure,))
+    if report is not None:
+        logger.info(
+            "phonon cache = built "
+            f"{report.q_point_count} q points, {report.mode_count} modes in "
+            f"{report.elapsed_seconds:.2f} s"
+        )
+        logger.info(
+            "phonon cleanup = rounded "
+            f"{report.rounded_frequency_count} modes within "
+            f"{report.imaginary_tolerance_mev:.3g} meV"
+        )
+    return report
+
+
 def _load_native_problem(request: MagphLifetimeRequest) -> tuple[Any, ...]:
-    exchange, exchange_report = load_exchange_h5(request.exchange_h5)
+    exchange, exchange_report = load_exchange_h5(
+        request.exchange_h5,
+        reciprocity_atol_mev=request.exchange_reciprocity_atol_mev,
+    )
     anisotropy = (
         None
         if request.anisotropy is None
@@ -340,6 +425,9 @@ def _load_native_problem(request: MagphLifetimeRequest) -> tuple[Any, ...]:
     derivative, derivative_report = load_exchange_derivative_h5(
         request.derivative_h5,
         exchange,
+        reciprocity_atol_mev_per_ang=(
+            request.derivative_reciprocity_atol_mev_per_ang
+        ),
         asr_policy=request.asr_policy,
     )
     phonons = load_phonon_cache(request.phonon_cache)
@@ -446,6 +534,14 @@ def _output_metadata(
         "exchange_h5": str(request.exchange_h5),
         "derivative_h5": str(request.derivative_h5),
         "phonon_cache": str(request.phonon_cache),
+        "phonon_epr": (
+            None if request.phonon_epr is None else str(request.phonon_epr)
+        ),
+        "phonon_loto": request.phonon_loto,
+        "phonon_imaginary_tolerance_mev": (
+            request.phonon_imaginary_tolerance_mev
+        ),
+        "phonon_cache_compressed": request.phonon_cache_compressed,
         "exchange_dataset": exchange_report.source_dataset,
         "exchange_representation": exchange_report.representation.value,
         "exchange_convention_origin": exchange_report.convention_origin,
@@ -456,7 +552,36 @@ def _output_metadata(
         ],
         "derivative_dataset": derivative_report.source_dataset,
         "derivative_asr_policy": derivative_report.asr_policy.value,
+        "exchange_reciprocity_atol_mev": request.exchange_reciprocity_atol_mev,
+        "derivative_reciprocity_atol_mev_per_ang": (
+            request.derivative_reciprocity_atol_mev_per_ang
+        ),
         "derivative_asr_projected": bool(derivative_report.projected_asr),
+        "derivative_static_bond_count": int(derivative_report.static_bond_count),
+        "derivative_source_bond_count": int(derivative_report.source_bond_count),
+        "derivative_zero_filled_static_bond_count": int(
+            derivative_report.zero_filled_static_bond_count
+        ),
+        "derivative_bond_coverage_complete": bool(
+            derivative_report.bond_coverage_complete
+        ),
+        "derivative_covariant_symmetry_policy": (
+            derivative_report.covariant_symmetry_policy
+        ),
+        "derivative_covariant_symmetry_applied": bool(
+            derivative_report.covariant_symmetry_applied
+        ),
+        "derivative_max_covariance_residual_mev_per_ang": (
+            None
+            if derivative_report.max_covariance_residual_mev_per_ang is None
+            else float(derivative_report.max_covariance_residual_mev_per_ang)
+        ),
+        "derivative_covariant_symmetry_operation_count": int(
+            derivative_report.covariant_symmetry_operation_count
+        ),
+        "derivative_covariant_symmetry_spacegroup": (
+            derivative_report.covariant_symmetry_spacegroup
+        ),
         "derivative_max_asr_residual_mev_per_ang": float(
             derivative_report.max_asr_residual_after_mev_per_ang
         ),
@@ -538,6 +663,8 @@ def run_lifetime(
         verbosity=verbosity,
         timers=timers,
     )
+    with logger.phase("phonon_cache", label="Preparing phonon cache"):
+        _ensure_phonon_cache(request, mpi, runtime, logger)
     reused = _existing_output_policy(request, mpi)
     if reused is not None:
         logger.info(f"restart      = reused completed {request.output}")
@@ -559,6 +686,18 @@ def run_lifetime(
         logger.info(f"magnetic sites = {configuration.n_magnetic_sites}")
         logger.info(f"k-point count  = {k_points.shape[0]}")
         logger.info(f"phonon q count = {phonons.nq}")
+        logger.info(
+            "dJ bond coverage = "
+            f"{derivative_report.source_bond_count}/"
+            f"{derivative_report.static_bond_count} explicit; "
+            f"{derivative_report.zero_filled_static_bond_count} zero-filled"
+        )
+        logger.info(
+            "dJ covariance   = "
+            f"{derivative_report.covariant_symmetry_policy}; "
+            f"applied={derivative_report.covariant_symmetry_applied}; "
+            f"spacegroup={derivative_report.covariant_symmetry_spacegroup}"
+        )
 
         with logger.phase(
             "coupling_cache",
@@ -1036,7 +1175,7 @@ def format_help(
         "Required &magph keys:\n"
         "  exchange_h5       = canonical static J HDF5\n"
         "  derivative_h5     = scalar dJ/du HDF5\n"
-        "  phonon_cache      = schema-v3 phonon NPZ\n"
+        "  phonon_cache/epr  = existing schema-v3 NPZ or EPR IFC source\n"
         "  magnetic_order    = 'fm' or 'collinear_afm'\n"
         "  spin_magnitudes   = scalar or one value per magnetic site\n"
         "  quantization_axis = three Cartesian components\n"
@@ -1044,7 +1183,9 @@ def format_help(
         "  kshift            = explicit three-component grid-unit shift\n"
         "  temperature_k     = non-negative temperature\n"
         "  broadening_mev    = positive retarded broadening\n\n"
-        "Optional &magph: spin_pattern, frequency_floor_mev, asr_policy,\n"
+        "Optional &magph: phonon_cache, phonon_epr, phonon_loto,\n"
+        "phonon_imaginary_tolerance_mev, phonon_cache_compressed,\n"
+        "spin_pattern, frequency_floor_mev, asr_policy,\n"
         "the complete anisotropy_model/mev/axis/normalization set, output, and\n"
         "restart_mode. Put worker/thread and q/bond/vertex/\n"
         "self-energy/channel chunk controls in &parallel.\n"

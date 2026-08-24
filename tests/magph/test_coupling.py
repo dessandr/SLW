@@ -51,6 +51,31 @@ def _exchange() -> ExchangeModel:
     )
 
 
+def _long_range_exchange() -> ExchangeModel:
+    isotropic = np.asarray((2.0, 2.0, 0.5, 0.5))
+    return ExchangeModel(
+        source=Path("static_long.h5"),
+        representation=ExchangeRepresentation.ISOTROPIC,
+        source_dataset="J_r/value",
+        convention=ExchangeConvention(
+            spin_normalization=ExchangeSpinNormalization.UNIT_VECTOR,
+            source_spin_magnitude=1.0,
+            kernel_family="scalar_lkag",
+        ),
+        isotropic_mev=isotropic,
+        tensor_mev=isotropic[:, None, None] * np.eye(3),
+        bond_i=np.asarray((0, 0, 0, 0)),
+        bond_j=np.asarray((0, 0, 0, 0)),
+        bond_i_atom=np.asarray((0, 0, 0, 0)),
+        bond_j_atom=np.asarray((0, 0, 0, 0)),
+        cell_shift=np.asarray(
+            ((1, 0, 0), (-1, 0, 0), (2, 0, 0), (-2, 0, 0))
+        ),
+        magnetic_atom_indices=np.asarray((0,)),
+        mirror_index=np.asarray((1, 0, 3, 2)),
+    )
+
+
 def _phonons() -> PhononCache:
     # Two atoms and six orthonormal Cartesian modes on each of two q points.
     vectors = np.zeros((2, 6, 2, 3), dtype=np.complex128)
@@ -131,6 +156,37 @@ class ModeResolvedCouplingTests(unittest.TestCase):
             bond_chunk_size=1,
         )
         np.testing.assert_array_equal(full.lambda_mev, chunked.lambda_mev)
+
+    def test_short_range_derivative_leaves_long_range_vertex_bonds_zero(self) -> None:
+        exchange = _long_range_exchange()
+        phonons = _phonons()
+        zero_point = zero_point_displacements(phonons)
+        values = np.zeros((2, 4, 2, 3), dtype=np.float64)
+        values[0, :2, 0, 0] = 1.0
+        values[0, :2, 1, 0] = 2.0
+        values[1] = -values[0]
+        derivative = ExchangeDerivativeModel(
+            source=Path("dynamic_short.h5"),
+            static_exchange_source=exchange.source,
+            representation=ExchangeRepresentation.ISOTROPIC,
+            source_dataset="dJ_r",
+            target_atom_indices=np.asarray((0, 1)),
+            rp_cell_shifts=np.asarray(((0, 0, 0), (-1, 0, 0))),
+            q_mesh_shape=(2, 1, 1),
+            isotropic_mev_per_ang=values,
+            tensor_mev_per_ang=values[..., None, None] * np.eye(3),
+            source_static_bond_indices=np.asarray((0, 1)),
+        )
+
+        result = build_mode_resolved_isotropic_derivative(
+            exchange,
+            derivative,
+            phonons,
+            zero_point,
+        )
+
+        self.assertEqual(result.n_bonds, 4)
+        np.testing.assert_array_equal(result.lambda_mev[:, :, 2:], 0.0)
 
     def test_two_rank_q_distribution_matches_serial_cache(self) -> None:
         exchange = _exchange()

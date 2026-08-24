@@ -251,13 +251,17 @@ Wannier J accepts that pair or one `spinor_hr`. Native filename stems are
 override those paths.
 
 With `execution='auto'`, a launch containing more than one rank uses MPI for
-every mode. Scalar/tensor J and scalar dJ partition the contour or pole energy
-mesh; tensor dJ partitions target/displacement-axis tasks. Rank 0 writes the
-final HDF5/text products after the collective reduction. Set
+every mode. Scalar/tensor J partition the contour or pole energy mesh. Scalar
+dJ first distributes target/displacement-axis EPC-cache ownership; when MPI
+ranks outnumber those tasks, the excess ranks share that task's energy mesh.
+Tensor dJ partitions target/displacement-axis tasks. Rank 0 writes the final
+HDF5/text products after the collective reduction. Set
 `workers_per_rank=1` under MPI for every mode except scalar dJ. Scalar dJ
 supports a hybrid route where
-each rank builds one EPC cache, publishes its arrays in POSIX shared memory,
-and runs `workers_per_rank` clean local worker processes. The launcher affinity
+each rank builds only its assigned EPC cache entries, publishes those arrays in
+POSIX shared memory, and runs `workers_per_rank` clean local worker processes.
+The maximum rank/node cache storage is printed before integration and recorded
+in the HDF5 provenance. The launcher affinity
 assigned to each rank must contain at least
 `workers_per_rank*threads_per_worker` CPUs, and the node-local
 POSIX shared-memory filesystem must be large enough for that rank's cache. In
@@ -546,9 +550,19 @@ endpoint blocks. It does not truncate bands or change the physical expression.
 Converged production comparisons against `direct` are recommended before
 making `spectral` the default.
 
+For a complete `targets='all'`, `axes='xyz'` calculation, the default
+`covariant_symmetry='project'` applies the full spglib Reynolds projector on
+rank zero after MPI integration. It transforms the target atom, directed bond,
+periodic `Rp`, and Cartesian polar-vector component together; it is not a
+distance-shell average. The target, bond, and q-mesh quotient must be closed
+under every detected operation. Partial target/component diagnostics default
+to `none` unless a policy is explicitly supplied.
+
 **Outputs:** `${savedir}/${prefix}.dj.txt`, `.all_bonds.tsv`, and `.h5`. HDF5
 contains displacement metadata and target/bond datasets shaped `(nRp, 3)` in
-meV/A.
+meV/A. The `symmetry/` group records policy, application status, space group,
+operation count, tolerance, and raw maximum/RMS covariance residual. The
+canonical `dJ_r` group contains the projected values when projection is active.
 
 Native engine: `slw.exchange.engine`; numerical kernel:
 `slw.exchange.kernels.dj_epr`.
@@ -582,6 +596,8 @@ Native engine: `slw.exchange.engine`; numerical kernel:
 | `ddelta_mode` | enum {off, local, onsite} | no | `off` | Include derivative of local exchange splitting Delta. off: legacy dG-only; local: use full local block of g_up-g_dn; onsite: use only electron Re=(0,0,0) onsite derivative.<br>CLI aliases: `--ddelta_mode` |
 | `symprec` | float | no | `0.0001` | spglib symmetry tolerance for orbit grouping.<br>CLI aliases: `--symprec` |
 | `angle_tolerance` | float | no | `-1.0` | spglib angle tolerance in degrees; -1 uses spglib default.<br>CLI aliases: `--angle_tolerance` |
+| `covariant_symmetry` | enum {none, report, project, fail} | no | `project` | Space-group covariance policy for scalar `dJ/du`. `project` applies the rank-zero target/bond/Rp/Cartesian Reynolds projector; `report` preserves raw values and records the residual; `fail` rejects a residual above tolerance; `none` skips discovery. Partial targets or axes default to `none`.<br>CLI aliases: `--covariant_symmetry` |
+| `covariant_symmetry_tolerance_mev_per_ang` | float | no | `1.0e-8` | Non-negative maximum-component tolerance used by `covariant_symmetry='fail'` and recorded as provenance.<br>CLI aliases: `--covariant_symmetry_tolerance_mev_per_ang` |
 | `orbit_grouping` | enum {spglib, shell} | no | `spglib` | Orbit grouping mode. shell groups all bonds with the same shell index and distance.<br>CLI aliases: `--orbit_grouping` |
 | `debug_orbits` | boolean | no | .false. | Print spglib operation and bond-mapping diagnostics.<br>CLI aliases: `--debug_orbits` |
 | `debug_orbit_shell` | int | no | none / runtime | Restrict --debug_orbits bond diagnostics to one shell.<br>CLI aliases: `--debug_orbit_shell` |
@@ -879,11 +895,20 @@ Backend: `slw.magph.legacy.reference.solver_mpi`; MPI backend:
 ### `calculation='lifetime'`
 
 **Runtime requirements:** Static canonical exchange HDF5, scalar exchange
-derivative HDF5, and a schema-v3 phonon cache are required. The exchange and
+derivative HDF5, and either a schema-v3 phonon cache or an EPR HDF5 containing
+IFCs are required. If the cache is absent, rank zero constructs it from EPR on
+the derivative HDF5 q mesh, writes it atomically, and releases the other MPI
+ranks only after the completed cache is visible. An existing cache is reused
+without rebuilding. The exchange and
 derivative bond maps, units, directed mates, real-space/Fourier conventions,
 derivative ASR, phonon mass normalization, and q mesh are screened before any
-LSWT calculation. `J_iso` is admitted only with compatible `dJ_iso/du` and is
-promoted internally to `J_iso I` without granting tensor capabilities. FM
+LSWT calculation. The derivative bond map may be a strict, directed-mate-complete
+subset of the static exchange map. This permits, for example, shell-10 `J` with
+shell-4 `dJ/du`: static bonds absent from the derivative source are retained in
+LSWT and embedded as exactly zero in the vertex. A derivative bond absent from
+the static exchange map, or a subset missing its directed mate, is rejected.
+`J_iso` is admitted only with compatible `dJ_iso/du` and is promoted internally
+to `J_iso I` without granting tensor capabilities. FM
 supports any positive number of magnetic sublattices; the initial AFM route is
 restricted to exactly two collinear opposite sublattices. The initial FM
 lifetime channel contract accepts collinear SIA that does not generate
@@ -906,7 +931,9 @@ are printed at run time.
 **Outputs:** One atomic, no-clobber-by-default NPZ containing fractional k
 points, physical magnon energies, complex on-shell self-energy, HWHM, FWHM,
 rate in `ps^-1`, lifetime in `ps`, validity flags, and JSON provenance. The
-default path is `${savedir}/${prefix}.lifetime.npz`.
+default path is `${savedir}/${prefix}.lifetime.npz`. Provenance records the
+static, explicit derivative, and zero-filled bond counts so a truncated `dJ`
+range is never implicit.
 
 Backend: `slw.magph.engine:prepare_run`.
 
@@ -914,7 +941,11 @@ Backend: `slw.magph.engine:prepare_run`.
 |---|---|---:|---|---|
 | `exchange_h5` | path | yes | — | Canonical static scalar-exchange HDF5 with explicit Hamiltonian/bond provenance. |
 | `derivative_h5` | path | yes | — | Scalar `dJ/du` HDF5 with periodic `Rp`, q mesh, units, phase, and mate provenance. |
-| `phonon_cache` | path | yes | — | Native-compatible schema-v3 phonon cache. |
+| `phonon_cache` | path | conditional | `${savedir}/${prefix}.phonon.npz` when `phonon_epr` is set | Native-compatible schema-v3 phonon cache. If present it is reused; if absent it is the output built from `phonon_epr`. |
+| `phonon_epr` | path | conditional | none | qe2pert EPR HDF5 used by rank zero only when `phonon_cache` is absent. At least one of `phonon_cache` and `phonon_epr` is required. |
+| `phonon_loto` | enum {auto, none, 2d, 3d} | no | auto | Long-range polar correction used while building an EPR-derived cache. `auto` follows EPR metadata. |
+| `phonon_imaginary_tolerance_mev` | float | no | `1.0e-6` | Non-negative roundoff window: modes with absolute signed frequency within it are stored as exact zero; more-negative modes fail cache construction. |
+| `phonon_cache_compressed` | boolean | no | `.false.` | Compress a newly generated cache. Uncompressed cache writing/loading is faster and is preferred when storage is not limiting. |
 | `magnetic_order` | enum {fm, collinear_afm} | yes | — | Explicit magnetic model; it is never inferred from the sign of J. |
 | `spin_magnitudes` | float or float list | yes | — | Positive spin magnitude broadcast from a scalar or supplied per magnetic site. |
 | `spin_pattern` | float list | conditional | FM all +1; AFM +1,-1 | Explicit collinear signs when overriding the canonical pattern. |
@@ -941,7 +972,9 @@ Native lifetime resource controls are all in `&parallel`. It requires
 `threads_per_worker` plus the q/bond/vertex/self-energy/channel chunk fields
 listed in the common table above for rank-local vectorized work. Its native
 kernels are NumPy-vectorized, so an explicit `numba_threads` is rejected;
-`blas_threads` controls their dense linear algebra.
+`blas_threads` controls their dense linear algebra. EPR phonon construction is
+performed once on rank zero with batched, vectorized dynamical-matrix assembly
+and diagonalization; `q_chunk_size` bounds that preparation stage as well.
 
 ### `calculation='scattering_kbz'`
 

@@ -16,6 +16,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from multiprocessing import shared_memory
+from socket import gethostname
 
 import h5py
 import numpy as np
@@ -27,6 +28,10 @@ except ImportError:  # pragma: no cover - optional runtime accelerator control
 
 from slw.core.constants import BOHR_TO_ANG
 from slw.core.qe2pert_ws import init_rvec_images, set_wigner_seitz_cell
+from slw.exchange.kernels.dj_symmetry import (
+    CovariantDerivativeSymmetryResult,
+    project_epr_scalar_derivative,
+)
 from slw.exchange.kernels.eph_provider import _read_meta, _unit_scale_to_ev
 from slw.exchange.kernels.epr import (
     _find_nearest_neighbours_from_epr,
@@ -48,7 +53,6 @@ from slw.exchange.kernels.parallel import (
     collective_call,
     collective_root_call,
     collective_sum,
-    partition_sequence,
     rank_size,
 )
 
@@ -126,6 +130,49 @@ def _format_elapsed(seconds):
     if minutes:
         return f"{minutes:d}m{secs:02d}s"
     return f"{secs:d}s"
+
+
+def _format_storage(byte_count):
+    value = float(byte_count)
+    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
+        if value < 1024.0 or unit == "TiB":
+            return f"{value:.2f} {unit}"
+        value /= 1024.0
+    raise AssertionError("unreachable storage unit")
+
+
+def _array_storage_bytes(value):
+    if isinstance(value, np.ndarray):
+        return int(value.nbytes)
+    if isinstance(value, dict):
+        return sum(_array_storage_bytes(item) for item in value.values())
+    if isinstance(value, (list, tuple)):
+        return sum(_array_storage_bytes(item) for item in value)
+    return 0
+
+
+def _partition_derivative_work(work_items, energy_mesh, rank, size):
+    """Distribute cache ownership first, then excess ranks over energy."""
+
+    items = tuple(work_items)
+    energies = tuple(energy_mesh)
+    worker_rank = int(rank)
+    worker_count = int(size)
+    if not items:
+        raise ValueError("scalar dJ requires at least one target-axis work item")
+    if worker_count < 1 or not 0 <= worker_rank < worker_count:
+        raise ValueError("invalid scalar dJ MPI rank/size")
+    if worker_count <= len(items):
+        return tuple(items[worker_rank::worker_count]), energies, 1
+
+    item_index = worker_rank % len(items)
+    replica_slot = worker_rank // len(items)
+    replica_count = (worker_count - 1 - item_index) // len(items) + 1
+    return (
+        (items[item_index],),
+        tuple(energies[replica_slot::replica_count]),
+        replica_count,
+    )
 
 
 def _axis_list(text):
@@ -508,9 +555,9 @@ def _build_gkq_onsite_one(
         grp = h5["eph_matrix_wannier"]
         el_images = init_rvec_images(meta.nk_grid, meta.at)
         ph_images = init_rvec_images(meta.nq_grid, meta.at)
-        nk = len(kpts)
         nq = len(qpts)
-        gkq = np.zeros((nq, nk, meta.nwan, meta.nwan), dtype=np.complex128)
+        # Re=(0,0,0) makes this onsite contribution exactly independent of k.
+        gq = np.zeros((nq, meta.nwan, meta.nwan), dtype=np.complex128)
         ws_cache = {}
         ia = int(target_ia0) + 1
         for jw in range(1, meta.nwan + 1):
@@ -549,8 +596,8 @@ def _build_gkq_onsite_one(
                 )
                 block = np.sum(arr[ax_id][re_mask, :], axis=0) * scale
                 vals_q = phase_q @ block
-                gkq[:, :, iw - 1, jw - 1] += vals_q[:, None]
-        return gkq
+                gq[:, iw - 1, jw - 1] += vals_q
+        return gq
 
 
 def _build_gk_rp_one(
@@ -647,8 +694,8 @@ def _build_gk_rp_onsite_one(
         grp = h5["eph_matrix_wannier"]
         el_images = init_rvec_images(meta.nk_grid, meta.at)
         ph_images = init_rvec_images(meta.nq_grid, meta.at)
-        nk = len(kpts)
-        gk = np.zeros((1, nk, meta.nwan, meta.nwan), dtype=np.complex128)
+        # With both Re and Rp fixed, the onsite contribution is k-independent.
+        g_rp = np.zeros((1, meta.nwan, meta.nwan), dtype=np.complex128)
         ws_cache = {}
         ia = int(target_ia0) + 1
         for jw in range(1, meta.nwan + 1):
@@ -686,8 +733,8 @@ def _build_gk_rp_onsite_one(
                 if not np.any(re_mask) or not np.any(rp_mask):
                     continue
                 block = np.sum(arr[ax_id][re_mask][:, rp_mask]) * scale
-                gk[0, :, iw - 1, jw - 1] += block
-        return gk
+                g_rp[0, iw - 1, jw - 1] += block
+        return g_rp
 
 
 def _build_g_cache_entry(task):
@@ -744,7 +791,7 @@ def _build_g_cache_entry(task):
     return (spin, ia0, ax, bool(onsite_only)), arr
 
 
-def _precache(args, labels, target_ids, axes, slices, pair_meta):
+def _precache(args, labels, work_items, slices, pair_meta):
     kpts = _full_k_mesh(args.kmesh)
     with h5py.File(args.epr_up, "r") as h5:
         epr_qmesh = tuple(int(x) for x in h5["basic_data/qc_dim"][()])
@@ -784,8 +831,40 @@ def _precache(args, labels, target_ids, axes, slices, pair_meta):
     tasks = []
     onsite_mode = str(getattr(args, "ddelta_mode", "off")).lower()
     need_ddelta_onsite = onsite_mode == "onsite"
-    for ia0 in target_ids:
-        for ax in axes:
+    for ia0, ax in work_items:
+        tasks.append(
+            (
+                "up",
+                args.epr_up,
+                ia0,
+                ax,
+                labels,
+                args.g_transform,
+                kpts,
+                qpts,
+                args.rp_idx,
+                args.eph_unit,
+                args.rotation_mode,
+                False,
+            )
+        )
+        tasks.append(
+            (
+                "down",
+                args.epr_dn,
+                ia0,
+                ax,
+                labels,
+                args.g_transform,
+                kpts,
+                qpts,
+                args.rp_idx,
+                args.eph_unit,
+                args.rotation_mode,
+                False,
+            )
+        )
+        if need_ddelta_onsite:
             tasks.append(
                 (
                     "up",
@@ -799,7 +878,7 @@ def _precache(args, labels, target_ids, axes, slices, pair_meta):
                     args.rp_idx,
                     args.eph_unit,
                     args.rotation_mode,
-                    False,
+                    True,
                 )
             )
             tasks.append(
@@ -815,42 +894,9 @@ def _precache(args, labels, target_ids, axes, slices, pair_meta):
                     args.rp_idx,
                     args.eph_unit,
                     args.rotation_mode,
-                    False,
+                    True,
                 )
             )
-            if need_ddelta_onsite:
-                tasks.append(
-                    (
-                        "up",
-                        args.epr_up,
-                        ia0,
-                        ax,
-                        labels,
-                        args.g_transform,
-                        kpts,
-                        qpts,
-                        args.rp_idx,
-                        args.eph_unit,
-                        args.rotation_mode,
-                        True,
-                    )
-                )
-                tasks.append(
-                    (
-                        "down",
-                        args.epr_dn,
-                        ia0,
-                        ax,
-                        labels,
-                        args.g_transform,
-                        kpts,
-                        qpts,
-                        args.rp_idx,
-                        args.eph_unit,
-                        args.rotation_mode,
-                        True,
-                    )
-                )
     npre = min(max(1, int(args.precache_workers)), len(tasks))
     if npre <= 1:
         for task in tasks:
@@ -868,14 +914,16 @@ def _precache(args, labels, target_ids, axes, slices, pair_meta):
                 g_cache[key] = arr
     ddelta_cache = {}
     if onsite_mode in {"local", "onsite"}:
-        for ia0 in target_ids:
-            for ax in axes:
-                if onsite_mode == "onsite":
-                    gu = g_cache[("up", ia0, ax, True)]
-                    gd = g_cache[("down", ia0, ax, True)]
-                else:
-                    gu = g_cache[("up", ia0, ax, False)]
-                    gd = g_cache[("down", ia0, ax, False)]
+        for ia0, ax in work_items:
+            if onsite_mode == "onsite":
+                gu = g_cache[("up", ia0, ax, True)]
+                gd = g_cache[("down", ia0, ax, True)]
+                gu -= gd
+                gu *= 0.5
+                ddelta_cache[(ia0, ax)] = gu
+            else:
+                gu = g_cache[("up", ia0, ax, False)]
+                gd = g_cache[("down", ia0, ax, False)]
                 ddelta_cache[(ia0, ax)] = 0.5 * (gu - gd)
     # Onsite-only entries have served their sole purpose in dDelta.  Do not
     # retain them in the integration payload.
@@ -925,15 +973,13 @@ def _compute_chunk(energy_chunk):
     g_kernel = str(st.get("g_kernel", "direct")).lower()
     if g_kernel not in {"direct", "spectral"}:
         raise ValueError(f"Unsupported scalar dJ GgG kernel {g_kernel!r}")
-    target_ids = st["target_ids"]
-    axes = st["axes"]
+    work_items = st["work_items"]
     nk = phase_R.shape[1]
     nq = kq_map.shape[0]
     wk = 1.0 / float(nk)
     out = {
         (ia, ax): np.zeros((nq, len(pair_meta)), dtype=np.complex128)
-        for ia in target_ids
-        for ax in axes
+        for ia, ax in work_items
     }
     endpoint_pairs = tuple(
         dict.fromkeys((int(meta["li"]), int(meta["lj"])) for meta in pair_meta)
@@ -973,12 +1019,11 @@ def _compute_chunk(energy_chunk):
                 )
             )
 
-        for ia in target_ids:
-            for ax in axes:
-                gu = g_cache[("up", ia, ax, False)]
-                gd = g_cache[("down", ia, ax, False)]
-                ddelta = ddelta_cache.get((ia, ax))
-                for iq in range(nq):
+        for ia, ax in work_items:
+            gu = g_cache[("up", ia, ax, False)]
+            gd = g_cache[("down", ia, ax, False)]
+            ddelta = ddelta_cache.get((ia, ax))
+            for iq in range(nq):
                     if g_kernel == "direct":
                         Gu_kq = Gu[kq_map[iq]]
                         Gd_kq = Gd[kq_map[iq]]
@@ -1037,10 +1082,16 @@ def _compute_chunk(energy_chunk):
                             + np.trace(Di @ GRu[ip] @ Dj @ dGRd)
                         ) / rel_sign
                         if ddelta_mode != "off" and ddelta is not None:
-                            ddel_li = np.mean(ddelta[iq, :, sl_i, sl_i], axis=0)
-                            ddel_lj = endpoint_phase * np.mean(
-                                ddelta[iq, :, sl_j, sl_j], axis=0
-                            )
+                            if ddelta_mode == "onsite":
+                                ddel_li = ddelta[iq, sl_i, sl_i]
+                                ddel_lj = endpoint_phase * ddelta[iq, sl_j, sl_j]
+                            else:
+                                ddel_li = np.mean(
+                                    ddelta[iq, :, sl_i, sl_i], axis=0
+                                )
+                                ddel_lj = endpoint_phase * np.mean(
+                                    ddelta[iq, :, sl_j, sl_j], axis=0
+                                )
                             tr += (
                                 np.trace(ddel_li @ GRu[ip] @ Dj @ GRd[ip])
                                 + np.trace(Di @ GRu[ip] @ ddel_lj @ GRd[ip])
@@ -1147,8 +1198,8 @@ def _compute_dj(
     pre,
     slices,
     pair_meta,
-    target_ids,
-    axes,
+    work_items,
+    all_work_items,
     energy_mesh,
     nproc,
     omp_threads=1,
@@ -1169,8 +1220,7 @@ def _compute_dj(
         "g_kernel": pre.get("g_kernel", "direct"),
         "slices": slices,
         "pair_meta": pair_meta,
-        "target_ids": target_ids,
-        "axes": axes,
+        "work_items": tuple(work_items),
         "omp_threads": max(1, int(omp_threads)),
     }
     n_energy = len(energy_mesh)
@@ -1179,8 +1229,7 @@ def _compute_dj(
     nq = int(np.prod(pre["qmesh"]))
     out_q = {
         (ia, ax): np.zeros((nq, len(pair_meta)), dtype=np.complex128)
-        for ia in target_ids
-        for ax in axes
+        for ia, ax in all_work_items
     }
     completed = 0
 
@@ -1288,6 +1337,33 @@ def _rp_slice_for_text(djr, rp_grid, rp_idx):
     )
 
 
+def _derivative_dict_to_array(djr, target_ids, axes, n_bonds, n_rp):
+    axis_to_index = {"x": 0, "y": 1, "z": 2}
+    values = np.zeros((len(target_ids), n_bonds, n_rp, 3), dtype=np.float64)
+    for target_slot, target in enumerate(target_ids):
+        for axis in axes:
+            source = np.asarray(djr[(target, axis)], dtype=np.float64)
+            if source.shape != (n_rp, n_bonds):
+                raise ValueError(
+                    f"dJ block {(target, axis)!r} has shape {source.shape}; "
+                    f"expected {(n_rp, n_bonds)}"
+                )
+            values[target_slot, :, :, axis_to_index[axis]] = source.T
+    return values
+
+
+def _derivative_array_to_dict(values, target_ids, axes):
+    axis_to_index = {"x": 0, "y": 1, "z": 2}
+    array = np.asarray(values, dtype=np.float64)
+    return {
+        (target, axis): np.ascontiguousarray(
+            array[target_slot, :, :, axis_to_index[axis]].T
+        )
+        for target_slot, target in enumerate(target_ids)
+        for axis in axes
+    }
+
+
 def _orbit_label_map(pair_meta, orbits):
     meta_by_key = {(m["gi"], m["gj"], tuple(m["R"])): m for m in pair_meta}
     orbit_counter = {}
@@ -1329,6 +1405,7 @@ def _write_outputs(
     orbits,
     elapsed,
     exe_info,
+    symmetry_result=None,
     rp_text=(0, 0, 0),
 ):
     orbit_label_by_key = _orbit_label_map(pair_meta, orbits)
@@ -1343,6 +1420,14 @@ def _write_outputs(
             f"rp_idx={tuple(args.rp_idx)}\n"
         )
         f.write(f"# terms: dG + dDelta_mode={args.ddelta_mode}\n")
+        if symmetry_result is not None:
+            f.write(
+                "# covariant_symmetry="
+                f"{symmetry_result.policy} applied={symmetry_result.applied} "
+                f"spacegroup={symmetry_result.spacegroup} "
+                "max_raw_residual_meV_per_A="
+                f"{symmetry_result.max_abs_residual_mev_per_ang:.12e}\n"
+            )
         f.write(
             f"# kmesh={tuple(args.kmesh)} nE={args.empoints} nproc={args.nproc} n_chunks={exe_info['n_chunks']} elapsed_s={elapsed:.2f}\n\n"
         )
@@ -1430,6 +1515,7 @@ def _write_h5(
     orbits,
     elapsed,
     exe_info,
+    symmetry_result: CovariantDerivativeSymmetryResult,
 ):
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     axis_to_col = {"x": 0, "y": 1, "z": 2}
@@ -1441,6 +1527,8 @@ def _write_h5(
         h5.attrs["fourier_phase_convention"] = "exp(+i2pi_q_dot_Rp)"
         h5.attrs["directed_bond_mate"] = "(j,i,-R;Rp-R)_periodic"
         h5.attrs["atomic_gauge_bond_phase"] = "endpoint_j_at_R_times_exp(+i2pi_q_dot_R)"
+        h5.attrs["covariant_symmetry_policy"] = symmetry_result.policy
+        h5.attrs["covariant_symmetry_applied"] = int(symmetry_result.applied)
 
         def put_string(group, name, value):
             group.create_dataset(
@@ -1480,6 +1568,23 @@ def _write_h5(
         basic.create_dataset("nproc", data=np.array(int(args.nproc), dtype=np.int64))
         basic.create_dataset(
             "mpi_size", data=np.array(int(exe_info.get("mpi_size", 1)), dtype=np.int64)
+        )
+        put_string(
+            basic,
+            "cache_distribution",
+            exe_info.get("cache_distribution", "rank_local_complete"),
+        )
+        basic.create_dataset(
+            "cache_bytes_per_rank_max",
+            data=np.asarray(
+                int(exe_info.get("cache_bytes_per_rank_max", 0)), dtype=np.int64
+            ),
+        )
+        basic.create_dataset(
+            "cache_bytes_per_node_max",
+            data=np.asarray(
+                int(exe_info.get("cache_bytes_per_node_max", 0)), dtype=np.int64
+            ),
         )
         basic.create_dataset(
             "affinity_cpus_per_rank",
@@ -1521,6 +1626,39 @@ def _write_h5(
                     "tau_cart_ang",
                     data=np.asarray(meta.tau, dtype=np.float64) @ lattice_ang,
                 )
+
+        symmetry = h5.create_group("symmetry")
+        put_string(symmetry, "policy", symmetry_result.policy)
+        symmetry.create_dataset(
+            "tolerance_mev_per_ang",
+            data=np.asarray(symmetry_result.tolerance_mev_per_ang, dtype=np.float64),
+        )
+        symmetry.create_dataset(
+            "applied", data=np.asarray(symmetry_result.applied, dtype=np.bool_)
+        )
+        symmetry.create_dataset(
+            "max_abs_residual_raw_mev_per_ang",
+            data=np.asarray(
+                symmetry_result.max_abs_residual_mev_per_ang, dtype=np.float64
+            ),
+        )
+        symmetry.create_dataset(
+            "rms_residual_raw_mev_per_ang",
+            data=np.asarray(
+                symmetry_result.rms_residual_mev_per_ang, dtype=np.float64
+            ),
+        )
+        symmetry.create_dataset(
+            "n_operations",
+            data=np.asarray(symmetry_result.n_operations, dtype=np.int64),
+        )
+        put_string(symmetry, "spacegroup", symmetry_result.spacegroup)
+        put_string(symmetry, "species_source", symmetry_result.species_source)
+        put_string(
+            symmetry,
+            "transformation",
+            "polar_vector_with_target_bond_and_periodic_Rp",
+        )
 
         bonds = h5.create_group("bonds")
         bonds.create_dataset(
@@ -1656,7 +1794,11 @@ def run(args, comm=None):
                 npoles=args.empoints,
                 beta_eV_inv=args.cfr_beta,
             )
-        pre = _precache(args, labels, target_ids, axes, slices, pair_meta)
+        work_items = tuple((ia, ax) for ia in target_ids for ax in axes)
+        local_work_items, local_energy_mesh, energy_replicas = (
+            _partition_derivative_work(work_items, energy_mesh, rank, size)
+        )
+        pre = _precache(args, labels, local_work_items, slices, pair_meta)
         return (
             species_labels,
             labels,
@@ -1666,6 +1808,10 @@ def run(args, comm=None):
             neighbours,
             pair_meta,
             energy_mesh,
+            work_items,
+            local_work_items,
+            local_energy_mesh,
+            energy_replicas,
             pre,
             available_cpus,
         )
@@ -1679,9 +1825,26 @@ def run(args, comm=None):
         neighbours,
         pair_meta,
         energy_mesh,
+        work_items,
+        local_work_items,
+        local_energy_mesh,
+        energy_replicas,
         pre,
         available_cpus,
     ) = collective_call(comm, setup_local, phase="scalar dJ setup")
+    local_cache_bytes = _array_storage_bytes(pre)
+    local_layout = (
+        gethostname(),
+        int(local_cache_bytes),
+        len(local_work_items),
+        int(energy_replicas),
+    )
+    cache_layout = [local_layout] if comm is None else list(comm.allgather(local_layout))
+    node_cache_bytes = {}
+    for hostname, cache_bytes, _item_count, _replicas in cache_layout:
+        node_cache_bytes[hostname] = node_cache_bytes.get(hostname, 0) + cache_bytes
+    maximum_rank_cache_bytes = max(item[1] for item in cache_layout)
+    maximum_node_cache_bytes = max(node_cache_bytes.values())
     if rank == 0:
         print(
             "[dJ-epr-kspace] local parallel layout: "
@@ -1692,11 +1855,19 @@ def run(args, comm=None):
             f"affinity_cpus_per_rank={available_cpus}",
             flush=True,
         )
-    local_energy_mesh = partition_sequence(energy_mesh, comm)
+        print(
+            "[dJ-epr-kspace] distributed cache layout: "
+            "owner=target-axis then excess-rank energy split; "
+            f"max_rank={_format_storage(maximum_rank_cache_bytes)} "
+            f"max_node={_format_storage(maximum_node_cache_bytes)}",
+            flush=True,
+        )
     print(
         f"[dJ-epr-kspace] assemble dJ: bonds={len(pair_meta)} "
         f"targets={len(target_ids)} axes={axes} nE={len(energy_mesh)} "
         f"local_nE={len(local_energy_mesh)} mpi={size} "
+        f"local_target_axes={len(local_work_items)} "
+        f"energy_replicas={energy_replicas} "
         f"local_workers={int(args.nproc)} omp_threads={int(args.omp_threads)} "
         f"g_kernel={args.g_kernel!s}",
         flush=True,
@@ -1734,8 +1905,8 @@ def run(args, comm=None):
             pre,
             slices,
             pair_meta,
-            target_ids,
-            axes,
+            local_work_items,
+            work_items,
             local_energy_mesh,
             int(args.nproc),
             args.omp_threads,
@@ -1747,7 +1918,17 @@ def run(args, comm=None):
 
     reduced = collective_sum(comm, integrate_local)
     global_chunks = sum(
-        _energy_task_count(len(energy_mesh[irank::size]), int(args.nproc))[1]
+        _energy_task_count(
+            len(
+                _partition_derivative_work(
+                    work_items,
+                    energy_mesh,
+                    irank,
+                    size,
+                )[1]
+            ),
+            int(args.nproc),
+        )[1]
         for irank in range(size)
     )
 
@@ -1759,6 +1940,9 @@ def run(args, comm=None):
             "n_chunks": global_chunks,
             "mpi_size": size,
             "affinity_cpus_per_rank": available_cpus,
+            "cache_distribution": "target_axis_then_energy",
+            "cache_bytes_per_rank_max": maximum_rank_cache_bytes,
+            "cache_bytes_per_node_max": maximum_node_cache_bytes,
             "local_worker_backend": (
                 "posix_shared_process"
                 if comm is not None and int(args.nproc) > 1
@@ -1783,7 +1967,46 @@ def run(args, comm=None):
         os.makedirs(args.out_dir, exist_ok=True)
         out = os.path.join(args.out_dir, args.out_name)
         rp_grid = np.asarray(exe_info["rp_grid"], dtype=np.int64)
-        dj_text, rp_text = _rp_slice_for_text(reduced, rp_grid, args.rp_idx)
+        raw_values = _derivative_dict_to_array(
+            reduced,
+            target_ids,
+            axes,
+            len(pair_meta),
+            len(rp_grid),
+        )
+        symmetry_result = project_epr_scalar_derivative(
+            args.epr_up,
+            raw_values,
+            bond_i_atom=np.asarray([item["gi"] for item in pair_meta], dtype=np.int64),
+            bond_j_atom=np.asarray([item["gj"] for item in pair_meta], dtype=np.int64),
+            bond_cell_shifts=np.asarray(
+                [item["R"] for item in pair_meta], dtype=np.int64
+            ),
+            target_atom_indices=np.asarray(target_ids, dtype=np.int64),
+            rp_cell_shifts=rp_grid,
+            q_mesh_shape=tuple(int(value) for value in exe_info["qmesh"]),
+            labels=labels,
+            species_labels=species_labels,
+            policy=args.covariant_symmetry,
+            tolerance_mev_per_ang=args.covariant_symmetry_tolerance_mev_per_ang,
+            symprec=float(args.symprec),
+            angle_tolerance=float(args.angle_tolerance),
+        )
+        canonical_djr = _derivative_array_to_dict(
+            symmetry_result.values_mev_per_ang,
+            target_ids,
+            axes,
+        )
+        print(
+            "[dJ-epr-kspace] covariant symmetry: "
+            f"policy={symmetry_result.policy} applied={symmetry_result.applied} "
+            f"n_ops={symmetry_result.n_operations} "
+            f"spacegroup={symmetry_result.spacegroup} "
+            "max_raw_residual="
+            f"{symmetry_result.max_abs_residual_mev_per_ang:.6g} meV/A",
+            flush=True,
+        )
+        dj_text, rp_text = _rp_slice_for_text(canonical_djr, rp_grid, args.rp_idx)
         elapsed = time.time() - t0
         tsv = _write_outputs(
             out,
@@ -1796,6 +2019,7 @@ def run(args, comm=None):
             orbits,
             elapsed,
             exe_info,
+            symmetry_result=symmetry_result,
             rp_text=rp_text,
         )
         out_h5 = (
@@ -1810,11 +2034,12 @@ def run(args, comm=None):
             axes,
             target_ids,
             pair_meta,
-            reduced,
+            canonical_djr,
             rp_grid,
             orbits,
             elapsed,
             exe_info,
+            symmetry_result,
         )
         print(f"[dJ-epr-kspace] wrote {out}")
         print(f"[dJ-epr-kspace] wrote {tsv}")
@@ -1919,6 +2144,21 @@ def main():
         type=float,
         default=-1.0,
         help="spglib angle tolerance in degrees; -1 uses spglib default.",
+    )
+    ap.add_argument(
+        "--covariant_symmetry",
+        choices=["none", "report", "project", "fail"],
+        default="project",
+        help=(
+            "Space-group covariance policy for target/bond/Rp/Cartesian dJ/du. "
+            "Projection requires a symmetry-closed data set."
+        ),
+    )
+    ap.add_argument(
+        "--covariant_symmetry_tolerance_mev_per_ang",
+        type=float,
+        default=1.0e-8,
+        help="Maximum raw covariance residual accepted by fail policy.",
     )
     ap.add_argument(
         "--orbit_grouping",

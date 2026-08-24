@@ -56,6 +56,7 @@ NATIVE_MODULES = {
     "derivative.py",
     "dispersion.py",
     "engine.py",
+    "epr_phonon.py",
     "lifetime.py",
     "lswt.py",
     "mesh.py",

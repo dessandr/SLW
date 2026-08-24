@@ -39,7 +39,9 @@ class RestartMode(str, Enum):
 _LIFETIME_KEYS = {
     "asr_policy",
     "broadening_mev",
+    "derivative_reciprocity_atol_mev_per_ang",
     "derivative_h5",
+    "exchange_reciprocity_atol_mev",
     "exchange_h5",
     "frequency_floor_mev",
     "input_format",
@@ -51,6 +53,10 @@ _LIFETIME_KEYS = {
     "output",
     "overwrite",
     "phonon_cache",
+    "phonon_cache_compressed",
+    "phonon_epr",
+    "phonon_imaginary_tolerance_mev",
+    "phonon_loto",
     "quantization_axis",
     "require_complete_targets",
     "restart_mode",
@@ -270,6 +276,10 @@ class MagphLifetimeRequest:
     exchange_h5: Path
     derivative_h5: Path
     phonon_cache: Path
+    phonon_epr: Path | None
+    phonon_loto: str
+    phonon_imaginary_tolerance_mev: float
+    phonon_cache_compressed: bool
     output: Path
     magnetic_order: MagneticOrder
     spin_magnitudes: tuple[float, ...]
@@ -282,6 +292,8 @@ class MagphLifetimeRequest:
     broadening_mev: float
     frequency_floor_mev: float | None
     asr_policy: DerivativeASRPolicy
+    exchange_reciprocity_atol_mev: float
+    derivative_reciprocity_atol_mev_per_ang: float
     metric_energy_tolerance_mev: float
     negative_tolerance_mev: float
     require_complete_targets: bool
@@ -336,7 +348,26 @@ def build_lifetime_request(
 
     exchange_h5 = Path(_required(values, "exchange_h5")).expanduser().resolve()
     derivative_h5 = Path(_required(values, "derivative_h5")).expanduser().resolve()
-    phonon_cache = Path(_required(values, "phonon_cache")).expanduser().resolve()
+    phonon_epr = (
+        None
+        if "phonon_epr" not in values
+        else Path(values["phonon_epr"]).expanduser().resolve()
+    )
+    if "phonon_cache" in values:
+        phonon_cache = Path(values["phonon_cache"]).expanduser().resolve()
+    elif phonon_epr is not None:
+        phonon_cache = (
+            Path(savedir) / f"{prefix}.phonon.npz"
+        ).expanduser().resolve()
+    else:
+        raise MagphInputError(
+            "native lifetime input requires phonon_cache or phonon_epr"
+        )
+    if phonon_cache.suffix.lower() != ".npz":
+        raise MagphInputError("phonon_cache must use the .npz suffix")
+    phonon_loto = str(values.get("phonon_loto", "auto")).strip().lower()
+    if phonon_loto not in {"auto", "none", "2d", "3d"}:
+        raise MagphInputError("phonon_loto must be one of auto, none, 2d, or 3d")
     output = (
         Path(values.get("output", Path(savedir) / f"{prefix}.lifetime.npz"))
         .expanduser()
@@ -404,6 +435,17 @@ def build_lifetime_request(
         exchange_h5=exchange_h5,
         derivative_h5=derivative_h5,
         phonon_cache=phonon_cache,
+        phonon_epr=phonon_epr,
+        phonon_loto=phonon_loto,
+        phonon_imaginary_tolerance_mev=_finite_scalar(
+            values.get("phonon_imaginary_tolerance_mev", 1.0e-6),
+            name="phonon_imaginary_tolerance_mev",
+            nonnegative=True,
+        ),
+        phonon_cache_compressed=_boolean(
+            values.get("phonon_cache_compressed", False),
+            name="phonon_cache_compressed",
+        ),
         output=output,
         magnetic_order=magnetic_order,
         spin_magnitudes=spin_magnitudes,
@@ -420,6 +462,16 @@ def build_lifetime_request(
         broadening_mev=broadening_mev,
         frequency_floor_mev=frequency_floor_mev,
         asr_policy=asr_policy,
+        exchange_reciprocity_atol_mev=_finite_scalar(
+            values.get("exchange_reciprocity_atol_mev", 1.0e-8),
+            name="exchange_reciprocity_atol_mev",
+            nonnegative=True,
+        ),
+        derivative_reciprocity_atol_mev_per_ang=_finite_scalar(
+            values.get("derivative_reciprocity_atol_mev_per_ang", 1.0e-8),
+            name="derivative_reciprocity_atol_mev_per_ang",
+            nonnegative=True,
+        ),
         metric_energy_tolerance_mev=_finite_scalar(
             values.get("metric_energy_tolerance_mev", 0.0),
             name="metric_energy_tolerance_mev",

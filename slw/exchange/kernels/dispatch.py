@@ -160,6 +160,8 @@ _DJ_SCALAR_DEFAULTS: dict[str, Any] = {
     "ddelta_mode": "off",
     "symprec": 1.0e-4,
     "angle_tolerance": -1.0,
+    "covariant_symmetry": "project",
+    "covariant_symmetry_tolerance_mev_per_ang": 1.0e-8,
     "orbit_grouping": "spglib",
     "debug_orbits": False,
     "debug_orbit_shell": None,
@@ -284,6 +286,18 @@ def build_namespace(request: ExchangeRequest) -> tuple[str, str, argparse.Namesp
         # An explicit fallback-grouping request is diagnostic by definition;
         # never project it merely because projection is the production default.
         options["orbit_symmetry"] = "report"
+    if (
+        request.calculation is ExchangeCalculation.DJ
+        and not request.ltensor
+        and "covariant_symmetry" not in advanced
+        and (
+            set(str(options.get("axes", "xyz")).replace(",", "")) != set("xyz")
+            or str(options.get("targets", "all")).strip().lower() != "all"
+        )
+    ):
+        # Partial component/target diagnostics do not span a complete
+        # space-group representation and therefore must preserve raw values.
+        options["covariant_symmetry"] = "none"
     options.update(_core_options(request))
     options["groupby"] = request.groupby.value if request.groupby is not None else None
     options["soc_manifolds"] = (

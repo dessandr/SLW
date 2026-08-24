@@ -158,6 +158,8 @@ _DJ_SCALAR_OPTIONS = {
     "ddelta_mode",
     "symprec",
     "angle_tolerance",
+    "covariant_symmetry",
+    "covariant_symmetry_tolerance_mev_per_ang",
     "orbit_grouping",
     "debug_orbits",
     "debug_orbit_shell",
@@ -244,6 +246,9 @@ _ADVANCED_OPTION_SPECS: dict[str, _OptionSpec] = {
     "spin_magnitude": _OptionSpec("float", minimum=0.0, strict_minimum=True),
     "symprec": _OptionSpec("float", minimum=0.0, strict_minimum=True),
     "orbit_symmetry_tolerance_mev": _OptionSpec("float", minimum=0.0),
+    "covariant_symmetry_tolerance_mev_per_ang": _OptionSpec(
+        "float", minimum=0.0
+    ),
     "qmesh": _OptionSpec("int_vector", length=3, minimum=0.0, strict_minimum=True, allow_none=True),
     "rp_idx": _OptionSpec("int_vector", length=3),
     "spin_direction": _OptionSpec("float_vector", length=3, nonzero=True),
@@ -259,6 +264,9 @@ _ADVANCED_OPTION_SPECS: dict[str, _OptionSpec] = {
     "g_kernel": _OptionSpec("choice", choices=("direct", "spectral")),
     "rotation_mode": _OptionSpec("choice", choices=("none",)),
     "orbit_symmetry": _OptionSpec("choice", choices=("report", "project", "fail")),
+    "covariant_symmetry": _OptionSpec(
+        "choice", choices=("none", "report", "project", "fail")
+    ),
     "ref_epr_up": _OptionSpec("path", allow_none=True),
     "ref_epr_dn": _OptionSpec("path", allow_none=True),
 }
@@ -841,6 +849,15 @@ def _validate_advanced_combinations(
         orbit_policy = values.get("orbit_symmetry")
         if orbit_policy in {"project", "fail"} and (bool(values.get("no_symmetry_orbits", False)) or values.get("orbit_grouping", "spglib") != "spglib"):
             raise ExchangeInputError(f"orbit_symmetry={orbit_policy!r} requires orbit_grouping='spglib' with no_symmetry_orbits=false")
+
+    if calculation is ExchangeCalculation.DJ and not ltensor:
+        covariance_policy = values.get("covariant_symmetry")
+        if covariance_policy == "project" and set(values.get("axes", "xyz")) != set(
+            "xyz"
+        ):
+            raise ExchangeInputError(
+                "covariant_symmetry='project' requires axes='xyz'"
+            )
 
     if calculation is ExchangeCalculation.J and source is ExchangeSource.WANNIER:
         ref_up = _has_value(values.get("ref_epr_up"))

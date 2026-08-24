@@ -14,11 +14,62 @@ from slw.magph.config import build_dispersion_request, build_lifetime_request
 from slw.magph.engine import run_dispersion, run_lifetime
 from slw.magph.parallel import CollectiveExecutionError
 from tests.magph.test_derivative import _write_derivative
+from tests.magph.test_epr_phonon import _write_one_atom_epr
 from tests.magph.test_exchange_screening import _write_scalar
 from tests.magph.test_phonon import _write_cache
 
 
 class NativeMagphEngineTests(unittest.TestCase):
+    def test_missing_phonon_cache_is_built_from_epr_before_lifetime(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            exchange = root / "J.h5"
+            derivative = root / "dJ.h5"
+            epr = root / "sample_epr.h5"
+            output = root / "lifetime.npz"
+            _write_scalar(
+                exchange,
+                [2.0, 2.0],
+                atom_i=[0, 0],
+                atom_j=[0, 0],
+                shifts=[(1, 0, 0), (-1, 0, 0)],
+            )
+            _write_derivative(
+                derivative,
+                np.zeros((1, 2, 1, 3), dtype=np.float64),
+            )
+            _write_one_atom_epr(epr)
+            request = build_lifetime_request(
+                {
+                    "exchange_h5": exchange,
+                    "derivative_h5": derivative,
+                    "phonon_epr": epr,
+                    "output": output,
+                    "magnetic_order": "fm",
+                    "spin_magnitudes": 1.0,
+                    "quantization_axis": (0.0, 0.0, 1.0),
+                    "anisotropy_model": "uniaxial",
+                    "anisotropy_mev": 0.1,
+                    "anisotropy_axis": (0.0, 0.0, 1.0),
+                    "anisotropy_normalization": "unit_vector",
+                    "kmesh": (2, 1, 1),
+                    "kshift": (0.5, 0.0, 0.0),
+                    "temperature_k": 0.0,
+                    "broadening_mev": 0.2,
+                },
+                prefix="sample",
+                savedir=root,
+            )
+
+            result = run_lifetime(request, context=MPIContext(), verbosity="quiet")
+
+            self.assertEqual(result.output, output.resolve())
+            self.assertTrue(request.phonon_cache.is_file())
+            with np.load(output, allow_pickle=False) as payload:
+                metadata = json.loads(str(payload["metadata_json"]))
+                self.assertEqual(metadata["phonon_epr"], str(epr.resolve()))
+                self.assertEqual(metadata["phonon_loto"], "auto")
+
     def test_generated_files_run_through_native_engine(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -83,6 +134,13 @@ class NativeMagphEngineTests(unittest.TestCase):
                     "q_block_streaming",
                 )
                 self.assertFalse(metadata["algorithm"]["full_vertex_materialized"])
+                self.assertEqual(metadata["derivative_static_bond_count"], 2)
+                self.assertEqual(metadata["derivative_source_bond_count"], 2)
+                self.assertEqual(
+                    metadata["derivative_zero_filled_static_bond_count"],
+                    0,
+                )
+                self.assertTrue(metadata["derivative_bond_coverage_complete"])
                 self.assertEqual(
                     metadata["single_ion_anisotropy"]["spin_normalization"],
                     "unit_vector",
@@ -197,6 +255,62 @@ end kpoint_path
             )
             with np.load(output, allow_pickle=False) as payload:
                 self.assertEqual(payload["energy_mev"].shape, (3, 1))
+
+    def test_lifetime_accepts_shorter_derivative_range_than_static_exchange(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            exchange = root / "J_long.h5"
+            derivative = root / "dJ_short.h5"
+            phonon = root / "phonon.npz"
+            output = root / "lifetime.npz"
+            _write_scalar(
+                exchange,
+                [2.0, 2.0, 0.5, 0.5],
+                atom_i=[0, 0, 0, 0],
+                atom_j=[0, 0, 0, 0],
+                shifts=[(1, 0, 0), (-1, 0, 0), (2, 0, 0), (-2, 0, 0)],
+            )
+            _write_derivative(
+                derivative,
+                np.zeros((1, 2, 1, 3), dtype=np.float64),
+            )
+            _write_cache(phonon, frequency=5.0, masses=(4.0,))
+            request = build_lifetime_request(
+                {
+                    "exchange_h5": exchange,
+                    "derivative_h5": derivative,
+                    "phonon_cache": phonon,
+                    "output": output,
+                    "magnetic_order": "fm",
+                    "spin_magnitudes": 1.0,
+                    "quantization_axis": (0.0, 0.0, 1.0),
+                    "anisotropy_model": "uniaxial",
+                    "anisotropy_mev": 0.1,
+                    "anisotropy_axis": (0.0, 0.0, 1.0),
+                    "anisotropy_normalization": "unit_vector",
+                    "kmesh": (2, 1, 1),
+                    "kshift": (0.5, 0.0, 0.0),
+                    "temperature_k": 0.0,
+                    "broadening_mev": 0.2,
+                },
+                prefix="sample",
+                savedir=root,
+            )
+
+            run_lifetime(request, context=MPIContext(), verbosity="quiet")
+
+            with np.load(output, allow_pickle=False) as payload:
+                metadata = json.loads(str(payload["metadata_json"]))
+                self.assertEqual(metadata["derivative_static_bond_count"], 4)
+                self.assertEqual(metadata["derivative_source_bond_count"], 2)
+                self.assertEqual(
+                    metadata["derivative_zero_filled_static_bond_count"],
+                    2,
+                )
+                self.assertFalse(metadata["derivative_bond_coverage_complete"])
+                np.testing.assert_array_equal(payload["gamma_hwhm_mev"], 0.0)
 
 
 if __name__ == "__main__":

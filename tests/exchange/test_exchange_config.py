@@ -359,6 +359,41 @@ class ExchangeConfigTests(unittest.TestCase):
                 savedir="save",
             )
 
+    def test_scalar_dj_covariant_symmetry_defaults_and_partial_contract(self):
+        request = build_exchange_request(
+            "dj",
+            _common(input_format="epr"),
+            prefix="x",
+            savedir="save",
+        )
+        _module, _function, namespace = build_namespace(request)
+        self.assertEqual(namespace.covariant_symmetry, "project")
+        self.assertEqual(
+            namespace.covariant_symmetry_tolerance_mev_per_ang,
+            1.0e-8,
+        )
+
+        partial = build_exchange_request(
+            "dj",
+            _common(input_format="epr", axes="x"),
+            prefix="x",
+            savedir="save",
+        )
+        _module, _function, namespace = build_namespace(partial)
+        self.assertEqual(namespace.covariant_symmetry, "none")
+
+        with self.assertRaisesRegex(ExchangeInputError, "requires axes='xyz'"):
+            build_exchange_request(
+                "dj",
+                _common(
+                    input_format="epr",
+                    axes="x",
+                    covariant_symmetry="project",
+                ),
+                prefix="x",
+                savedir="save",
+            )
+
     def test_source_file_dependencies_and_tensor_target_base(self):
         wannier = {
             "input_format": "wannier",

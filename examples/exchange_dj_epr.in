@@ -9,7 +9,8 @@
 
 &parallel
   execution = 'auto',
-  ! One rank-local EPC cache is shared by these worker processes.
+  ! MPI distributes target-axis EPC-cache ownership before splitting energy.
+  ! Rank-local worker processes share only that rank's assigned cache entries.
   workers_per_rank = 1,
   threads_per_worker = 1,
   precache_workers = 1
@@ -30,6 +31,10 @@
   slices = '0:0:5,1:5:10',
   targets = 'all',
   axes = 'xyz',
+  ! Rank 0 projects target, bond, Rp, and Cartesian vector together under the
+  ! detected space group after MPI integration.
+  covariant_symmetry = 'project',
+  covariant_symmetry_tolerance_mev_per_ang = 1.0d-8,
   g_transform = 'kq',
   ! direct is the full-matrix reference. spectral is an exact full-band
   ! eigenbasis assembly that computes only magnetic-endpoint GgG blocks.

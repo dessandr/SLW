@@ -144,6 +144,14 @@ def _prepare_isotropic_contraction(
         )
     if derivative.n_bonds != exchange.n_bonds:
         raise ValueError("static and derivative bond counts differ")
+    source_bonds = derivative.source_static_bond_indices
+    if source_bonds is None:  # pragma: no cover - canonicalized by the model
+        raise AssertionError("derivative source bond indices were not canonicalized")
+    source_mates = exchange.mirror_index[source_bonds]
+    if not np.array_equal(np.sort(source_mates), np.sort(source_bonds)):
+        raise ValueError(
+            "derivative bond subset must be closed under directed-bond mates"
+        )
     if phonons.q_mesh_shape != derivative.q_mesh_shape:
         raise ValueError(
             f"phonon q mesh {phonons.q_mesh_shape} != derivative q mesh "

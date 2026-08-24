@@ -40,6 +40,15 @@ class ExchangeDerivativeReport:
     max_asr_residual_before_mev_per_ang: float
     max_asr_residual_after_mev_per_ang: float
     projected_asr: bool
+    static_bond_count: int
+    source_bond_count: int
+    zero_filled_static_bond_count: int
+    bond_coverage_complete: bool
+    covariant_symmetry_policy: str
+    covariant_symmetry_applied: bool
+    max_covariance_residual_mev_per_ang: float | None
+    covariant_symmetry_operation_count: int
+    covariant_symmetry_spacegroup: str
 
 
 def _readonly(value: object, *, dtype: np.dtype[Any]) -> NDArray[Any]:
@@ -65,6 +74,7 @@ class ExchangeDerivativeModel:
     q_mesh_shape: tuple[int, int, int]
     isotropic_mev_per_ang: NDArray[np.float64]
     tensor_mev_per_ang: NDArray[np.float64]
+    source_static_bond_indices: NDArray[np.int64] | None = None
     displacement_axes: tuple[str, str, str] = ("x", "y", "z")
     fourier_phase_convention: str = "exp(+i2pi_q_dot_Rp)"
     directed_bond_mate: str = "(j,i,-R;Rp-R)_periodic"
@@ -94,6 +104,38 @@ class ExchangeDerivativeModel:
         if tensor.shape != (*expected_prefix, 3, 3):
             raise ValueError(
                 f"tensor_mev_per_ang shape {tensor.shape} != {(*expected_prefix, 3, 3)}"
+            )
+        source_bonds = (
+            np.arange(isotropic.shape[1], dtype=np.int64)
+            if self.source_static_bond_indices is None
+            else np.asarray(self.source_static_bond_indices)
+        )
+        if (
+            source_bonds.ndim != 1
+            or source_bonds.size == 0
+            or not np.issubdtype(source_bonds.dtype, np.integer)
+        ):
+            raise ValueError(
+                "source_static_bond_indices must be a nonempty integer vector"
+            )
+        source_bonds = _readonly(source_bonds, dtype=np.dtype(np.int64))
+        if (
+            np.any(source_bonds < 0)
+            or np.any(source_bonds >= isotropic.shape[1])
+            or np.unique(source_bonds).size != source_bonds.size
+        ):
+            raise ValueError(
+                "source_static_bond_indices must contain unique in-range bond indices"
+            )
+        source_mask = np.zeros(isotropic.shape[1], dtype=bool)
+        source_mask[source_bonds] = True
+        if not np.array_equal(
+            isotropic[:, ~source_mask], np.zeros_like(isotropic[:, ~source_mask])
+        ) or not np.array_equal(
+            tensor[:, ~source_mask], np.zeros_like(tensor[:, ~source_mask])
+        ):
+            raise ValueError(
+                "static bonds absent from source_static_bond_indices must be exactly zero"
             )
         if not np.all(np.isfinite(isotropic)) or not np.all(np.isfinite(tensor)):
             raise ValueError("exchange derivative contains non-finite values")
@@ -134,6 +176,7 @@ class ExchangeDerivativeModel:
         object.__setattr__(self, "q_mesh_shape", mesh)
         object.__setattr__(self, "isotropic_mev_per_ang", isotropic)
         object.__setattr__(self, "tensor_mev_per_ang", tensor)
+        object.__setattr__(self, "source_static_bond_indices", source_bonds)
         object.__setattr__(self, "displacement_axes", axes)
 
     @property
@@ -147,6 +190,17 @@ class ExchangeDerivativeModel:
     @property
     def n_rp(self) -> int:
         return int(self.rp_cell_shifts.shape[0])
+
+    @property
+    def n_source_bonds(self) -> int:
+        indices = self.source_static_bond_indices
+        if indices is None:  # pragma: no cover - canonicalized by __post_init__
+            raise AssertionError("source bond indices were not canonicalized")
+        return int(indices.size)
+
+    @property
+    def bond_coverage_complete(self) -> bool:
+        return self.n_source_bonds == self.n_bonds
 
 
 def _decode_scalar(value: Any, *, label: str) -> str:
@@ -177,6 +231,22 @@ def _integer_dataset(
     if shape is not None and result.shape != shape:
         raise ValueError(f"{path} shape {result.shape} != {shape}")
     return result
+
+
+def read_exchange_derivative_q_mesh(
+    path: str | Path,
+) -> tuple[int, int, int]:
+    """Read and validate only the phonon q mesh from a derivative HDF5."""
+
+    source = Path(path).expanduser().resolve()
+    if not source.is_file():
+        raise FileNotFoundError(f"exchange derivative HDF5 not found: {source}")
+    with h5py.File(source, "r") as handle:
+        raw = _integer_dataset(handle, "basic_data/qmesh", shape=(3,))
+    mesh = (int(raw[0]), int(raw[1]), int(raw[2]))
+    if any(value <= 0 for value in mesh):
+        raise ValueError("basic_data/qmesh must contain positive integers")
+    return mesh
 
 
 def _axis_order(value: Any, *, label: str) -> tuple[str, str, str]:
@@ -269,7 +339,7 @@ def _periodic_rp_index(
 
 def _dynamic_bond_permutation(
     handle: h5py.File, exchange: ExchangeModel
-) -> NDArray[np.int64]:
+) -> tuple[NDArray[np.int64], NDArray[np.int64]]:
     source_i = _integer_dataset(handle, "bonds/mag_i_atom")
     n_bond = source_i.size
     source_j = _integer_dataset(handle, "bonds/mag_j_atom", shape=(n_bond,))
@@ -287,14 +357,23 @@ def _dynamic_bond_permutation(
             exchange.bond_i_atom, exchange.bond_j_atom, exchange.cell_shift
         )
     ]
-    missing = [key for key in static_keys if key not in lookup]
     extra = sorted(set(source_keys).difference(static_keys))
-    if missing or extra:
+    if extra:
         raise ValueError(
-            "static and derivative bond keys do not match exactly: "
-            f"missing={missing[:3]}, extra={extra[:3]}"
+            "derivative bond keys must be a subset of the static exchange: "
+            f"extra={extra[:3]}"
         )
-    return np.asarray([lookup[key] for key in static_keys], dtype=np.int64)
+    permutation = np.asarray(
+        [lookup.get(key, -1) for key in static_keys], dtype=np.int64
+    )
+    source_static_bonds = np.flatnonzero(permutation >= 0).astype(
+        np.int64, copy=False
+    )
+    if source_static_bonds.size == 0:
+        raise ValueError("derivative bond subset must not be empty")
+    if source_static_bonds.size != len(source_keys):
+        raise AssertionError("unreachable derivative/static bond mapping mismatch")
+    return permutation, source_static_bonds
 
 
 def _reciprocal_derivative(
@@ -364,6 +443,60 @@ def load_exchange_derivative_h5(
                 "exchange derivative requires root attribute "
                 "directed_bond_mate='(j,i,-R;Rp-R)_periodic'"
             )
+        covariance_policy = "unreported"
+        covariance_applied = False
+        max_covariance_residual: float | None = None
+        covariance_operation_count = 0
+        covariance_spacegroup = "unreported"
+        if "symmetry" in handle:
+            symmetry = handle["symmetry"]
+            if not isinstance(symmetry, h5py.Group):
+                raise TypeError("symmetry must be an HDF5 group")
+            if "policy" in symmetry:
+                covariance_policy = _decode_scalar(
+                    symmetry["policy"][()], label="symmetry/policy"
+                ).strip().lower()
+            if covariance_policy not in {
+                "none",
+                "report",
+                "project",
+                "fail",
+                "unreported",
+            }:
+                raise ValueError(
+                    f"unsupported derivative covariance policy {covariance_policy!r}"
+                )
+            if "applied" in symmetry:
+                covariance_applied = bool(
+                    np.asarray(symmetry["applied"][()]).reshape(()).item()
+                )
+            if covariance_applied and covariance_policy != "project":
+                raise ValueError(
+                    "derivative covariance provenance says applied=true without "
+                    "policy='project'"
+                )
+            if "max_abs_residual_raw_mev_per_ang" in symmetry:
+                max_covariance_residual = float(
+                    np.asarray(
+                        symmetry["max_abs_residual_raw_mev_per_ang"][()],
+                        dtype=np.float64,
+                    ).reshape(())
+                )
+                if not np.isfinite(max_covariance_residual) or max_covariance_residual < 0.0:
+                    raise ValueError(
+                        "symmetry/max_abs_residual_raw_mev_per_ang must be "
+                        "finite and non-negative"
+                    )
+            if "n_operations" in symmetry:
+                covariance_operation_count = int(
+                    np.asarray(symmetry["n_operations"][()]).reshape(()).item()
+                )
+                if covariance_operation_count < 0:
+                    raise ValueError("symmetry/n_operations must be non-negative")
+            if "spacegroup" in symmetry:
+                covariance_spacegroup = _decode_scalar(
+                    symmetry["spacegroup"][()], label="symmetry/spacegroup"
+                )
         if "dJ_r" in handle:
             source_dataset = "dJ_r"
         elif "dJ_iso_r" in handle:
@@ -391,15 +524,17 @@ def load_exchange_derivative_h5(
         if any(value <= 0 for value in mesh):
             raise ValueError("basic_data/qmesh must contain positive integers")
         _periodic_rp_index(rp, mesh)
-        permutation = _dynamic_bond_permutation(handle, exchange)
+        permutation, source_static_bonds = _dynamic_bond_permutation(handle, exchange)
 
-        values_source = np.empty(
+        values_source = np.zeros(
             (targets.size, permutation.size, rp.shape[0], 3), dtype=np.float64
         )
         unit_label: str | None = None
-        source_bond_count = permutation.size
+        source_bond_count = int(source_static_bonds.size)
         for target_slot, target in enumerate(targets):
             for static_bond, source_bond in enumerate(permutation):
+                if source_bond < 0:
+                    continue
                 candidates = (
                     f"dJ_r_m{int(target) + 1}_b{int(source_bond) + 1}",
                     f"m{int(target) + 1}_b{int(source_bond) + 1}",
@@ -433,10 +568,6 @@ def load_exchange_derivative_h5(
                 values_source[target_slot, static_bond] = (
                     numeric[:, axis_permutation] * factor
                 )
-        if (
-            source_bond_count != exchange.n_bonds
-        ):  # pragma: no cover - permutation guard
-            raise AssertionError("unreachable derivative bond-count mismatch")
 
     tensor = values_source[..., None, None] * np.eye(3, dtype=np.float64)
     reciprocal = _reciprocal_derivative(
@@ -457,7 +588,11 @@ def load_exchange_derivative_h5(
             f"maximum error={max_reciprocity_error:.6g} meV/angstrom"
         )
     tensor = 0.5 * (tensor + reciprocal)
-    isotropic = np.trace(tensor, axis1=-2, axis2=-1) / 3.0
+    # Both operands are exact scalar multiples of I.  Select one diagonal
+    # component and rebuild the tensor so the canonical model retains the
+    # exact tensor=dJ_iso*I invariant even for non-binary floating values.
+    isotropic = np.array(tensor[..., 0, 0], dtype=np.float64, copy=True)
+    tensor = isotropic[..., None, None] * np.eye(3, dtype=np.float64)
 
     residual_before = np.sum(isotropic, axis=(0, 2))
     max_before = float(np.max(np.abs(residual_before), initial=0.0))
@@ -469,10 +604,10 @@ def load_exchange_derivative_h5(
             f"{asr_tolerance:.6g}"
         )
     if projected:
-        correction = residual_before[None, :, None, :] / float(
+        correction = residual_before[source_static_bonds][None, :, None, :] / float(
             isotropic.shape[0] * isotropic.shape[2]
         )
-        isotropic = isotropic - correction
+        isotropic[:, source_static_bonds] -= correction
         tensor = isotropic[..., None, None] * np.eye(3, dtype=np.float64)
     residual_after = np.sum(isotropic, axis=(0, 2))
     max_after = float(np.max(np.abs(residual_after), initial=0.0))
@@ -487,6 +622,7 @@ def load_exchange_derivative_h5(
         q_mesh_shape=mesh,
         isotropic_mev_per_ang=isotropic,
         tensor_mev_per_ang=tensor,
+        source_static_bond_indices=source_static_bonds,
     )
     report = ExchangeDerivativeReport(
         representation=ExchangeRepresentation.ISOTROPIC,
@@ -498,6 +634,15 @@ def load_exchange_derivative_h5(
         max_asr_residual_before_mev_per_ang=max_before,
         max_asr_residual_after_mev_per_ang=max_after,
         projected_asr=projected,
+        static_bond_count=exchange.n_bonds,
+        source_bond_count=source_bond_count,
+        zero_filled_static_bond_count=exchange.n_bonds - source_bond_count,
+        bond_coverage_complete=source_bond_count == exchange.n_bonds,
+        covariant_symmetry_policy=covariance_policy,
+        covariant_symmetry_applied=covariance_applied,
+        max_covariance_residual_mev_per_ang=max_covariance_residual,
+        covariant_symmetry_operation_count=covariance_operation_count,
+        covariant_symmetry_spacegroup=covariance_spacegroup,
     )
     return model, report
 
@@ -507,4 +652,5 @@ __all__ = [
     "ExchangeDerivativeModel",
     "ExchangeDerivativeReport",
     "load_exchange_derivative_h5",
+    "read_exchange_derivative_q_mesh",
 ]
