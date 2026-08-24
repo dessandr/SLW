@@ -66,6 +66,11 @@ The native magnon–phonon redesign boundary and FM/AFM admission policy are in
 `calculation='lifetime'` is registered; hybrid, Berry, spectral, and plotting
 routes remain behind the compatibility boundary.
 
+Native lifetime accepts an explicit dense `phonon_qmesh`. The phonons are
+evaluated on that mesh while real-space `dJ(R,Rp)` is Fourier interpolated from
+its source mesh, so electronic dJ does not need to be recomputed merely to make
+the self-energy q integration denser.
+
 Every material-dependent choice is explicit. In particular, exchange commands
 require the magnetic atom indices, local orbital slices, and k mesh instead of
 assuming a particular crystal or Wannier ordering.

@@ -897,9 +897,13 @@ Backend: `slw.magph.legacy.reference.solver_mpi`; MPI backend:
 **Runtime requirements:** Static canonical exchange HDF5, scalar exchange
 derivative HDF5, and either a schema-v3 phonon cache or an EPR HDF5 containing
 IFCs are required. If the cache is absent, rank zero constructs it from EPR on
-the derivative HDF5 q mesh, writes it atomically, and releases the other MPI
-ranks only after the completed cache is visible. An existing cache is reused
-without rebuilding. The exchange and
+the explicit `phonon_qmesh`, writes it atomically, and releases the other MPI
+ranks only after the completed cache is visible. Without `phonon_qmesh`, cache
+construction defaults to the derivative source mesh for backward
+compatibility. An existing cache is reused without rebuilding and must match
+an explicit `phonon_qmesh`. The real-space derivative `dJ(R,Rp)` is Fourier
+interpolated onto every phonon q point, so the phonon evaluation mesh may be
+denser than the derivative source mesh. The exchange and
 derivative bond maps, units, directed mates, real-space/Fourier conventions,
 derivative ASR, phonon mass normalization, and q mesh are screened before any
 LSWT calculation. The derivative bond map may be a strict, directed-mate-complete
@@ -915,8 +919,8 @@ lifetime channel contract accepts collinear SIA that does not generate
 anomalous FM terms; energy-only dispersion has the broader Nambu treatment.
 
 **MPI:** `execution='auto'` uses every discovered MPI rank. The mode-resolved
-`dJ/du` coupling cache is constructed with balanced q-point ownership and then
-broadcast. The exact uniform `lcm(kmesh,qmesh)` union of all required `k+q`
+`dJ/du` coupling cache is constructed with balanced phonon-q ownership and then
+broadcast. The exact uniform `lcm(kmesh,phonon_qmesh)` union of all required `k+q`
 points is diagonalized with the same distributed-assemble-broadcast pattern.
 External k points are then distributed in balanced contiguous blocks. Within a
 rank, each q block is built in the exchange-bond/site-Nambu representation,
@@ -932,8 +936,8 @@ are printed at run time.
 points, physical magnon energies, complex on-shell self-energy, HWHM, FWHM,
 rate in `ps^-1`, lifetime in `ps`, validity flags, and JSON provenance. The
 default path is `${savedir}/${prefix}.lifetime.npz`. Provenance records the
-static, explicit derivative, and zero-filled bond counts so a truncated `dJ`
-range is never implicit.
+static, explicit derivative, and zero-filled bond counts, the derivative source
+mesh, the phonon evaluation mesh, and whether Fourier interpolation was active.
 
 Backend: `slw.magph.engine:prepare_run`.
 
@@ -943,6 +947,7 @@ Backend: `slw.magph.engine:prepare_run`.
 | `derivative_h5` | path | yes | — | Scalar `dJ/du` HDF5 with periodic `Rp`, q mesh, units, phase, and mate provenance. |
 | `phonon_cache` | path | conditional | `${savedir}/${prefix}.phonon.npz` when `phonon_epr` is set | Native-compatible schema-v3 phonon cache. If present it is reused; if absent it is the output built from `phonon_epr`. |
 | `phonon_epr` | path | conditional | none | qe2pert EPR HDF5 used by rank zero only when `phonon_cache` is absent. At least one of `phonon_cache` and `phonon_epr` is required. |
+| `phonon_qmesh` | int[3] | no | existing cache mesh; derivative source mesh when building a missing cache | Uniform phonon/self-energy q mesh. `dJ(R,Rp)` is Fourier interpolated from its source mesh onto these q points. An existing cache must match an explicit value. |
 | `phonon_loto` | enum {auto, none, 2d, 3d} | no | auto | Long-range polar correction used while building an EPR-derived cache. `auto` follows EPR metadata. |
 | `phonon_imaginary_tolerance_mev` | float | no | `1.0e-6` | Non-negative roundoff window: modes with absolute signed frequency within it are stored as exact zero; more-negative modes fail cache construction. |
 | `phonon_cache_compressed` | boolean | no | `.false.` | Compress a newly generated cache. Uncompressed cache writing/loading is faster and is preferred when storage is not limiting. |

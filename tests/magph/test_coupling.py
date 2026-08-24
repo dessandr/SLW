@@ -95,6 +95,26 @@ def _phonons() -> PhononCache:
     )
 
 
+def _phonons_on_qx_mesh(nqx: int) -> PhononCache:
+    q_points = np.zeros((nqx, 3), dtype=np.float64)
+    q_points[:, 0] = np.arange(nqx, dtype=np.float64) / float(nqx)
+    vectors = np.zeros((nqx, 6, 2, 3), dtype=np.complex128)
+    for mode in range(6):
+        vectors[:, mode, mode // 3, mode % 3] = 1.0
+    return PhononCache(
+        source="phonon_dense.npz",
+        schema_version=3,
+        q_points_frac=q_points,
+        frequencies_mev=np.full((nqx, 6), 4.0),
+        eigenvectors_mass_normalized=vectors,
+        masses=np.ones(2),
+        mass_unit=PhononMassUnit.AMU,
+        q_mesh_shape=(nqx, 1, 1),
+        vector_convention=CELL_GAUGE_VECTOR_CONVENTION,
+        fourier_phase_convention=CELL_GAUGE_FOURIER_PHASE_CONVENTION,
+    )
+
+
 def _derivative(exchange: ExchangeModel, *, partial=False) -> ExchangeDerivativeModel:
     targets = np.asarray((0,)) if partial else np.asarray((0, 1))
     values = np.zeros((targets.size, 2, 2, 3), dtype=np.float64)
@@ -116,6 +136,26 @@ def _derivative(exchange: ExchangeModel, *, partial=False) -> ExchangeDerivative
 
 
 class ModeResolvedCouplingTests(unittest.TestCase):
+    def test_realspace_derivative_interpolates_to_dense_phonon_mesh(self) -> None:
+        exchange = _exchange()
+        phonons = _phonons_on_qx_mesh(4)
+        zero_point = zero_point_displacements(phonons)
+        result = build_mode_resolved_isotropic_derivative(
+            exchange,
+            _derivative(exchange),
+            phonons,
+            zero_point,
+            q_chunk_size=2,
+            bond_chunk_size=1,
+        )
+
+        amplitude = zero_point.values_ang[:, 0, 0, 0]
+        phase = np.exp(-2.0j * np.pi * phonons.q_points_frac[:, 0])
+        expected = amplitude * (1.0 + 2.0 * phase)
+        np.testing.assert_allclose(result.lambda_mev[:, 0, 0], expected)
+        np.testing.assert_allclose(result.lambda_mev[:, 0, 1], expected)
+        self.assertEqual(result.q_mesh_shape, (4, 1, 1))
+
     def test_vectorized_fourier_and_phonon_contraction(self) -> None:
         exchange = _exchange()
         phonons = _phonons()
@@ -190,7 +230,7 @@ class ModeResolvedCouplingTests(unittest.TestCase):
 
     def test_two_rank_q_distribution_matches_serial_cache(self) -> None:
         exchange = _exchange()
-        phonons = _phonons()
+        phonons = _phonons_on_qx_mesh(4)
         zero_point = zero_point_displacements(phonons)
         derivative = _derivative(exchange)
         serial = build_mode_resolved_isotropic_derivative(

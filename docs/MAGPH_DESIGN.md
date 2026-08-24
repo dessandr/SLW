@@ -219,8 +219,9 @@ their provenance in the native lifetime product:
    directed-mate-complete subset of the static map, embed absent static bonds as
    exact zero derivatives, and check `dJ/du` units (normally meV/angstrom),
    rank-zero space-group covariance provenance when present, derivative
-   acoustic-sum-rule status, phonon q-grid and phase convention, and phonon
-   stability. Consequently a longer-range static `J` model can build LSWT while
+   acoustic-sum-rule status, derivative source q-grid, phonon evaluation q-grid
+   and phase convention, and phonon stability. Consequently a longer-range
+   static `J` model can build LSWT while
    a shorter-range `dJ/du` model supplies the vertex. Derivative bonds that are
    not present in static `J` are rejected.
 
@@ -327,7 +328,7 @@ $$
 The production lifetime path distributes the `dJ/du` to phonon-mode coupling
 contraction over q points, assembles it deterministically, and broadcasts the
 completed `Lambda(q,mode,bond)` cache. It then forms the exact uniform
-`lcm(kmesh,qmesh)` union mesh. Its LSWT eigensystems are likewise distributed
+`lcm(kmesh,phonon_qmesh)` union mesh. Its LSWT eigensystems are likewise distributed
 across MPI ranks, assembled, and broadcast once, so repeated `k+q` points are
 never diagonalized separately for every external k. External k points then
 remain the independent MPI work axis. Within each rank, a q block is transformed
@@ -338,6 +339,21 @@ weights are normalized globally before slicing, and only rank zero coordinates
 final metadata/output. The two broadcast caches are currently replicated once
 per MPI rank; their actual rank and maximum-node footprints are printed at run
 time and recorded in output metadata.
+
+The derivative HDF5 mesh labels the finite real-space `Rp` representation; it
+does not restrict the evaluation q grid. For every phonon q point the native
+coupling kernel evaluates
+
+$$
+\frac{\partial J_{ij}(\mathbf R;\mathbf q)}{\partial u}
+=\sum_{\mathbf R_p}e^{+i2\pi\mathbf q\cdot\mathbf R_p}
+\frac{\partial J_{ij}(\mathbf R;\mathbf R_p)}{\partial u}.
+$$
+
+Thus `phonon_qmesh` may be denser than the derivative source mesh without
+recomputing electronic `dJ/du`. This is Fourier interpolation of the retained
+real-space derivative, not additional information beyond its source sampling;
+both meshes and the active interpolation flag are recorded in the output.
 
 ## Native dispersion output v1
 
@@ -443,6 +459,7 @@ input file:
   derivative_h5 = './input/dJ.h5',
   phonon_cache = './input/phonons.npz',
   phonon_epr = './input/sample_epr.h5',
+  phonon_qmesh = 8, 8, 8,
   phonon_loto = 'auto',
   magnetic_order = 'fm',
   spin_magnitudes = 2.5,

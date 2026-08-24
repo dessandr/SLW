@@ -110,6 +110,11 @@ def _request_signature(
                 else _source_stamp(request.phonon_epr)
             ),
             "phonon_loto": request.phonon_loto,
+            "phonon_qmesh": (
+                None
+                if request.phonon_qmesh is None
+                else list(request.phonon_qmesh)
+            ),
             "phonon_imaginary_tolerance_mev": (
                 request.phonon_imaginary_tolerance_mev
             ),
@@ -375,7 +380,11 @@ def _ensure_phonon_cache(
                         f"phonon cache not found: {request.phonon_cache}; "
                         "set phonon_epr to build it automatically"
                     )
-                q_mesh = read_exchange_derivative_q_mesh(request.derivative_h5)
+                q_mesh = (
+                    read_exchange_derivative_q_mesh(request.derivative_h5)
+                    if request.phonon_qmesh is None
+                    else request.phonon_qmesh
+                )
                 logger.info(
                     "phonon cache = absent; building from EPR on rank 0"
                 )
@@ -431,6 +440,19 @@ def _load_native_problem(request: MagphLifetimeRequest) -> tuple[Any, ...]:
         asr_policy=request.asr_policy,
     )
     phonons = load_phonon_cache(request.phonon_cache)
+    if phonons.q_mesh_shape is None:
+        raise ValueError(
+            "native lifetime requires phonon q_mesh_shape for dense-q "
+            "interpolation and exact k+q indexing"
+        )
+    if (
+        request.phonon_qmesh is not None
+        and phonons.q_mesh_shape != request.phonon_qmesh
+    ):
+        raise ValueError(
+            f"phonon cache q mesh {phonons.q_mesh_shape} != requested "
+            f"phonon_qmesh {request.phonon_qmesh}"
+        )
     zero_point = zero_point_displacements(
         phonons,
         frequency_floor_mev=request.frequency_floor_mev,
@@ -538,6 +560,11 @@ def _output_metadata(
             None if request.phonon_epr is None else str(request.phonon_epr)
         ),
         "phonon_loto": request.phonon_loto,
+        "phonon_qmesh_requested": (
+            None
+            if request.phonon_qmesh is None
+            else list(request.phonon_qmesh)
+        ),
         "phonon_imaginary_tolerance_mev": (
             request.phonon_imaginary_tolerance_mev
         ),
@@ -587,6 +614,11 @@ def _output_metadata(
         ),
         "derivative_fourier_phase_convention": derivative.fourier_phase_convention,
         "derivative_directed_bond_mate": derivative.directed_bond_mate,
+        "derivative_source_qmesh": list(derivative.q_mesh_shape),
+        "phonon_evaluation_qmesh": list(phonons.q_mesh_shape),
+        "derivative_q_interpolation": bool(
+            derivative.q_mesh_shape != phonons.q_mesh_shape
+        ),
         "phonon_schema_version": int(phonons.schema_version),
         "phonon_mass_unit": phonons.mass_unit.value,
         "phonon_vector_convention": phonons.vector_convention,
@@ -617,6 +649,7 @@ def _output_metadata(
         },
         "algorithm": {
             "coupling": "mpi_q_distributed_cache",
+            "derivative_q_interpolation": "realspace_fourier_from_dJ_Rp",
             "lswt": "uniform_k_plus_q_union_cache",
             "vertex_self_energy": "q_block_streaming",
             "full_vertex_materialized": False,
@@ -626,7 +659,7 @@ def _output_metadata(
             int(np.lcm(k_value, q_value))
             for k_value, q_value in zip(
                 request.kmesh,
-                derivative.q_mesh_shape,
+                phonons.q_mesh_shape,
                 strict=True,
             )
         ],
@@ -687,6 +720,22 @@ def run_lifetime(
         logger.info(f"k-point count  = {k_points.shape[0]}")
         logger.info(f"phonon q count = {phonons.nq}")
         logger.info(
+            "dJ source q mesh = "
+            + " x ".join(map(str, derivative.q_mesh_shape))
+        )
+        logger.info(
+            "phonon evaluation q mesh = "
+            + " x ".join(map(str, phonons.q_mesh_shape))
+        )
+        logger.info(
+            "dJ q interpolation = real-space Fourier "
+            + (
+                "(active)"
+                if derivative.q_mesh_shape != phonons.q_mesh_shape
+                else "(source and evaluation meshes coincide)"
+            )
+        )
+        logger.info(
             "dJ bond coverage = "
             f"{derivative_report.source_bond_count}/"
             f"{derivative_report.static_bond_count} explicit; "
@@ -717,7 +766,7 @@ def run_lifetime(
             int(np.lcm(k_value, q_value))
             for k_value, q_value in zip(
                 request.kmesh,
-                derivative.q_mesh_shape,
+                phonons.q_mesh_shape,
                 strict=True,
             )
         )
@@ -1110,6 +1159,12 @@ def prepare_run(
                 ("magnetic order", lifetime_request.magnetic_order.value),
                 ("k-point mesh", " x ".join(map(str, lifetime_request.kmesh))),
                 ("k-grid shift", ", ".join(map(str, lifetime_request.kshift))),
+                (
+                    "phonon q mesh",
+                    "cache / dJ mesh default"
+                    if lifetime_request.phonon_qmesh is None
+                    else " x ".join(map(str, lifetime_request.phonon_qmesh)),
+                ),
                 ("workers/rank", config.parallel.workers_per_rank),
                 ("threads/worker", config.parallel.threads_per_worker),
                 ("output", lifetime_request.output),
@@ -1183,7 +1238,7 @@ def format_help(
         "  kshift            = explicit three-component grid-unit shift\n"
         "  temperature_k     = non-negative temperature\n"
         "  broadening_mev    = positive retarded broadening\n\n"
-        "Optional &magph: phonon_cache, phonon_epr, phonon_loto,\n"
+        "Optional &magph: phonon_cache, phonon_epr, phonon_qmesh, phonon_loto,\n"
         "phonon_imaginary_tolerance_mev, phonon_cache_compressed,\n"
         "spin_pattern, frequency_floor_mev, asr_policy,\n"
         "the complete anisotropy_model/mev/axis/normalization set, output, and\n"

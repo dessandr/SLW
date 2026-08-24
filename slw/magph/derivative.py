@@ -236,7 +236,7 @@ def _integer_dataset(
 def read_exchange_derivative_q_mesh(
     path: str | Path,
 ) -> tuple[int, int, int]:
-    """Read and validate only the phonon q mesh from a derivative HDF5."""
+    """Read and validate the source q mesh represented by derivative ``Rp``."""
 
     source = Path(path).expanduser().resolve()
     if not source.is_file():

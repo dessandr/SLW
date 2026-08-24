@@ -57,6 +57,7 @@ _LIFETIME_KEYS = {
     "phonon_epr",
     "phonon_imaginary_tolerance_mev",
     "phonon_loto",
+    "phonon_qmesh",
     "quantization_axis",
     "require_complete_targets",
     "restart_mode",
@@ -277,6 +278,7 @@ class MagphLifetimeRequest:
     derivative_h5: Path
     phonon_cache: Path
     phonon_epr: Path | None
+    phonon_qmesh: tuple[int, int, int] | None
     phonon_loto: str
     phonon_imaginary_tolerance_mev: float
     phonon_cache_compressed: bool
@@ -352,6 +354,11 @@ def build_lifetime_request(
         None
         if "phonon_epr" not in values
         else Path(values["phonon_epr"]).expanduser().resolve()
+    )
+    phonon_qmesh = (
+        None
+        if "phonon_qmesh" not in values
+        else _positive_mesh(values["phonon_qmesh"], name="phonon_qmesh")
     )
     if "phonon_cache" in values:
         phonon_cache = Path(values["phonon_cache"]).expanduser().resolve()
@@ -436,6 +443,7 @@ def build_lifetime_request(
         derivative_h5=derivative_h5,
         phonon_cache=phonon_cache,
         phonon_epr=phonon_epr,
+        phonon_qmesh=phonon_qmesh,
         phonon_loto=phonon_loto,
         phonon_imaginary_tolerance_mev=_finite_scalar(
             values.get("phonon_imaginary_tolerance_mev", 1.0e-6),

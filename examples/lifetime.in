@@ -21,9 +21,11 @@
   exchange_h5 = '${savedir}/sample.j.h5',
   derivative_h5 = '${savedir}/sample.dj.h5',
   ! Reuse this cache when present. If it is absent, rank 0 builds it from
-  ! phonon_epr on the dJ q-mesh before the MPI lifetime calculation starts.
+  ! phonon_epr on phonon_qmesh before the MPI lifetime calculation starts.
+  ! dJ(R,Rp) is Fourier interpolated from its source mesh to this denser mesh.
   phonon_cache = '${savedir}/phonon_cache.npz',
   phonon_epr = './sample_epr.h5',
+  phonon_qmesh = 8, 8, 8,
   phonon_loto = 'auto',
   phonon_imaginary_tolerance_mev = 1.0d-6,
   phonon_cache_compressed = .false.,

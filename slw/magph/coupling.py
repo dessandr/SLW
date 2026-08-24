@@ -113,11 +113,11 @@ def _validate_uniform_q_grid(
     residual = np.abs(scaled - nearest)
     if float(np.max(residual, initial=0.0)) > tolerance:
         raise ValueError(
-            "phonon q points are not commensurate with the derivative q mesh"
+            "phonon q points are not commensurate with the declared phonon q mesh"
         )
     keys = np.mod(nearest.astype(np.int64), np.asarray(mesh, dtype=np.int64))
     if np.unique(keys, axis=0).shape[0] != int(np.prod(mesh)):
-        raise ValueError("phonon q points do not form one complete derivative q mesh")
+        raise ValueError("phonon q points do not form one complete phonon q mesh")
 
 
 def _prepare_isotropic_contraction(
@@ -152,15 +152,14 @@ def _prepare_isotropic_contraction(
         raise ValueError(
             "derivative bond subset must be closed under directed-bond mates"
         )
-    if phonons.q_mesh_shape != derivative.q_mesh_shape:
+    if phonons.q_mesh_shape is None:
         raise ValueError(
-            f"phonon q mesh {phonons.q_mesh_shape} != derivative q mesh "
-            f"{derivative.q_mesh_shape}"
+            "native lifetime requires a complete uniform phonon q mesh"
         )
     tolerance = float(q_tolerance)
     if not np.isfinite(tolerance) or tolerance < 0.0:
         raise ValueError("q_tolerance must be finite and non-negative")
-    _validate_uniform_q_grid(phonons.q_points_frac, derivative.q_mesh_shape, tolerance)
+    _validate_uniform_q_grid(phonons.q_points_frac, phonons.q_mesh_shape, tolerance)
     expected_displacement_shape = (
         phonons.nq,
         phonons.nmode,
@@ -249,7 +248,7 @@ def _mode_resolved_result(
         target_atom_indices=targets,
         target_coverage_complete=complete_targets,
         frequency_regularized=zero_point.regularized,
-        q_mesh_shape=derivative.q_mesh_shape,
+        q_mesh_shape=phonons.q_mesh_shape,
     )
 
 

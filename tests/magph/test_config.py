@@ -43,6 +43,7 @@ class NativeMagphConfigTests(unittest.TestCase):
                 1.0e-8,
             )
             self.assertIsNone(request.phonon_epr)
+            self.assertIsNone(request.phonon_qmesh)
             self.assertEqual(request.phonon_loto, "auto")
             self.assertEqual(request.phonon_imaginary_tolerance_mev, 1.0e-6)
             self.assertFalse(request.phonon_cache_compressed)
@@ -57,6 +58,7 @@ class NativeMagphConfigTests(unittest.TestCase):
             parameters.update(
                 {
                     "phonon_epr": "sample_epr.h5",
+                    "phonon_qmesh": (8, 6, 4),
                     "phonon_loto": "none",
                     "phonon_imaginary_tolerance_mev": 2.0e-6,
                     "phonon_cache_compressed": True,
@@ -72,6 +74,7 @@ class NativeMagphConfigTests(unittest.TestCase):
             self.assertEqual(
                 request.phonon_epr, Path("sample_epr.h5").resolve()
             )
+            self.assertEqual(request.phonon_qmesh, (8, 6, 4))
             self.assertEqual(request.phonon_loto, "none")
             self.assertEqual(request.phonon_imaginary_tolerance_mev, 2.0e-6)
             self.assertTrue(request.phonon_cache_compressed)
@@ -91,6 +94,11 @@ class NativeMagphConfigTests(unittest.TestCase):
         parameters = _parameters()
         parameters["phonon_imaginary_tolerance_mev"] = -1.0
         with self.assertRaisesRegex(MagphInputError, "non-negative"):
+            build_lifetime_request(parameters, prefix="slw", savedir=".")
+
+        parameters = _parameters()
+        parameters["phonon_qmesh"] = (4, 0, 4)
+        with self.assertRaisesRegex(MagphInputError, "phonon_qmesh"):
             build_lifetime_request(parameters, prefix="slw", savedir=".")
 
     def test_explicit_kshift_is_required(self) -> None:

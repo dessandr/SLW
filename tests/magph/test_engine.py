@@ -44,6 +44,7 @@ class NativeMagphEngineTests(unittest.TestCase):
                     "exchange_h5": exchange,
                     "derivative_h5": derivative,
                     "phonon_epr": epr,
+                    "phonon_qmesh": (2, 1, 1),
                     "output": output,
                     "magnetic_order": "fm",
                     "spin_magnitudes": 1.0,
@@ -52,7 +53,7 @@ class NativeMagphEngineTests(unittest.TestCase):
                     "anisotropy_mev": 0.1,
                     "anisotropy_axis": (0.0, 0.0, 1.0),
                     "anisotropy_normalization": "unit_vector",
-                    "kmesh": (2, 1, 1),
+                    "kmesh": (3, 1, 1),
                     "kshift": (0.5, 0.0, 0.0),
                     "temperature_k": 0.0,
                     "broadening_mev": 0.2,
@@ -65,10 +66,58 @@ class NativeMagphEngineTests(unittest.TestCase):
 
             self.assertEqual(result.output, output.resolve())
             self.assertTrue(request.phonon_cache.is_file())
+            self.assertEqual(result.k_point_count, 3)
+            with np.load(request.phonon_cache, allow_pickle=False) as cache:
+                np.testing.assert_array_equal(cache["q_mesh_shape"], (2, 1, 1))
             with np.load(output, allow_pickle=False) as payload:
                 metadata = json.loads(str(payload["metadata_json"]))
                 self.assertEqual(metadata["phonon_epr"], str(epr.resolve()))
                 self.assertEqual(metadata["phonon_loto"], "auto")
+                self.assertEqual(metadata["derivative_source_qmesh"], [1, 1, 1])
+                self.assertEqual(metadata["phonon_evaluation_qmesh"], [2, 1, 1])
+                self.assertTrue(metadata["derivative_q_interpolation"])
+                self.assertEqual(metadata["union_kq_mesh"], [6, 1, 1])
+
+    def test_explicit_phonon_qmesh_rejects_stale_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            exchange = root / "J.h5"
+            derivative = root / "dJ.h5"
+            phonon = root / "phonon.npz"
+            _write_scalar(
+                exchange,
+                [2.0, 2.0],
+                atom_i=[0, 0],
+                atom_j=[0, 0],
+                shifts=[(1, 0, 0), (-1, 0, 0)],
+            )
+            _write_derivative(
+                derivative,
+                np.zeros((1, 2, 1, 3), dtype=np.float64),
+            )
+            _write_cache(phonon, frequency=5.0, masses=(4.0,))
+            request = build_lifetime_request(
+                {
+                    "exchange_h5": exchange,
+                    "derivative_h5": derivative,
+                    "phonon_cache": phonon,
+                    "phonon_qmesh": (2, 1, 1),
+                    "magnetic_order": "fm",
+                    "spin_magnitudes": 1.0,
+                    "quantization_axis": (0.0, 0.0, 1.0),
+                    "kmesh": (1, 1, 1),
+                    "kshift": (0.5, 0.0, 0.0),
+                    "temperature_k": 0.0,
+                    "broadening_mev": 0.2,
+                },
+                prefix="sample",
+                savedir=root,
+            )
+
+            with self.assertRaisesRegex(
+                CollectiveExecutionError, "phonon cache q mesh.*phonon_qmesh"
+            ):
+                run_lifetime(request, context=MPIContext(), verbosity="quiet")
 
     def test_generated_files_run_through_native_engine(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
