@@ -96,6 +96,63 @@ class MagnonSpectrum:
         return values
 
 
+def magnon_mode_chirality(
+    transformation: ArrayLike,
+    spin_pattern: ArrayLike,
+    *,
+    physical_mode_count: int | None = None,
+) -> NDArray[np.float64]:
+    """Return ordered-spin-axis angular momentum for BdG magnon modes.
+
+    For a Nambu vector ``(u, v)`` and collinear spin signs ``eta_i``, the
+    dimensionless chirality proxy is
+
+    ``-sum_i eta_i (|u_i|^2-|v_i|^2) / sum_i ||u_i|^2-|v_i|^2|``.
+
+    The contraction is vectorized over every leading mesh dimension. In the
+    native bipartite collinear-AFM model the physical modes carry opposite
+    values close to ``+1`` and ``-1``.
+    """
+
+    modes = np.asarray(transformation, dtype=np.complex128)
+    spins = np.asarray(spin_pattern, dtype=np.float64)
+    if spins.ndim != 1 or spins.size == 0 or not np.all(np.isfinite(spins)):
+        raise ValueError("spin_pattern must contain finite collinear site signs")
+    site_count = int(spins.size)
+    if modes.ndim < 2 or modes.shape[-2] != 2 * site_count:
+        raise ValueError(
+            "transformation must end in (2*nsite,nchannel); "
+            f"got {modes.shape} for nsite={site_count}"
+        )
+    count = site_count if physical_mode_count is None else int(physical_mode_count)
+    if count < 1 or count > modes.shape[-1]:
+        raise ValueError(
+            f"physical_mode_count={count} is outside transformation {modes.shape}"
+        )
+    physical = modes[..., :, :count]
+    particle = physical[..., :site_count, :]
+    hole = physical[..., site_count:, :]
+    metric_density = np.abs(particle) ** 2 - np.abs(hole) ** 2
+    numerator = -np.einsum(
+        "i,...im->...m",
+        spins,
+        metric_density,
+        optimize=True,
+    )
+    denominator = np.sum(np.abs(metric_density), axis=-2)
+    chirality = np.divide(
+        numerator,
+        denominator,
+        out=np.zeros_like(numerator, dtype=np.float64),
+        where=denominator > 64.0 * np.finfo(np.float64).eps,
+    )
+    if not np.all(np.isfinite(chirality)):
+        raise ValueError("magnon chirality contains non-finite values")
+    result = np.asarray(chirality, dtype=np.float64)
+    result.setflags(write=False)
+    return result
+
+
 @dataclass(frozen=True)
 class MagnonDispersion:
     """Physical magnon energies without a paraunitary transformation.
@@ -183,7 +240,14 @@ def uniform_fractional_mesh(
     return points
 
 
-def _local_frames(configuration: MagneticConfiguration) -> NDArray[np.float64]:
+def local_spin_frames(configuration: MagneticConfiguration) -> NDArray[np.float64]:
+    """Return right-handed local-frame columns used by the LSWT basis.
+
+    The last axis is ``(local_x, local_y, ordered_spin)``.  Exposing this
+    convention lets external linear spin vertices rotate into exactly the
+    same coordinates before a paraunitary magnon projection.
+    """
+
     axis = configuration.quantization_axis
     cartesian = np.eye(3, dtype=np.float64)
     reference = cartesian[int(np.argmin(np.abs(cartesian @ axis)))]
@@ -195,6 +259,12 @@ def _local_frames(configuration: MagneticConfiguration) -> NDArray[np.float64]:
     frames[:, :, 1] = configuration.spin_pattern[:, None] * second[None, :]
     frames[:, :, 2] = configuration.spin_directions
     return frames
+
+
+def _local_frames(configuration: MagneticConfiguration) -> NDArray[np.float64]:
+    """Compatibility alias for internal native magph kernels."""
+
+    return local_spin_frames(configuration)
 
 
 def _spin_operator_tensor(
@@ -790,6 +860,8 @@ def solve_isotropic_lswt(
 __all__ = [
     "MagnonDispersion",
     "MagnonSpectrum",
+    "local_spin_frames",
+    "magnon_mode_chirality",
     "solve_isotropic_lswt",
     "solve_isotropic_lswt_energies",
     "uniform_fractional_mesh",

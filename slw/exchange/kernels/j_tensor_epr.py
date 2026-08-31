@@ -395,9 +395,123 @@ def _apply_model_soc(h_spin, args, nwan):
     return out, entries, win_path
 
 
-def _spinor_atom_indices(slc, nwan):
-    up = np.arange(slc.start, slc.stop, dtype=np.int64)
+def _selector_indices(selector, nwan, *, site=None):
+    """Return one validated collinear-half orbital selector as an index array."""
+    if int(nwan) <= 0:
+        raise ValueError(f"Collinear-half Hamiltonian dimension must be positive, got {nwan}")
+    context = "" if site is None else f" for magnetic site {site}"
+    if isinstance(selector, slice):
+        if selector.start is None or selector.stop is None:
+            raise ValueError(f"Orbital slice{context} requires explicit start and stop")
+        if selector.step not in (None, 1):
+            raise ValueError(f"Orbital slice{context} must have unit stride")
+        start = int(selector.start)
+        stop = int(selector.stop)
+        if start < 0 or stop <= start or stop > int(nwan):
+            raise ValueError(
+                f"Invalid orbital slice{context}: [{start}:{stop}] for nwan={nwan}"
+            )
+        return np.arange(start, stop, dtype=np.int64)
+
+    raw = np.asarray(selector)
+    if raw.ndim != 1:
+        raise ValueError(
+            f"Orbital index selector{context} must be one-dimensional, got shape={raw.shape}"
+        )
+    if raw.size == 0:
+        raise ValueError(f"Orbital index selector{context} must not be empty")
+    if np.issubdtype(raw.dtype, np.bool_) or not np.issubdtype(
+        raw.dtype, np.integer
+    ):
+        raise ValueError(f"Orbital index selector{context} must contain integers")
+    indices = np.asarray(raw, dtype=np.int64)
+    if np.any(indices < 0) or np.any(indices >= int(nwan)):
+        raise ValueError(
+            f"Orbital index selector{context}={indices.tolist()} is outside [0,{nwan})"
+        )
+    if np.unique(indices).size != indices.size:
+        raise ValueError(
+            f"Orbital index selector{context} contains duplicate indices: {indices.tolist()}"
+        )
+    return indices
+
+
+def _validated_spinor_hamiltonian(h_spin):
+    array = np.asarray(h_spin, dtype=np.complex128)
+    if (
+        array.ndim != 3
+        or array.shape[0] == 0
+        or array.shape[1] == 0
+        or array.shape[1] != array.shape[2]
+        or array.shape[1] % 2
+    ):
+        raise ValueError(
+            f"Spinor Hamiltonian must have shape (nk,2*nwan,2*nwan), got {array.shape}"
+        )
+    if not np.all(np.isfinite(array)):
+        raise ValueError("Spinor Hamiltonian contains non-finite matrix elements")
+    return array, int(array.shape[1] // 2)
+
+
+def _normalise_site_selectors(selectors, nwan):
+    if not selectors:
+        raise ValueError("Magnetic orbital selector mapping must not be empty")
+    out = {}
+    orbital_owner = np.full(int(nwan), -1, dtype=np.int64)
+    for site, selector in selectors.items():
+        if isinstance(site, (bool, np.bool_)) or not isinstance(site, (int, np.integer)):
+            raise TypeError(f"Magnetic site selector key must be an integer, got {site!r}")
+        site_index = int(site)
+        if site_index < 0:
+            raise ValueError(f"Magnetic site selector key must be non-negative, got {site_index}")
+        if site_index in out:
+            raise ValueError(f"Duplicate magnetic site selector after integer conversion: {site!r}")
+        indices = _selector_indices(selector, nwan, site=site_index)
+        overlap = indices[orbital_owner[indices] >= 0]
+        if overlap.size:
+            owners = orbital_owner[overlap].tolist()
+            raise ValueError(
+                f"Magnetic site {site_index} overlaps existing site selectors at "
+                f"orbitals={overlap.tolist()} owned_by={owners}"
+            )
+        orbital_owner[indices] = site_index
+        out[site_index] = indices
+    return out
+
+
+def _spinor_atom_indices(selector, nwan):
+    up = _selector_indices(selector, nwan)
     return np.concatenate([up, up + int(nwan)])
+
+
+def _selectors_in_dynamic_basis(selectors, nwan, d_idx):
+    selectors = _normalise_site_selectors(selectors, nwan)
+    d_indices = _selector_indices(d_idx, nwan, site="dynamic d subspace")
+    global_to_local = np.full(int(nwan), -1, dtype=np.int64)
+    global_to_local[d_indices] = np.arange(d_indices.size, dtype=np.int64)
+    out = {}
+    for site, indices in selectors.items():
+        local = global_to_local[indices]
+        if np.any(local < 0):
+            missing = indices[local < 0].tolist()
+            raise ValueError(
+                f"Magnetic site {site} orbitals {missing} are absent from the dynamic d subspace"
+            )
+        out[site] = np.concatenate([local, local + d_indices.size])
+    return out
+
+
+def _validate_pair_selector_sites(pair_meta, selectors):
+    used = {
+        int(meta[key])
+        for meta in pair_meta
+        for key in ("li", "lj")
+    }
+    missing = sorted(used - set(selectors))
+    if missing:
+        raise ValueError(
+            f"Exchange pairs reference magnetic sites without orbital selectors: {missing}"
+        )
 
 
 def _extract_exchange_fields_from_spinor_block(h_loc):
@@ -445,9 +559,10 @@ def _pauli_block_all_contiguous(block):
 
 def _build_tb2j_projectors(h_spin_mean, slices):
     nwan = int(h_spin_mean.shape[0] // 2)
+    selectors = _normalise_site_selectors(slices, nwan)
     out = {}
-    for site, slc in slices.items():
-        idx = _spinor_atom_indices(slc, nwan)
+    for site, selector in selectors.items():
+        idx = _spinor_atom_indices(selector, nwan)
         hloc = h_spin_mean[np.ix_(idx, idx)]
         _m0, mx, my, mz = _pauli_block_all_contiguous(hloc)
         evec = np.array([np.trace(mx), np.trace(my), np.trace(mz)], dtype=np.complex128)
@@ -461,28 +576,29 @@ def _build_tb2j_projectors(h_spin_mean, slices):
 
 
 def _precompute_spinor_kdata(h_spin, slices, efermi):
+    h_spin, nwan = _validated_spinor_hamiltonian(h_spin)
     nk, dim, _ = h_spin.shape
-    nwan = dim // 2
+    selectors = _normalise_site_selectors(slices, nwan)
     eye = np.eye(dim, dtype=np.complex128)
     evals = np.zeros((nk, dim), dtype=np.float64)
     evecs = np.zeros((nk, dim, dim), dtype=np.complex128)
     coeffs = {
-        int(site): np.zeros((nk, 2 * (slc.stop - slc.start), dim), dtype=np.complex128)
-        for site, slc in slices.items()
+        int(site): np.zeros((nk, 2 * selector.size, dim), dtype=np.complex128)
+        for site, selector in selectors.items()
     }
     for ik in range(nk):
         hk = 0.5 * (h_spin[ik] + h_spin[ik].conj().T) - float(efermi) * eye
         ww, cc = np.linalg.eigh(hk)
         evals[ik] = np.real(ww)
         evecs[ik] = cc
-        for site, slc in slices.items():
-            idx = _spinor_atom_indices(slc, nwan)
+        for site, selector in selectors.items():
+            idx = _spinor_atom_indices(selector, nwan)
             coeffs[int(site)][ik] = cc[idx, :]
 
     h0 = np.mean(h_spin, axis=0)
     d_ops = {}
-    for site, slc in slices.items():
-        idx = _spinor_atom_indices(slc, nwan)
+    for site, selector in selectors.items():
+        idx = _spinor_atom_indices(selector, nwan)
         hloc = h0[np.ix_(idx, idx)]
         bx, by, bz = _extract_exchange_fields_from_spinor_block(hloc)
         d_ops[int(site)] = {
@@ -490,7 +606,14 @@ def _precompute_spinor_kdata(h_spin, slices, efermi):
             "y": _compose_spinor_operator("y", by),
             "z": _compose_spinor_operator("z", bz),
         }
-    return {"evals": evals, "evecs": evecs, "coeffs": coeffs, "d_ops": d_ops, "efermi": efermi}
+    return {
+        "evals": evals,
+        "evecs": evecs,
+        "coeffs": coeffs,
+        "d_ops": d_ops,
+        "efermi": efermi,
+        "selectors": selectors,
+    }
 
 
 def _downfold_one_k_dynamic(hup, hdn, d_idx, p_idx, lambda_uu, lambda_ud, lambda_du, lambda_dd, z):
@@ -595,11 +718,9 @@ def _compute_tensor_chunk(
 
     if dynamic_soc:
         nd = int(d_idx.size)
-        global_to_local_d = {g_idx: idx for idx, g_idx in enumerate(d_idx)}
-        local_idxs = {}
-        for site, slc in slices.items():
-            idx_local = np.array([global_to_local_d[x] for x in range(slc.start, slc.stop)], dtype=np.int64)
-            local_idxs[int(site)] = np.concatenate([idx_local, idx_local + nd])
+        local_idxs = _selectors_in_dynamic_basis(
+            slices, int(hk_up.shape[1]), d_idx
+        )
 
         for meta in pair_meta:
             li = int(meta["li"])
@@ -711,6 +832,10 @@ def _compute_tensor_direct(
     lambda_du=None,
     lambda_dd=None,
 ):
+    h_spin, static_nwan = _validated_spinor_hamiltonian(h_spin)
+    nwan = int(hk_up.shape[1]) if dynamic_soc else static_nwan
+    slices = _normalise_site_selectors(slices, nwan)
+    _validate_pair_selector_sites(pair_meta, slices)
     if dynamic_soc:
         delta_k = np.empty((hk_up.shape[0], 2 * d_idx.size, 2 * d_idx.size), dtype=np.complex128)
         e0_ref = float(efermi)
@@ -876,11 +1001,14 @@ def _compute_tensor_tb2j(
     lambda_du=None,
     lambda_dd=None,
 ):
+    h_spin, static_nwan = _validated_spinor_hamiltonian(h_spin)
     if dynamic_soc:
         # collinear_override must be enabled for dynamic collinear downfolding base
         nwan = int(hk_up.shape[1])
     else:
-        nwan = int(h_spin.shape[1] // 2)
+        nwan = static_nwan
+    slices = _normalise_site_selectors(slices, nwan)
+    _validate_pair_selector_sites(pair_meta, slices)
 
     req_pairs = _ordered_unique((int(m["li"]), int(m["lj"])) for m in pair_meta)
     acc_pairs = list(req_pairs)
@@ -906,8 +1034,8 @@ def _compute_tensor_tb2j(
     max_ni = 0
     max_nj = 0
     for ip, (li, lj) in enumerate(acc_pairs):
-        ni = slices[li].stop - slices[li].start
-        nj = slices[lj].stop - slices[lj].start
+        ni = slices[li].size
+        nj = slices[lj].size
         ni_arr[ip] = ni
         nj_arr[ip] = nj
         max_ni = max(max_ni, ni)
@@ -933,10 +1061,10 @@ def _compute_tensor_tb2j(
         p_i[ip, :ni, :ni] = projectors[li]
         p_j[ip, :nj, :nj] = projectors[lj]
         if not dynamic_soc:
-            iu_up[ip, :ni] = np.arange(si.start, si.stop)
-            iu_dn[ip, :ni] = np.arange(si.start, si.stop) + nwan
-            jv_up[ip, :nj] = np.arange(sj.start, sj.stop)
-            jv_dn[ip, :nj] = np.arange(sj.start, sj.stop) + nwan
+            iu_up[ip, :ni] = si
+            iu_dn[ip, :ni] = si + nwan
+            jv_up[ip, :nj] = sj
+            jv_dn[ip, :nj] = sj + nwan
 
     acc_a = np.zeros((n_pairs, n_r, 4, 4), dtype=np.complex128)
     r_all = list(acc_r) + [(-r[0], -r[1], -r[2]) for r in acc_r]
@@ -948,16 +1076,16 @@ def _compute_tensor_tb2j(
         jv_up_local = np.zeros((n_pairs, max_nj), dtype=np.int64)
         jv_dn_local = np.zeros((n_pairs, max_nj), dtype=np.int64)
 
-        global_to_local_d = {g_idx: idx for idx, g_idx in enumerate(d_idx)}
+        dynamic_indices = _selectors_in_dynamic_basis(slices, nwan, d_idx)
         for ip, (li, lj) in enumerate(acc_pairs):
-            si = slices[li]
-            sj = slices[lj]
-            ni = si.stop - si.start
-            nj = sj.stop - sj.start
-            iu_up_local[ip, :ni] = np.array([global_to_local_d[x] for x in range(si.start, si.stop)])
-            iu_dn_local[ip, :ni] = iu_up_local[ip, :ni] + nd
-            jv_up_local[ip, :nj] = np.array([global_to_local_d[x] for x in range(sj.start, sj.stop)])
-            jv_dn_local[ip, :nj] = jv_up_local[ip, :nj] + nd
+            ni = int(ni_arr[ip])
+            nj = int(nj_arr[ip])
+            idx_i = dynamic_indices[li]
+            idx_j = dynamic_indices[lj]
+            iu_up_local[ip, :ni] = idx_i[:ni]
+            iu_dn_local[ip, :ni] = idx_i[ni:]
+            jv_up_local[ip, :nj] = idx_j[:nj]
+            jv_dn_local[ip, :nj] = idx_j[nj:]
 
         for z, weight in energy_mesh:
             z_abs = z + float(efermi)

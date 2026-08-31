@@ -243,9 +243,11 @@ aliases that inject `ltensor=.true.`.
 | `dj` | `.true.` | epr | yes | Tensor analytic dJ/du |
 
 All four modes require `input_format`, `efermi`, a positive three-component
-`kmesh`, explicit `mag_atoms`, and non-overlapping `slices`. EPR modes require
-`epr_up` and `epr_dn`. Scalar Wannier J requires `up_hr` and `dn_hr`; tensor
-Wannier J accepts that pair or one `spinor_hr`. Native filename stems are
+`kmesh`, and explicit `mag_atoms`. Non-overlapping `slices` are required except
+for spinor Wannier tensor J with both `win` and `centres`; that path assigns
+Wannier orbitals to atoms automatically. EPR modes require `epr_up` and
+`epr_dn`. Scalar Wannier J requires `up_hr` and `dn_hr`; tensor Wannier J
+accepts that pair or one `spinor_hr`. Native filename stems are
 `${prefix}.j`, `${prefix}.j_tensor`, `${prefix}.dj`, and
 `${prefix}.dj_tensor` under `${savedir}`. `out_dir`, `out_h5`, and `out_name`
 override those paths.
@@ -277,7 +279,7 @@ multiprocessing path.
 | `kmesh` | int[3] | yes | — | Positive uniform electronic mesh. |
 | `mag_atoms` | list[int] | yes | — | Explicit magnetic atom indices. |
 | `mag_atoms_base` | enum {0, 1} | no | `0` | Input atom-index base; normalized internally to zero-based. |
-| `slices` | string | yes | — | Non-overlapping `site:start:stop` orbital ranges. |
+| `slices` | string | conditional | — | Non-overlapping `site:start:stop` orbital ranges. May be omitted only for spinor Wannier tensor J with explicit `win` and `centres`. |
 | `out_dir` | path | no | `${savedir}` | Product directory. |
 | `out_h5` | path | no | mode-derived | HDF5 product path. |
 | `out_name` | path | no | mode-derived | Text product path when the mode writes one. |
@@ -291,11 +293,19 @@ Raw `spinor_hr` input must declare exactly one TB2J layout:
 | `groupby` | `spin` | `[all up orbitals | all down orbitals]` |
 | `groupby` | `orbital` | `[orb1 up, orb1 down, orb2 up, orb2 down, ...]` |
 
-SLW never infers this value from `wannier_centres.xyz`. Internally both layouts
-are converted to `groupby='spin'`. The same permutation is applied to HR rows,
-HR columns, and Wannier-centre rows when collinear up/down inputs are exported
-as a spinor model. A centre export requires both spin-channel centre files;
-atomic rows must match and are written once.
+SLW never infers `groupby` from `wannier_centres.xyz`. Internally both layouts
+are converted to `groupby='spin'`. For spinor Wannier tensor J, explicit
+`win` + `centres` may instead infer the magnetic orbital indices: each
+spinless orbital centre is assigned to its nearest atom under periodic boundary
+conditions, and `mag_atoms` selects the resulting site blocks. This matches the
+TB2J centre-assignment model and does not reconstruct projection mixing through
+Wannier gauge matrices. `slices` remains a manual override. By default nearest
+assignment has no distance cutoff; set positive `centre_tolerance_ang` to fail
+when an assigned centre is farther than that Cartesian distance from its atom.
+The same spin-layout permutation is applied to HR rows, HR columns, and
+Wannier-centre rows when collinear up/down inputs are exported as a spinor
+model. A centre export requires both spin-channel centre files; atomic rows
+must match and are written once.
 
 Additional onsite SOC is a final QE-style card, not a namelist option:
 
@@ -347,12 +357,15 @@ discovery for bond construction.
 
 **Outputs:** `${savedir}/${prefix}.j.txt` and `.h5`; EPR also writes the
 derived `.all_bonds.tsv` table. By default, EPR scalar J is averaged only
-within each bond orbit validated by spglib. The canonical values are stored in
-`J_r/value`, while the unmodified integration values remain in
-`J_r/value_raw`; `J_r/projection_delta` and the `symmetry/` group record the
-residual and provenance. Distinct symmetry orbits in the same distance shell
-remain distinct. `no_h5=.true.` disables scalar EPR HDF5. Wannier scalar J is
-currently stored in an isotropic `J_tensor_r` envelope.
+within each bond orbit validated by spglib. The projected source-convention
+values are stored in `J_r/value`, while the unmodified integration values
+remain in `J_r/value_raw`; `J_r/projection_delta` and the `symmetry/` group
+record the residual and provenance. Both datasets retain the mate-complete
+source directed-bond weight recorded in `basic_data/directed_bond_weight`;
+they are not silently canonicalized. Distinct symmetry orbits in the same
+distance shell remain distinct. `no_h5=.true.` disables scalar EPR HDF5.
+Wannier scalar J is currently stored in an isotropic `J_tensor_r` envelope
+with the same explicit source weight.
 
 #### `input_format='epr'`
 
@@ -438,8 +451,10 @@ Frontend-fixed values: `kernel='scalar'`. Supplying a conflicting value is an er
 **Runtime requirements:** Set `input_format='epr'` or `'wannier'`. EPR requires
 `epr_up`, `epr_dn`, `efermi`, `kmesh`, `slices`, and at least two
 `mag_atoms`. Wannier requires `efermi`, `kmesh`, `mag_atoms`, and either
-`spinor_hr` or the complete `up_hr` + `dn_hr` pair. All inputs require explicit
-`slices`. Raw spinor input additionally requires `groupby='spin'|'orbital'`.
+`spinor_hr` or the complete `up_hr` + `dn_hr` pair. Explicit `slices` are
+required except when raw spinor input supplies both `win` and `centres`, which
+enables automatic nearest-atom assignment. Raw spinor input always requires
+`groupby='spin'|'orbital'` regardless of how the magnetic indices are built.
 The optional `SOC (atomic)` card requires `win` and may be combined with either
 collinear or spinor input; it always denotes an additional onsite term.
 
@@ -504,7 +519,8 @@ Native engine: `slw.exchange.engine`; numerical kernel:
 | `dn_hr` | string | conditional | — | Spin-down collinear Wannier90 hr.dat; supply together with `up_hr`, or supply `spinor_hr` instead.<br>CLI aliases: `--dn_hr` |
 | `spinor_hr` | string | conditional | — | Full spinor Wannier90 hr.dat; mutually exclusive with the collinear pair.<br>CLI aliases: `--spinor_hr` |
 | `groupby` | enum {spin, orbital} | with `spinor_hr` | — | Explicit TB2J spinor layout; normalized internally to spin-major. |
-| `centres` | string | no | none / runtime | Optional Wannier90 centres.xyz for spinor_dim sanity check<br>CLI aliases: `--centres` |
+| `centres` | string | with automatic matching | none / runtime | Wannier90 centres.xyz. Together with `win`, enables TB2J-style periodic nearest-atom assignment for spinor input.<br>CLI aliases: `--centres` |
+| `centre_tolerance_ang` | float | no | no cutoff | Optional positive maximum centre-to-assigned-atom distance in angstrom. |
 | `efermi` | float | yes | — | Fermi energy in eV<br>CLI aliases: `--efermi` |
 | `hr_unit` | enum {ev, ry, ha} | no | `ev` | Unit of input hr.dat matrix elements; Wannier90 default is eV<br>CLI aliases: `--hr_unit` |
 | `ref_epr_up` | string | no | none / runtime | Optional reference EPR up HDF5 for H(k) scale/gauge diagnostics<br>CLI aliases: `--ref_epr_up` |
@@ -513,12 +529,12 @@ Native engine: `slw.exchange.engine`; numerical kernel:
 | `kmesh` | int[3] | yes | — | Advanced native-kernel option.<br>CLI aliases: `--kmesh` |
 | `mag_atoms` | list[int] | yes | — | Magnetic atom indices<br>CLI aliases: `--mag_atoms` |
 | `mag_atoms_base` | enum {0, 1} | no | `0` | Advanced native-kernel option.<br>CLI aliases: `--mag_atoms_base` |
-| `slices` | string | no | `''` | Manual local orbital slices, e.g. '0:0:5,1:5:10'<br>CLI aliases: `--slices` |
+| `slices` | string | conditional | `''` | Manual local orbital slices, e.g. '0:0:5,1:5:10'. Required unless spinor input supplies both `win` and `centres`; when present, it overrides automatic assignment.<br>CLI aliases: `--slices` |
 | `apply_degeneracy` | boolean | no | .true. | Divide HR blocks by Wannier90 degeneracy before H(k) construction; standard Wannier90 needs this<br>CLI aliases: `--apply_degeneracy`, `--no-apply_degeneracy` |
 | `tensor_kernel` | enum {direct, tb2j} | no | `tb2j` | Tensor integration/decomposition convention. The compatibility alias `kernel` accepts the same values.<br>CLI aliases: `--kernel` |
 | `axes` | string | no | `xyz` | Tensor axes to compute, subset of xyz<br>CLI aliases: `--axes` |
 | `spin_direction` | float[3] | no | `[0.0, 0.0, 1.0]` | Advanced native-kernel option.<br>CLI aliases: `--spin_direction` |
-| `win` | string | with SOC card | none | Wannier90 projections used to resolve SOC site/species manifolds. |
+| `win` | string | with SOC card or automatic matching | none | Wannier90 structure/projections used for centre assignment and SOC site/species manifolds. |
 | `n_shells` | int | no | `10` | Advanced native-kernel option.<br>CLI aliases: `--n_shells` |
 | `d_max` | float | no | `20.0` | Advanced native-kernel option.<br>CLI aliases: `--d_max` |
 | `all_bonds` | boolean | no | .true. | Keep directed bonds; default matches compute_J_epr_tensor<br>CLI aliases: `--all_bonds`, `--canonical_bonds` |
@@ -932,9 +948,11 @@ are exchanged before the next gather. The coupling and union-LSWT caches are
 currently replicated per MPI rank; their actual per-rank and maximum-node sizes
 are printed at run time.
 
-**Outputs:** One atomic, no-clobber-by-default NPZ containing fractional k
-points, physical magnon energies, complex on-shell self-energy, HWHM, FWHM,
-rate in `ps^-1`, lifetime in `ps`, validity flags, and JSON provenance. The
+**Outputs:** One atomic, no-clobber-by-default schema-v2 NPZ containing
+fractional k points, physical magnon energies, complex on-shell self-energy,
+HWHM, FWHM, rate in `ps^-1`, lifetime in `ps`, validity flags, and JSON
+provenance. Bipartite-AFM products additionally store magnon chirality and put
+all mode-resolved arrays in canonical `chi=+1, chi=-1` order. The
 default path is `${savedir}/${prefix}.lifetime.npz`. Provenance records the
 static, explicit derivative, and zero-filled bond counts, the derivative source
 mesh, the phonon evaluation mesh, and whether Fourier interpolation was active.
@@ -1683,63 +1701,68 @@ Backend: `slw.magph.legacy.analyze_lifetime`.
 ### `calculation='lifetime_plot'`
 
 **Runtime requirements:** Positional lifetime NPZ `input` and `output_dir` are
-required. Automatic symmetry needs `structure`; explicit symmetry needs
-`rotation`, `channel_map`, and `lattice_ang` in the NPZ. The NPZ must contain
-linewidth, energy, fractional k mesh, and physical channel count.
+required. Native schema-v2 keys are read directly. New products embed lattice
+and atom geometry; older products may supply `exchange_h5`. For schema-v1 AFM
+products that file is also used to reconstruct the inexpensive LSWT chirality
+labels and consistently reorder every existing observable without rerunning
+self-energy. The retained
+`k_mesh_frac`, `energy`, and `linewidth` array aliases remain readable.
+Automatic rotation-error plots additionally need embedded magnetic/atomic
+metadata, while explicit symmetry needs both `rotation` and `channel_map`.
 
 **Outputs:** PNG/PDF/SVG figures and `plot_summary.json` in `output_dir`.
 
-Backend: `slw.magph.legacy.plot_lifetime_symmetry`.
+Backend: `slw.magph.lifetime_plot`.
 
 | Namelist key | Type | Parser required | Parser default | Meaning / CLI aliases |
 |---|---|---:|---|---|
 | `input` | string | yes | — | NPZ from `slw_magph.x` with `calculation='lifetime'` |
-| `structure` | string | no | none / runtime | Structure/input file for symmetry discovery<br>CLI aliases: `--structure` |
-| `output_dir` | string | yes | — | Compatibility input retained by the backend.<br>CLI aliases: `--output-dir` |
-| `slices` | list[float] | no | `[0.0, 0.5]` | Compatibility input retained by the backend.<br>CLI aliases: `--slices` |
-| `all_slices` | boolean | no | .false. | Plot every stored plane along the axis normal to --plane-axes<br>CLI aliases: `--all-slices` |
-| `plots` | list[enum {all, linewidth, scattering-rate, lifetime, rotation-error, splitting}] | no | `["all"]` | Quantities to generate; use scattering-rate for tau^-1 BZ maps only<br>CLI aliases: `--plots` |
-| `plane_axes` | int[2] | no | `[0, 1]` | Compatibility input retained by the backend.<br>CLI aliases: `--plane-axes` |
-| `physical_channel_count` | int | no | none / runtime | Compatibility input retained by the backend.<br>CLI aliases: `--physical-channel-count` |
-| `magnetic_atom_indices` | list[int] | no | none / runtime | Compatibility input retained by the backend.<br>CLI aliases: `--magnetic-atom-indices` |
-| `spin_pattern` | list[float] | no | none / runtime | Compatibility input retained by the backend.<br>CLI aliases: `--spin-pattern` |
-| `rotation` | int[9] | no | none / runtime | Compatibility input retained by the backend.<br>CLI aliases: `--rotation` |
-| `channel_map` | list[int] | no | none / runtime | Compatibility input retained by the backend.<br>CLI aliases: `--channel-map` |
-| `symmetry_operation_index` | int | no | none / runtime | Compatibility input retained by the backend.<br>CLI aliases: `--symmetry-operation-index` |
-| `split_channels` | int[2] | no | `[0, 1]` | Compatibility input retained by the backend.<br>CLI aliases: `--split-channels` |
-| `symprec` | float | no | `1e-05` | Compatibility input retained by the backend.<br>CLI aliases: `--symprec` |
-| `atom_tolerance_ang` | float | no | `0.0001` | Compatibility input retained by the backend.<br>CLI aliases: `--atom-tolerance-ang` |
-| `mesh_tolerance` | float | no | `1e-08` | Compatibility input retained by the backend.<br>CLI aliases: `--mesh-tolerance` |
-| `workers` | int | no | `-1` | Compatibility input retained by the backend.<br>CLI aliases: `--workers` |
-| `k_round` | int | no | `8` | Compatibility input retained by the backend.<br>CLI aliases: `--k-round` |
-| `formats` | list[enum {png, pdf, svg}] | no | `["png", "pdf"]` | Compatibility input retained by the backend.<br>CLI aliases: `--formats` |
-| `dpi` | int | no | `300` | Compatibility input retained by the backend.<br>CLI aliases: `--dpi` |
-| `panel_width` | float | no | `4.4` | Compatibility input retained by the backend.<br>CLI aliases: `--panel-width` |
-| `panel_height` | float | no | `4.0` | Compatibility input retained by the backend.<br>CLI aliases: `--panel-height` |
-| `tile` | int | no | `1` | Compatibility input retained by the backend.<br>CLI aliases: `--tile` |
+| `output_dir` | string | yes | — | Figure and summary directory<br>CLI aliases: `--output-dir` |
+| `exchange_h5` | string | no | metadata / runtime | Geometry and AFM-chirality reconstruction source for old native products<br>CLI aliases: `--exchange-h5` |
+| `slices` | list[float] | no | `[0.0, 0.5]` | Requested periodic coordinates along the plane normal; each snaps to the closest stored plane<br>CLI aliases: `--slices` |
+| `all_slices` | boolean | no | .false. | Plot every stored plane along the axis normal to `plane_axes`<br>CLI aliases: `--all-slices` |
+| `plots` | list[enum {all, energy, linewidth, fwhm, scattering-rate, lifetime, splitting, rotation-error}] | no | `["all"]` | `all` generates energy, HWHM, rate, lifetime, and splitting when at least two modes exist<br>CLI aliases: `--plots` |
+| `plane_axes` | int[2] | no | `[0, 1]` | Fractional reciprocal axes spanning each BZ map<br>CLI aliases: `--plane-axes` |
+| `physical_mode_count` | int | no | all stored modes | Optional leading physical-mode count; old alias `physical_channel_count` is accepted<br>CLI aliases: `--physical-mode-count`, `--physical-channel-count` |
+| `split_modes` | int[2] | no | `[0, 1]` | Zero-based canonical modes used for splitting. For AFM the default is signed `E_chi+ - E_chi-` and the analogous linewidth difference; old alias `split_channels` is accepted<br>CLI aliases: `--split-modes`, `--split-channels` |
+| `rotation` | int[9] | no | automatic / runtime | Explicit direct-space fractional rotation for `rotation-error`<br>CLI aliases: `--rotation` |
+| `channel_map` | list[int] | no | automatic / runtime | Explicit mode permutation paired with `rotation`<br>CLI aliases: `--channel-map` |
+| `symmetry_operation_index` | int | no | automatic best operation | Select one spglib sublattice-transposing operation<br>CLI aliases: `--symmetry-operation-index` |
+| `symprec` | float | no | `1e-05` | spglib symmetry tolerance<br>CLI aliases: `--symprec` |
+| `atom_tolerance_ang` | float | no | `0.0001` | Cartesian tolerance for atom maps<br>CLI aliases: `--atom-tolerance-ang` |
+| `mesh_tolerance` | float | no | `1e-08` | Maximum periodic k-mesh mapping distance for rotation comparison<br>CLI aliases: `--mesh-tolerance` |
+| `workers` | int | no | `-1` | scipy k-d tree workers for rotation comparison<br>CLI aliases: `--workers` |
+| `k_round` | int | no | `8` | Decimal precision used to identify stored planes<br>CLI aliases: `--k-round` |
+| `formats` | list[enum {png, pdf, svg}] | no | `["png", "pdf"]` | Figure formats<br>CLI aliases: `--formats` |
+| `dpi` | int | no | `300` | Raster resolution<br>CLI aliases: `--dpi` |
+| `panel_width` | float | no | `4.4` | Width per magnon-mode panel<br>CLI aliases: `--panel-width` |
+| `panel_height` | float | no | `4.0` | Figure panel height<br>CLI aliases: `--panel-height` |
+| `tile` | int | no | `1` | Minimum periodic image range for Voronoi construction<br>CLI aliases: `--tile` |
 | `bz_mode` | enum {clip, periodic} | no | `clip` | Clip to the first BZ or display periodic copies with BZ outlines<br>CLI aliases: `--bz-mode` |
-| `periodic_repeats` | int | no | `1` | Neighboring BZ repeats for --periodic-view neighbors<br>CLI aliases: `--periodic-repeats` |
-| `periodic_view` | enum {central, neighbors} | no | `central` | Keep the central first BZ large with periodic data outside, or show multiple neighboring BZs<br>CLI aliases: `--periodic-view` |
+| `periodic_repeats` | int | no | `1` | Neighboring BZ repeats for `periodic_view='neighbors'`<br>CLI aliases: `--periodic-repeats` |
+| `periodic_view` | enum {central, neighbors} | no | `central` | Central BZ with periodic padding or multiple neighboring BZs<br>CLI aliases: `--periodic-view` |
 | `periodic_padding` | float | no | `0.06` | Fractional padding outside the central first-BZ bounding box<br>CLI aliases: `--periodic-padding` |
-| `margin` | float | no | `0.035` | Compatibility input retained by the backend.<br>CLI aliases: `--margin` |
-| `linewidth_scale` | float | no | `1000000.0` | Compatibility input retained by the backend.<br>CLI aliases: `--linewidth-scale` |
-| `linewidth_unit` | string | no | `neV` | Compatibility input retained by the backend.<br>CLI aliases: `--linewidth-unit` |
-| `scattering_rate_scale` | float | no | `1.0` | Compatibility input retained by the backend.<br>CLI aliases: `--scattering-rate-scale` |
-| `scattering_rate_unit` | string | no | `ps$^{-1}$` | Compatibility input retained by the backend.<br>CLI aliases: `--scattering-rate-unit` |
-| `vmin_percentile` | float | no | `1.0` | Compatibility input retained by the backend.<br>CLI aliases: `--vmin-percentile` |
-| `vmax_percentile` | float | no | `99.0` | Compatibility input retained by the backend.<br>CLI aliases: `--vmax-percentile` |
-| `error_percentile` | float | no | `99.0` | Compatibility input retained by the backend.<br>CLI aliases: `--error-percentile` |
-| `linewidth_cmap` | string | no | `magma` | Compatibility input retained by the backend.<br>CLI aliases: `--linewidth-cmap` |
-| `lifetime_cmap` | string | no | `viridis` | Compatibility input retained by the backend.<br>CLI aliases: `--lifetime-cmap` |
-| `scattering_rate_cmap` | string | no | `magma` | Compatibility input retained by the backend.<br>CLI aliases: `--scattering-rate-cmap` |
-| `error_cmap` | string | no | `cividis` | Compatibility input retained by the backend.<br>CLI aliases: `--error-cmap` |
-| `diverging_cmap` | string | no | `RdBu_r` | Compatibility input retained by the backend.<br>CLI aliases: `--diverging-cmap` |
-| `edgecolor` | string | no | `none` | Compatibility input retained by the backend.<br>CLI aliases: `--edgecolor` |
-| `linewidth` | float | no | `0.0` | Compatibility input retained by the backend.<br>CLI aliases: `--linewidth` |
-| `bz_color` | string | no | `0.25` | Compatibility input retained by the backend.<br>CLI aliases: `--bz-color` |
-| `bz_lw` | float | no | `1.1` | Compatibility input retained by the backend.<br>CLI aliases: `--bz-lw` |
-| `neighbor_bz_lw` | float | no | `0.65` | Compatibility input retained by the backend.<br>CLI aliases: `--neighbor-bz-lw` |
-| `neighbor_bz_alpha` | float | no | `0.55` | Compatibility input retained by the backend.<br>CLI aliases: `--neighbor-bz-alpha` |
+| `margin` | float | no | `0.035` | Axis margin around clipped BZ maps<br>CLI aliases: `--margin` |
+| `linewidth_scale` | float | no | `1.0` | Display multiplier applied to HWHM/FWHM and linewidth splitting<br>CLI aliases: `--linewidth-scale` |
+| `linewidth_unit` | string | no | `meV` | Label paired with `linewidth_scale`<br>CLI aliases: `--linewidth-unit` |
+| `scattering_rate_scale` | float | no | `1.0` | Display multiplier applied to rates<br>CLI aliases: `--scattering-rate-scale` |
+| `scattering_rate_unit` | string | no | `ps$^{-1}$` | Label paired with `scattering_rate_scale`<br>CLI aliases: `--scattering-rate-unit` |
+| `vmin_percentile` | float | no | `1.0` | Lower shared color percentile over selected slices/modes<br>CLI aliases: `--vmin-percentile` |
+| `vmax_percentile` | float | no | `99.0` | Upper shared color percentile over selected slices/modes<br>CLI aliases: `--vmax-percentile` |
+| `error_percentile` | float | no | `99.0` | Symmetric splitting/error color percentile<br>CLI aliases: `--error-percentile` |
+| `energy_cmap` | string | no | `viridis` | Energy colormap<br>CLI aliases: `--energy-cmap` |
+| `linewidth_cmap` | string | no | `magma` | HWHM/FWHM colormap<br>CLI aliases: `--linewidth-cmap` |
+| `lifetime_cmap` | string | no | `viridis` | Log-lifetime colormap<br>CLI aliases: `--lifetime-cmap` |
+| `scattering_rate_cmap` | string | no | `magma` | Scattering-rate colormap<br>CLI aliases: `--scattering-rate-cmap` |
+| `error_cmap` | string | no | `cividis` | Rotation-error colormap<br>CLI aliases: `--error-cmap` |
+| `diverging_cmap` | string | no | `RdBu_r` | Signed mode-splitting colormap<br>CLI aliases: `--diverging-cmap` |
+| `edgecolor` | string | no | `none` | Voronoi cell edge color<br>CLI aliases: `--edgecolor` |
+| `linewidth` | float | no | `0.0` | Voronoi cell edge width<br>CLI aliases: `--linewidth` |
+| `bz_color` | string | no | `0.25` | BZ outline color<br>CLI aliases: `--bz-color` |
+| `bz_lw` | float | no | `1.1` | Central BZ outline width<br>CLI aliases: `--bz-lw` |
+| `neighbor_bz_lw` | float | no | `0.65` | Neighbor BZ outline width<br>CLI aliases: `--neighbor-bz-lw` |
+| `neighbor_bz_alpha` | float | no | `0.55` | Neighbor BZ outline alpha<br>CLI aliases: `--neighbor-bz-alpha` |
+| `overwrite` | boolean | no | .false. | Replace existing figures and summary<br>CLI aliases: `--overwrite` |
 
 ### `calculation='magnon_plot'`
 
@@ -1915,6 +1938,7 @@ registered `magnon_h5` kind uses these baseline keys:
 | `j_prefactor` | default `auto` | Convention prefactor. |
 | `solver` | default `full_bdg` | LSWT solver. |
 | `bond_class` | default `sign` | Bond grouping convention. |
+| `bond_factor` | default `auto` | Convert the declared source directed-bond weight to the legacy half-weight LSWT convention; an explicit finite positive override is retained for audited external files. |
 | `energy_unit` | default `meV` | Plot energy unit. |
 | `exclude_shells` | none | Optional 1-based shells to omit. |
 

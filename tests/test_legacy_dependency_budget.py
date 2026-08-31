@@ -53,7 +53,6 @@ TRANSITIONAL_LEGACY_REFERENCES = Counter(
             "slw.magph.legacy.analyze_rotational_selectivity",
         ): 1,
         ("slw/cli/registry.py", "slw.magph.legacy.analyze_lifetime"): 1,
-        ("slw/cli/registry.py", "slw.magph.legacy.plot_lifetime_symmetry"): 1,
         ("slw/cli/registry.py", "slw.magph.legacy.plot"): 1,
         ("slw/cli/registry.py", "slw.magph.legacy.plot_coupling_kpath"): 1,
         ("slw/cli/registry.py", "slw.magph.legacy.plot_coupling_bz"): 1,

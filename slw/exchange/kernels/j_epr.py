@@ -31,6 +31,16 @@ from slw.exchange.kernels.parallel import collective_sum, partition_sequence, ra
 
 _WORKER_STATIC = None
 
+# The scalar LKAG expression below returns the coefficient used by the
+# TB2J-style, mate-complete directed Hamiltonian
+#
+#     H = -sum_{i != j, R} J_ij(R) e_i . e_j.
+#
+# Keeping this source weight explicit prevents downstream native code (whose
+# mate-complete representation uses weight 1/2) from silently interpreting the
+# same numerical payload as a canonical half-weight coefficient.
+_SCALAR_LKAG_SOURCE_DIRECTED_BOND_WEIGHT = 1.0
+
 
 @dataclass(frozen=True)
 class _OrbitGrouping:
@@ -779,10 +789,16 @@ def _write_h5(
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     str_dt = h5py.string_dtype(encoding="utf-8")
     orbit_label_by_key = _orbit_label_map(pair_meta, orbits)
-    canonical = np.asarray(j_mev, dtype=np.float64)
-    raw = canonical if raw_j_mev is None else np.asarray(raw_j_mev, dtype=np.float64)
-    if canonical.shape != raw.shape:
-        raise ValueError("canonical and raw scalar J vectors must have the same shape")
+    projected_source = np.asarray(j_mev, dtype=np.float64)
+    raw_source = (
+        projected_source
+        if raw_j_mev is None
+        else np.asarray(raw_j_mev, dtype=np.float64)
+    )
+    if projected_source.shape != raw_source.shape:
+        raise ValueError(
+            "projected and unprojected source scalar J vectors must have the same shape"
+        )
 
     with h5py.File(path, "w") as h5:
 
@@ -801,7 +817,13 @@ def _write_h5(
         put_string(basic, "bond_coverage", "directed_mate_complete")
         put_string(basic, "realspace_gauge", "i_at_0_j_at_R")
         basic.create_dataset("source_spin_magnitude", data=np.array(1.0, dtype=np.float64))
-        basic.create_dataset("directed_bond_weight", data=np.array(0.5, dtype=np.float64))
+        basic.create_dataset(
+            "directed_bond_weight",
+            data=np.array(
+                _SCALAR_LKAG_SOURCE_DIRECTED_BOND_WEIGHT,
+                dtype=np.float64,
+            ),
+        )
         put_string(basic, "hr_unit", args.hr_unit)
         put_string(basic, "integrator", args.integrator)
         put_string(
@@ -853,15 +875,21 @@ def _write_h5(
         grp = h5.create_group("J_r")
         grp.attrs["dataset_shape"] = "()"
         grp.attrs["meaning"] = "J_r_b{bond_1based} = J(R_bond)"
-        grp.create_dataset("value", data=canonical)
+        grp.create_dataset("value", data=projected_source)
         grp["value"].attrs["unit"] = "meV"
-        grp["value"].attrs["meaning"] = "Canonical scalar J in bond order; spglib-orbit projected when enabled."
-        grp.create_dataset("value_raw", data=raw)
+        grp["value"].attrs["meaning"] = (
+            "Scalar LKAG source coefficient in directed bond order; "
+            "spglib-orbit projected when enabled. Interpret with "
+            "basic_data/directed_bond_weight."
+        )
+        grp.create_dataset("value_raw", data=raw_source)
         grp["value_raw"].attrs["unit"] = "meV"
-        grp["value_raw"].attrs["meaning"] = "Unprojected numerical LKAG integration result in bond order."
-        grp.create_dataset("projection_delta", data=canonical - raw)
+        grp["value_raw"].attrs["meaning"] = (
+            "Unprojected numerical LKAG source coefficient in directed bond order."
+        )
+        grp.create_dataset("projection_delta", data=projected_source - raw_source)
         grp["projection_delta"].attrs["unit"] = "meV"
-        for ib, val in enumerate(canonical):
+        for ib, val in enumerate(projected_source):
             dset = grp.create_dataset(f"J_r_b{ib + 1}", data=np.array(float(val), dtype=np.float64))
             dset.attrs["bond_index"] = int(ib)
             dset.attrs["unit"] = "meV"

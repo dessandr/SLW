@@ -6,6 +6,7 @@ from pathlib import Path
 import numpy as np
 
 from slw.magph.lswt import (
+    magnon_mode_chirality,
     solve_isotropic_lswt,
     solve_isotropic_lswt_energies,
     uniform_fractional_mesh,
@@ -111,6 +112,14 @@ class NativeLSWTTests(unittest.TestCase):
         for transform in spectrum.transformation:
             residual = transform.conj().T @ (spectrum.metric[:, None] * transform)
             np.testing.assert_allclose(residual, np.diag(spectrum.metric), atol=1.0e-12)
+        chirality = magnon_mode_chirality(
+            spectrum.transformation,
+            configuration.spin_pattern,
+            physical_mode_count=spectrum.physical_mode_count,
+        )
+        np.testing.assert_allclose(np.sum(chirality, axis=1), 0.0, atol=1.0e-12)
+        self.assertTrue(np.all(chirality[:, 0] > 0.0))
+        self.assertTrue(np.all(chirality[:, 1] < 0.0))
         self.assertLess(spectrum.max_paraunitary_residual, 1.0e-12)
 
     def test_unstable_declared_fm_is_rejected_before_or_during_lswt(self) -> None:

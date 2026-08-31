@@ -1,0 +1,18 @@
+\section{Retarded/advanced completion at finite q}
+\label{app:qpair}
+
+Let $V_A(-\qq)$ and $V_B(\qq)$ be Hermitian-conjugate Fourier components of two real-space perturbations. The retarded loop is
+\begin{equation}
+A^R_{AB}(\qq)=\int\tr[V_A(-\qq)G^R_{\kk+\qq}V_B(\qq)G^R_\kk].
+\end{equation}
+Taking the complex conjugate of the retarded loop at $-\qq$, using $V_X(\qq)^\dagger=V_X(-\qq)$, cyclically permuting the trace, and shifting the dummy momentum by $\qq$ gives the advanced loop with the same ordered pair of perturbations,
+\begin{equation}
+A^A_{AB}(\qq)=A^R_{AB}(-\qq)^*.
+\label{eq:qpair-advanced}
+\end{equation}
+This step is important for two different vertices: the momentum shift, rather than an assumed elementwise reality of $A^R_{AB}(\qq)$, restores the original $A,B$ ordering.
+The spectral discontinuity is therefore
+\begin{equation}
+-\frac{A^R_{AB}(\qq)-A^A_{AB}(\qq)}{2\pi\ii},
+\end{equation}
+which yields \cref{eq:qpair-kernel}. At a self-inverse q point, $A^A=A^{R*}$ and the expression reduces to $-\operatorname{Im}A^R/\pi$.

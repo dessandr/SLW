@@ -14,7 +14,7 @@ import numpy as np
 from .dispersion import MagnonDispersionResult
 from .pipeline import LifetimeGridResult
 
-LIFETIME_OUTPUT_SCHEMA_VERSION = 1
+LIFETIME_OUTPUT_SCHEMA_VERSION = 2
 DISPERSION_OUTPUT_SCHEMA_VERSION = 1
 
 
@@ -34,6 +34,7 @@ def write_lifetime_npz(
     result: LifetimeGridResult,
     *,
     metadata: Mapping[str, Any],
+    magnon_chirality: object | None = None,
     overwrite: bool = False,
 ) -> Path:
     """Write one complete lifetime result atomically from rank zero."""
@@ -59,6 +60,36 @@ def write_lifetime_npz(
         sort_keys=True,
         separators=(",", ":"),
     )
+    chirality: np.ndarray | None = None
+    if magnon_chirality is not None:
+        chirality = np.asarray(magnon_chirality, dtype=np.float64)
+        if chirality.shape != result.energy_mev.shape:
+            raise ValueError(
+                "magnon_chirality shape "
+                f"{chirality.shape} != energy shape {result.energy_mev.shape}"
+            )
+        if not np.all(np.isfinite(chirality)):
+            raise ValueError("magnon_chirality must contain only finite values")
+        tolerance = 256.0 * np.finfo(np.float64).eps
+        if np.any(np.abs(chirality) > 1.0 + tolerance):
+            raise ValueError("magnon_chirality must be bounded by [-1,1]")
+
+    payload: dict[str, np.ndarray] = {
+        "schema_version": np.asarray(
+            LIFETIME_OUTPUT_SCHEMA_VERSION, dtype=np.int64
+        ),
+        "metadata_json": np.asarray(metadata_json),
+        "k_points_frac": result.k_points_frac,
+        "energy_mev": result.energy_mev,
+        "self_energy_onshell_mev": result.self_energy_onshell_mev,
+        "gamma_hwhm_mev": result.gamma_hwhm_mev,
+        "fwhm_mev": result.fwhm_mev,
+        "scattering_rate_ps_inv": result.scattering_rate_ps_inv,
+        "lifetime_ps": result.lifetime_ps,
+        "valid_damping": result.valid_damping,
+    }
+    if chirality is not None:
+        payload["magnon_chirality"] = chirality
 
     descriptor, temporary_name = tempfile.mkstemp(
         dir=output.parent,
@@ -68,19 +99,7 @@ def write_lifetime_npz(
     os.close(descriptor)
     temporary = Path(temporary_name)
     try:
-        np.savez_compressed(
-            temporary,
-            schema_version=np.asarray(LIFETIME_OUTPUT_SCHEMA_VERSION, dtype=np.int64),
-            metadata_json=np.asarray(metadata_json),
-            k_points_frac=result.k_points_frac,
-            energy_mev=result.energy_mev,
-            self_energy_onshell_mev=result.self_energy_onshell_mev,
-            gamma_hwhm_mev=result.gamma_hwhm_mev,
-            fwhm_mev=result.fwhm_mev,
-            scattering_rate_ps_inv=result.scattering_rate_ps_inv,
-            lifetime_ps=result.lifetime_ps,
-            valid_damping=result.valid_damping,
-        )
+        np.savez_compressed(temporary, **payload)
         if overwrite:
             os.replace(temporary, output)
         else:

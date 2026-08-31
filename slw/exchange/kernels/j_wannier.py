@@ -18,6 +18,7 @@ import numpy as np
 from slw.core.structure import (
     atom_names_from_structure,
     find_nearest_neighbours,
+    read_wannier90_structure,
     resolve_wannier_structure,
 )
 from slw.core.wannier_io import read_wannier_hr
@@ -31,6 +32,7 @@ from slw.exchange.kernels.j_tensor_epr import (
     _apply_model_soc,
     _compute_tensor_direct,
     _compute_tensor_tb2j,
+    _normalise_site_selectors,
     _parse_axes,
     _write_tensor_text,
 )
@@ -107,24 +109,59 @@ def _read_centres_xyz_count(path):
         raise ValueError(f"Invalid Wannier centres xyz header in {path!r}: {first!r}") from exc
 
 
-def _read_centres_xyz_coords(path, n):
-    coords = []
+def _read_centres_xyz_rows(path):
     with open(path, "r", encoding="utf-8") as f:
-        lines = f.readlines()[2:]
-    for raw in lines:
+        lines = f.readlines()
+    if len(lines) < 2:
+        raise ValueError(f"{path}: Wannier centres xyz requires a header and comment row")
+    declared = _read_centres_xyz_count(path)
+    if declared < 0:
+        raise ValueError(f"{path}: centres xyz header count must be non-negative, got {declared}")
+    labels = []
+    coords = []
+    for line_number, raw in enumerate(lines[2:], start=3):
+        if not raw.strip():
+            continue
         toks = raw.split()
         if len(toks) < 4:
-            continue
+            raise ValueError(f"{path}:{line_number}: malformed xyz row: {raw.rstrip()!r}")
         try:
             xyz = [float(toks[1]), float(toks[2]), float(toks[3])]
-        except ValueError:
-            continue
+        except ValueError as exc:
+            raise ValueError(
+                f"{path}:{line_number}: non-numeric xyz coordinate: {raw.rstrip()!r}"
+            ) from exc
+        if not np.all(np.isfinite(xyz)):
+            raise ValueError(f"{path}:{line_number}: xyz coordinates must be finite")
+        labels.append(toks[0])
         coords.append(xyz)
-        if len(coords) >= int(n):
-            break
+    if len(coords) != declared:
+        raise ValueError(
+            f"{path}: xyz header declares {declared} rows but {len(coords)} data rows were found"
+        )
+    return labels, np.asarray(coords, dtype=np.float64).reshape(-1, 3)
+
+
+def _read_wannier_centre_coords(path, expected_count):
+    labels, coords = _read_centres_xyz_rows(path)
+    mask = np.asarray([str(label).casefold() == "x" for label in labels], dtype=bool)
+    centres = coords[mask]
+    if centres.shape != (int(expected_count), 3):
+        counts = {}
+        for label in labels:
+            counts[str(label)] = counts.get(str(label), 0) + 1
+        raise ValueError(
+            f"{path}: found {centres.shape[0]} Wannier-centre rows labelled X, "
+            f"expected spinor_dim={expected_count}; xyz label counts={counts}"
+        )
+    return centres
+
+
+def _read_centres_xyz_coords(path, n):
+    _labels, coords = _read_centres_xyz_rows(path)
     if len(coords) < int(n):
         raise ValueError(f"{path}: found {len(coords)} coordinate rows, expected at least {n}")
-    return np.asarray(coords, dtype=np.float64)
+    return coords[: int(n)]
 
 
 def _parse_collinear_label_bounds(labels):
@@ -180,9 +217,30 @@ def _infer_spinor_order_from_centres(centres_path, spinor_dim, labels):
 def _win_collinear_group_labels(win_path, nwan):
     if not win_path:
         return []
-    _atoms, groups, nproj = _win_projection_groups(win_path)
+    has_projections = False
+    with open(win_path, "r", encoding="utf-8") as stream:
+        for raw in stream:
+            line = raw.split("!", 1)[0].split("#", 1)[0].strip().casefold()
+            if line.startswith("begin projections"):
+                has_projections = True
+                break
+    if not has_projections:
+        return []
+    try:
+        _atoms, groups, nproj = _win_projection_groups(win_path)
+    except ValueError as exc:
+        print(
+            f"[J-wannier-tensor] projection basis diagnostics unavailable: {exc}",
+            flush=True,
+        )
+        return []
     if int(nproj) != int(nwan):
-        raise ValueError(f"{win_path} projection count={nproj} but spinor hr.dat half-dim={nwan}")
+        print(
+            "[J-wannier-tensor] projection basis diagnostics skipped: "
+            f"{win_path} projection count={nproj} but spinor hr.dat half-dim={nwan}",
+            flush=True,
+        )
+        return []
     return [
         f"{g['atom_label']}:{g['orbital']}[{g['indices'][0]}:{g['indices'][-1] + 1}]"
         for g in groups
@@ -260,30 +318,37 @@ def _spinor_labels_from_collinear(labels, nwan):
 
 
 def _spinor_slice_summary(slices, nwan):
+    selectors = _normalise_site_selectors(slices, nwan)
     out = {}
-    for site, slc in slices.items():
-        up = (int(slc.start), int(slc.stop))
-        dn = (int(nwan) + int(slc.start), int(nwan) + int(slc.stop))
-        out[int(site)] = {"up": up, "dn": dn}
+    for site, indices in selectors.items():
+        out[int(site)] = {
+            "up": indices.tolist(),
+            "dn": (indices + int(nwan)).tolist(),
+        }
     return out
 
 
 def _slice_file_order_summary(slices, nwan, groupby):
+    selectors = _normalise_site_selectors(slices, nwan)
     mode = normalize_groupby(groupby).value
     if mode == "orbital":
         return {
-            int(site): {"orbital_up_down_pairs_file": (2 * int(slc.start), 2 * int(slc.stop))}
-            for site, slc in slices.items()
+            int(site): {
+                "orbital_up_down_pairs_file": np.column_stack(
+                    [2 * indices, 2 * indices + 1]
+                ).tolist()
+            }
+            for site, indices in selectors.items()
         }
     if mode == "spin":
         out = {}
-        for site, slc in slices.items():
+        for site, indices in selectors.items():
             out[int(site)] = {
-                "up_file": (int(slc.start), int(slc.stop)),
-                "down_file": (int(nwan) + int(slc.start), int(nwan) + int(slc.stop)),
+                "up_file": indices.tolist(),
+                "down_file": (indices + int(nwan)).tolist(),
             }
         return out
-    return _spinor_slice_summary(slices, nwan)
+    return _spinor_slice_summary(selectors, nwan)
 
 def _load_spinor_hr_hk(
     spinor_hr,
@@ -299,14 +364,7 @@ def _load_spinor_hr_hk(
     if int(dim) % 2:
         raise ValueError(f"Spinor hr.dat dimension must be even, got {dim}")
     if centres:
-        ncentres = _read_centres_xyz_count(centres)
-        if ncentres < int(dim):
-            raise ValueError(f"{centres}: centres count={ncentres} is smaller than spinor_dim={dim}")
-        if ncentres != int(dim):
-            print(
-                f"[J-wannier-tensor] centres count={ncentres}; using first spinor_dim={dim} Wannier centre rows",
-                flush=True,
-            )
+        _read_wannier_centre_coords(centres, dim)
     hk = _build_hk_from_hr_map(
         hmap,
         kpts,
@@ -330,6 +388,193 @@ def _load_spinor_hr_hk(
         "centres": centres or "",
     }
     return hk, meta
+
+
+def _pbc_nearest_atom_assignments(centres_cart, lattice_ang, atom_frac):
+    centres = np.asarray(centres_cart, dtype=np.float64)
+    lattice = np.asarray(lattice_ang, dtype=np.float64)
+    atoms = np.asarray(atom_frac, dtype=np.float64)
+    if centres.ndim != 2 or centres.shape[1:] != (3,) or centres.shape[0] == 0:
+        raise ValueError(f"Wannier centres must have shape (n,3), got {centres.shape}")
+    if lattice.shape != (3, 3) or not np.all(np.isfinite(lattice)):
+        raise ValueError(f"Wannier lattice must be a finite (3,3) array, got {lattice.shape}")
+    if atoms.ndim != 2 or atoms.shape[1:] != (3,) or atoms.shape[0] == 0:
+        raise ValueError(f"Atomic fractional positions must have shape (nat,3), got {atoms.shape}")
+    if not np.all(np.isfinite(centres)) or not np.all(np.isfinite(atoms)):
+        raise ValueError("Wannier centres and atomic positions must be finite")
+
+    singular_values = np.linalg.svd(lattice, compute_uv=False)
+    sigma_min = float(singular_values[-1])
+    if not np.isfinite(sigma_min) or sigma_min <= 0.0:
+        raise ValueError("Wannier lattice is singular; periodic centre matching is undefined")
+
+    centres_frac = np.mod(centres @ np.linalg.inv(lattice), 1.0)
+    atoms = np.mod(atoms, 1.0)
+    delta = centres_frac[:, None, :] - atoms[None, :, :]
+
+    # Derive a finite image-search range from an existing minimum-image upper
+    # bound and the lattice's smallest singular value.  This remains safe for
+    # skewed, non-orthogonal cells without a material-specific image cutoff.
+    initial = delta - np.rint(delta)
+    initial_dist = np.linalg.norm(initial @ lattice, axis=-1)
+    upper_bound = float(np.max(np.min(initial_dist, axis=1)))
+    image_extent = max(1, int(np.ceil(1.0 + upper_bound / sigma_min)))
+    metric = lattice @ lattice.T
+    atom_distance_sq = np.full(delta.shape[:2], np.inf, dtype=np.float64)
+    # Stream lattice images so a highly skewed cell cannot trigger a large
+    # (ncentre,natom,nimage,3) allocation.  Each image evaluates all
+    # centre/atom pairs in one vectorized Cartesian-metric contraction.
+    image_range = range(-image_extent, image_extent + 1)
+    for i0 in image_range:
+        for i1 in image_range:
+            for i2 in image_range:
+                displacement = delta - np.asarray([i0, i1, i2], dtype=np.float64)
+                distance_sq = np.einsum(
+                    "cai,ij,caj->ca",
+                    displacement,
+                    metric,
+                    displacement,
+                    optimize=True,
+                )
+                np.minimum(atom_distance_sq, distance_sq, out=atom_distance_sq)
+    nearest = np.argmin(atom_distance_sq, axis=1).astype(np.int64)
+    nearest_distance = np.sqrt(atom_distance_sq[np.arange(centres.shape[0]), nearest])
+
+    if atoms.shape[0] > 1:
+        ordered = np.partition(atom_distance_sq, 1, axis=1)[:, :2]
+        scale = np.maximum(1.0, np.max(np.abs(ordered), axis=1))
+        numerical_tolerance = 64.0 * np.finfo(np.float64).eps * scale
+        ambiguous = np.flatnonzero((ordered[:, 1] - ordered[:, 0]) <= numerical_tolerance)
+        if ambiguous.size:
+            raise ValueError(
+                "Periodic nearest-atom assignment is ambiguous for Wannier centre rows "
+                f"{ambiguous.tolist()}"
+            )
+    return nearest, nearest_distance
+
+
+def _infer_spinor_magnetic_selectors(
+    *,
+    win_path,
+    centres_path,
+    spinor_dim,
+    groupby,
+    mag_atoms,
+    centre_tolerance_ang=None,
+    structure_source="explicit",
+):
+    if not win_path:
+        raise ValueError(
+            "Automatic spinor magnetic-subspace matching requires an explicit win file"
+        )
+    if not centres_path:
+        raise ValueError(
+            "Automatic spinor magnetic-subspace matching requires centres.xyz"
+        )
+    dim = int(spinor_dim)
+    if dim <= 0 or dim % 2:
+        raise ValueError(f"Spinor dimension must be positive and even, got {spinor_dim}")
+    mode = normalize_groupby(groupby).value
+    nwan = dim // 2
+    lattice, species, atom_frac, _numbers = read_wannier90_structure(win_path)
+    centres_file = _read_wannier_centre_coords(centres_path, dim)
+
+    if mode == "spin":
+        partner_file_indices = np.column_stack(
+            [np.arange(nwan, dtype=np.int64), np.arange(nwan, dim, dtype=np.int64)]
+        )
+    elif mode == "orbital":
+        partner_file_indices = np.arange(dim, dtype=np.int64).reshape(nwan, 2)
+    else:  # normalize_groupby guards this, retained as a closed failure mode.
+        raise ValueError(f"Unsupported spinor groupby={mode!r}")
+
+    centre_atom, centre_distance = _pbc_nearest_atom_assignments(
+        centres_file, lattice, atom_frac
+    )
+    paired_atoms = centre_atom[partner_file_indices]
+    split = np.flatnonzero(paired_atoms[:, 0] != paired_atoms[:, 1])
+    if split.size:
+        details = [
+            {
+                "orbital": int(index),
+                "file_rows": partner_file_indices[index].tolist(),
+                "atoms": paired_atoms[index].tolist(),
+                "distances_ang": centre_distance[partner_file_indices[index]].tolist(),
+            }
+            for index in split
+        ]
+        raise ValueError(
+            "Spin partners were assigned to different atoms; groupby/centres are "
+            f"inconsistent: {details}"
+        )
+
+    tolerance = centre_tolerance_ang
+    if tolerance is not None:
+        tolerance = float(tolerance)
+        if not np.isfinite(tolerance) or tolerance <= 0.0:
+            raise ValueError(
+                f"centre_tolerance_ang must be finite and positive, got {centre_tolerance_ang!r}"
+            )
+        too_far = np.flatnonzero(centre_distance > tolerance)
+        if too_far.size:
+            raise ValueError(
+                f"Wannier centres {too_far.tolist()} exceed centre_tolerance_ang={tolerance:g}; "
+                f"distances_ang={centre_distance[too_far].tolist()} "
+                f"assigned_atoms={centre_atom[too_far].tolist()}"
+            )
+
+    selected_raw = np.asarray(mag_atoms)
+    if selected_raw.ndim != 1:
+        raise ValueError(f"mag_atoms must be one-dimensional, got shape={selected_raw.shape}")
+    if selected_raw.size == 0:
+        raise ValueError("mag_atoms must contain at least one atom for automatic matching")
+    if np.issubdtype(selected_raw.dtype, np.bool_) or not np.issubdtype(
+        selected_raw.dtype, np.integer
+    ):
+        raise ValueError("mag_atoms must contain integer atom indices")
+    selected_atoms = np.asarray(selected_raw, dtype=np.int64)
+    if np.unique(selected_atoms).size != selected_atoms.size:
+        raise ValueError(f"mag_atoms contains duplicates: {selected_atoms.tolist()}")
+    if np.any(selected_atoms < 0) or np.any(selected_atoms >= len(species)):
+        raise ValueError(
+            f"mag_atoms={selected_atoms.tolist()} is outside structure atom range [0,{len(species)})"
+        )
+
+    orbital_atom = paired_atoms[:, 0]
+    selectors = {}
+    offsets = [0]
+    flat_indices = []
+    site_max_distance = []
+    for local_site, atom_index in enumerate(selected_atoms):
+        indices = np.flatnonzero(orbital_atom == int(atom_index)).astype(np.int64)
+        if indices.size == 0:
+            raise ValueError(
+                f"Selected magnetic atom {int(atom_index)} ({species[int(atom_index)]}) "
+                "has no Wannier orbitals assigned by centres.xyz"
+            )
+        selectors[int(local_site)] = indices
+        flat_indices.extend(indices.tolist())
+        offsets.append(len(flat_indices))
+        site_max_distance.append(float(np.max(centre_distance[partner_file_indices[indices]])))
+
+    pair_distance = centre_distance[partner_file_indices]
+    meta = {
+        "source": "centres_xyz_pbc_nearest_atom",
+        "structure_source": str(structure_source),
+        "win_path": str(win_path),
+        "centres_path": str(centres_path),
+        "groupby": mode,
+        "centre_tolerance_ang": tolerance,
+        "selected_mag_atoms": selected_atoms,
+        "site_global_atom_index": selected_atoms,
+        "selector_offsets": np.asarray(offsets, dtype=np.int64),
+        "selector_indices": np.asarray(flat_indices, dtype=np.int64),
+        "site_max_distance_ang": np.asarray(site_max_distance, dtype=np.float64),
+        "orbital_atom_index": orbital_atom,
+        "partner_file_indices": partner_file_indices,
+        "partner_distance_ang": pair_distance,
+    }
+    return selectors, meta
 
 
 def _parse_subspace_selector(text):
@@ -512,6 +757,34 @@ def _normalize_mag_atoms(args):
     return [int(x) - 1 if int(args.mag_atoms_base) == 1 else int(x) for x in args.mag_atoms]
 
 
+def _manual_selector_metadata(slices, nwan, mag_atoms):
+    selectors = _normalise_site_selectors(slices, nwan)
+    selected_atoms = np.asarray(mag_atoms, dtype=np.int64)
+    if sorted(selectors) != list(range(len(selected_atoms))):
+        raise ValueError(
+            "Manual slice site keys must be local magnetic-site indices 0..M-1 "
+            f"in mag_atoms order; got keys={sorted(selectors)} mag_atoms={selected_atoms.tolist()}"
+        )
+    offsets = [0]
+    flat = []
+    for local_site in range(len(selected_atoms)):
+        flat.extend(selectors[local_site].tolist())
+        offsets.append(len(flat))
+    return {
+        "source": "manual_slices",
+        "structure_source": "",
+        "win_path": "",
+        "centres_path": "",
+        "groupby": "",
+        "centre_tolerance_ang": None,
+        "selected_mag_atoms": selected_atoms,
+        "site_global_atom_index": selected_atoms,
+        "selector_offsets": np.asarray(offsets, dtype=np.int64),
+        "selector_indices": np.asarray(flat, dtype=np.int64),
+        "site_max_distance_ang": np.full(len(selected_atoms), np.nan),
+    }
+
+
 def _build_pair_meta(mag_atoms, neighbours):
     global_to_local = {int(g): i for i, g in enumerate(mag_atoms)}
     out = []
@@ -618,6 +891,43 @@ def _write_tensor_h5_simple(path, args, labels, pair_meta, tensor, trace_acc, el
             "ref_epr_dn": args.ref_epr_dn or "",
         }.items():
             basic.create_dataset(key, data=np.array(str(val), dtype=object), dtype=str_dt)
+        magnetic_meta = getattr(args, "_magnetic_subspace_meta", {}) or {}
+        for key in ("source", "structure_source", "win_path", "centres_path", "groupby"):
+            basic.create_dataset(
+                f"magnetic_subspace_{key}",
+                data=np.array(str(magnetic_meta.get(key, "")), dtype=object),
+                dtype=str_dt,
+            )
+        centre_tolerance = magnetic_meta.get("centre_tolerance_ang")
+        basic.create_dataset(
+            "centre_tolerance_enabled", data=np.asarray(centre_tolerance is not None)
+        )
+        tolerance_dataset = basic.create_dataset(
+            "centre_tolerance_ang",
+            data=np.asarray(
+                np.nan if centre_tolerance is None else float(centre_tolerance),
+                dtype=np.float64,
+            ),
+        )
+        tolerance_dataset.attrs["unit"] = "angstrom"
+        magnetic = h5.create_group("magnetic_subspace")
+        magnetic.attrs["selector_index_basis"] = "canonical_spin_major_collinear_half"
+        for key in (
+            "selected_mag_atoms",
+            "site_global_atom_index",
+            "selector_offsets",
+            "selector_indices",
+            "site_max_distance_ang",
+            "orbital_atom_index",
+            "partner_file_indices",
+            "partner_distance_ang",
+        ):
+            if key in magnetic_meta:
+                dataset = magnetic.create_dataset(
+                    key, data=np.asarray(magnetic_meta[key])
+                )
+                if key.endswith("distance_ang"):
+                    dataset.attrs["unit"] = "angstrom"
         soc_entries = getattr(args, "_soc_entries", []) or []
         basic.create_dataset("additional_soc", data=np.asarray(bool(soc_entries)))
         basic.create_dataset(
@@ -652,8 +962,18 @@ def _write_tensor_h5_simple(path, args, labels, pair_meta, tensor, trace_acc, el
         }.items():
             basic.create_dataset(key, data=np.array(str(val), dtype=object), dtype=str_dt)
         basic.create_dataset("source_spin_magnitude", data=np.asarray(spin_magnitude))
-        directed_weight = 1.0 if args.kernel == "tb2j" else 0.5
-        stored_bond_weight = directed_weight if bool(args.all_bonds) else 2.0 * directed_weight
+        # Scalar LKAG and TB2J both produce source coefficients for the
+        # pair-twice Hamiltonian.  The direct spin-tensor kernel is already in
+        # the native half-weight convention.  If mates are omitted, double the
+        # stored list weight (not the numerical payload) to preserve energy.
+        source_directed_weight = (
+            1.0 if args.kernel in {"scalar", "tb2j"} else 0.5
+        )
+        stored_bond_weight = (
+            source_directed_weight
+            if bool(args.all_bonds)
+            else 2.0 * source_directed_weight
+        )
         basic.create_dataset("directed_bond_weight", data=np.asarray(stored_bond_weight))
         bonds = h5.create_group("bonds")
         bonds.create_dataset("mag_i_atom", data=np.asarray([m["gi"] for m in pair_meta], dtype=np.int64))
@@ -776,11 +1096,83 @@ def run(args, comm=None):
         args.epr_up = ""
         h_spin, soc_entries, soc_win_path = _apply_model_soc(h_spin, args, dim)
 
-    if spinor_input and not args.slices and args.mag_subspace:
-        slices, slice_labels = _infer_collinear_slices_from_win(args.win, dim, args.mag_subspace)
+    structure_path, structure_source = resolve_wannier_structure(os.getcwd(), args.win)
+    labels_map = atom_names_from_structure(structure_path)
+    labels = [
+        labels_map.get(i, f"Atom{i + 1}")
+        for i in range(max(labels_map.keys(), default=-1) + 1)
+    ]
+    mag_atoms = _normalize_mag_atoms(args)
+    if not mag_atoms:
+        raise ValueError("mag_atoms must contain at least one atom")
+    if len(set(mag_atoms)) != len(mag_atoms):
+        raise ValueError(f"mag_atoms contains duplicates: {mag_atoms}")
+    invalid_mag_atoms = [index for index in mag_atoms if index < 0 or index >= len(labels)]
+    if invalid_mag_atoms:
+        raise ValueError(
+            f"mag_atoms contains indices outside [0,{len(labels)}): {invalid_mag_atoms}"
+        )
+
+    manual_slices = bool(str(getattr(args, "slices", "") or "").strip())
+    explicit_mag_subspace = bool(
+        str(getattr(args, "mag_subspace", "") or "").strip()
+    )
+    if spinor_input and not manual_slices and explicit_mag_subspace:
+        slices, slice_labels = _infer_collinear_slices_from_win(
+            args.win, dim, args.mag_subspace
+        )
+        magnetic_subspace_meta = _manual_selector_metadata(slices, dim, mag_atoms)
+        magnetic_subspace_meta.update(
+            {
+                "source": "win_projection_mag_subspace",
+                "structure_source": str(structure_source),
+                "win_path": str(structure_path),
+            }
+        )
         print(f"[J-wannier-tensor] mag_subspace={slice_labels}", flush=True)
+    elif spinor_input and not manual_slices:
+        if args.win is None:
+            raise ValueError(
+                "Automatic spinor magnetic-subspace matching requires explicit win and centres inputs"
+            )
+        slices, magnetic_subspace_meta = _infer_spinor_magnetic_selectors(
+            win_path=structure_path,
+            centres_path=getattr(args, "centres", None),
+            spinor_dim=2 * dim,
+            groupby=args.groupby,
+            mag_atoms=mag_atoms,
+            centre_tolerance_ang=getattr(args, "centre_tolerance_ang", None),
+            structure_source=structure_source,
+        )
+        print(
+            "[J-wannier-tensor] automatic magnetic subspace "
+            f"source={magnetic_subspace_meta['source']} "
+            f"structure_source={structure_source} groupby={args.groupby} "
+            f"orbital_to_atom={magnetic_subspace_meta['orbital_atom_index'].tolist()} "
+            f"partner_distances_ang={magnetic_subspace_meta['partner_distance_ang'].tolist()}",
+            flush=True,
+        )
+        for local_site, atom_index in enumerate(mag_atoms):
+            print(
+                "[J-wannier-tensor] automatic magnetic site "
+                f"local={local_site} atom={atom_index} label={labels[atom_index]} "
+                f"orbitals={slices[local_site].tolist()} "
+                f"max_centre_distance_ang="
+                f"{magnetic_subspace_meta['site_max_distance_ang'][local_site]:.8g}",
+                flush=True,
+            )
     else:
         slices = _load_slices(args, dim)
+        magnetic_subspace_meta = _manual_selector_metadata(slices, dim, mag_atoms)
+        magnetic_subspace_meta["structure_source"] = str(structure_source)
+        magnetic_subspace_meta["win_path"] = str(structure_path)
+        if spinor_input and getattr(args, "centre_tolerance_ang", None) is not None:
+            print(
+                "[J-wannier-tensor] manual slices override centre_tolerance_ang; "
+                "centre-distance cutoff is not applied",
+                flush=True,
+            )
+    args._magnetic_subspace_meta = magnetic_subspace_meta
     if spinor_input:
         print(
             f"[J-wannier-tensor] mag_subspace_file_order={_slice_file_order_summary(slices, dim, args.groupby)}",
@@ -845,10 +1237,6 @@ def run(args, comm=None):
     args._soc_win_path = soc_win_path
     args._intersite_soc_meta = intersite_soc_meta
 
-    structure_path, structure_source = resolve_wannier_structure(os.getcwd(), args.win)
-    labels_map = atom_names_from_structure(structure_path)
-    labels = [labels_map.get(i, f"Atom{i + 1}") for i in range(max(labels_map.keys(), default=-1) + 1)]
-    mag_atoms = _normalize_mag_atoms(args)
     neighbours = find_nearest_neighbours(
         structure_path,
         mag_atom_indices=mag_atoms,
@@ -988,7 +1376,14 @@ def main():
         default=None,
         help="Required for --spinor_hr: TB2J spin-major or orbital-interleaved layout.",
     )
-    ap.add_argument("--centres", default=None, help="Optional Wannier90 centres.xyz for spinor_dim sanity check")
+    ap.add_argument("--centres", default=None, help="Wannier90 centres.xyz used for automatic spinor magnetic-subspace matching")
+    ap.add_argument(
+        "--centre_tolerance_ang",
+        "--centre-tolerance-ang",
+        type=float,
+        default=None,
+        help="Optional positive maximum centre-to-assigned-atom distance in angstrom",
+    )
     ap.add_argument("--efermi", type=float, required=True, help="Fermi energy in eV")
     ap.add_argument("--hr_unit", choices=["ev", "ry", "ha"], default="ev", help="Unit of input hr.dat matrix elements; Wannier90 default is eV")
     ap.add_argument("--ref_epr_up", default=None, help="Optional reference EPR up HDF5 for H(k) scale/gauge diagnostics")

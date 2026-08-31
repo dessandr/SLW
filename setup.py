@@ -13,6 +13,7 @@ setup(
         "matplotlib",
         "numba",
         "numpy",
+        "PyYAML>=6",
         "scipy",
         "spglib",
         "threadpoolctl",
@@ -28,6 +29,7 @@ setup(
             "slw_exchange.x=slw.cli.exchange:main",
             "slw_magph.x=slw.cli.magph:main",
             "slw_post.x=slw.cli.post:main",
+            "wtorque=slw.wtorque.cli:main",
         ],
     },
 )

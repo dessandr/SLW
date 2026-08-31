@@ -10,6 +10,7 @@ def test_soc_root_contains_only_active_typed_modules() -> None:
     root = Path(slw.soc.__file__).resolve().parent
     assert {path.name for path in root.glob("*.py")} == {
         "__init__.py",
+        "atomic.py",
         "manifold.py",
         "model.py",
         "spinor.py",

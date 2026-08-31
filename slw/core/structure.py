@@ -2,15 +2,15 @@
 
 from __future__ import annotations
 
+import re
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Iterable
 
 import numpy as np
 import spglib
 from scipy.spatial import cKDTree
 
 from .constants import BOHR_TO_ANG
-
 
 _ELEMENTS = (
     "H He Li Be B C N O F Ne Na Mg Al Si P S Cl Ar K Ca Sc Ti V Cr Mn Fe Co Ni "
@@ -20,6 +20,29 @@ _ELEMENTS = (
     "Bh Hs Mt Ds Rg Cn Nh Fl Mc Lv Ts Og"
 ).split()
 ELEMENT_TO_Z = {symbol.upper(): index for index, symbol in enumerate(_ELEMENTS, start=1)}
+_ELEMENT_CANONICAL = {symbol.casefold(): symbol for symbol in _ELEMENTS}
+_SITE_LABEL_RE = re.compile(r"^(?P<symbol>[A-Za-z]+)(?P<site_index>\d*)$")
+
+
+def chemical_symbol_from_site_label(label: str) -> str:
+    """Return the canonical element symbol encoded by a Wannier site label.
+
+    Wannier90 commonly distinguishes equivalent sites with a trailing integer,
+    for example ``Mn1`` and ``Mn2``. The suffix identifies the site and is not
+    part of the chemical symbol used to construct an spglib cell.
+    """
+
+    text = str(label).strip()
+    match = _SITE_LABEL_RE.fullmatch(text)
+    symbol = None if match is None else _ELEMENT_CANONICAL.get(match["symbol"].casefold())
+    if symbol is None:
+        raise ValueError(f"Unknown chemical site label: {label!r}")
+    return symbol
+
+
+def _has_explicit_site_index(label: str) -> bool:
+    match = _SITE_LABEL_RE.fullmatch(str(label).strip())
+    return bool(match is not None and match["site_index"])
 
 
 def _read_win_blocks(path: Path) -> dict[str, list[str]]:
@@ -96,12 +119,19 @@ def read_wannier90_structure(
         raise ValueError(f"{input_path}: missing atoms_frac or atoms_cart block")
 
     positions = np.mod(np.asarray(positions_fractional, dtype=np.float64), 1.0)
+    canonical_species: list[str] = []
+    unknown: set[str] = set()
+    for label in species:
+        try:
+            canonical_species.append(chemical_symbol_from_site_label(label))
+        except ValueError:
+            canonical_species.append("")
+            unknown.add(label)
+    if unknown:
+        raise ValueError(f"Unknown chemical symbols in {input_path}: {sorted(unknown)}")
     numbers = np.asarray(
-        [ELEMENT_TO_Z.get(symbol.strip().upper(), 0) for symbol in species], dtype=np.int32
+        [ELEMENT_TO_Z[symbol.upper()] for symbol in canonical_species], dtype=np.int32
     )
-    if np.any(numbers == 0):
-        unknown = sorted({species[index] for index in np.flatnonzero(numbers == 0)})
-        raise ValueError(f"Unknown chemical symbols in {input_path}: {unknown}")
     return lattice_ang, species, positions, numbers
 
 
@@ -154,13 +184,38 @@ def resolve_wannier_structure(
 
 
 def atom_names_from_structure(path: str | Path) -> dict[int, str]:
-    """Build stable, one-based species labels while preserving atom order."""
+    """Build unique site labels while preserving explicit Wannier labels."""
     _, species, _, _ = read_wannier90_structure(path)
-    counts: dict[str, int] = {}
+    canonical = [chemical_symbol_from_site_label(label) for label in species]
+    label_counts: dict[str, int] = {}
+    for label in species:
+        key = label.strip().casefold()
+        label_counts[key] = label_counts.get(key, 0) + 1
+
+    reserved = {
+        label.strip().casefold()
+        for label in species
+        if _has_explicit_site_index(label)
+        and label_counts[label.strip().casefold()] == 1
+    }
+    used: set[str] = set()
+    next_index: dict[str, int] = {}
     labels: dict[int, str] = {}
-    for index, symbol in enumerate(species):
-        counts[symbol] = counts.get(symbol, 0) + 1
-        labels[index] = f"{symbol}{counts[symbol]}"
+    for index, (raw_label, symbol) in enumerate(zip(species, canonical)):
+        raw_key = raw_label.strip().casefold()
+        if _has_explicit_site_index(raw_label) and label_counts[raw_key] == 1:
+            site_label = raw_label.strip()
+        else:
+            candidate_index = next_index.get(symbol, 1)
+            while True:
+                site_label = f"{symbol}{candidate_index}"
+                candidate_index += 1
+                key = site_label.casefold()
+                if key not in reserved and key not in used:
+                    break
+            next_index[symbol] = candidate_index
+        used.add(site_label.casefold())
+        labels[index] = site_label
     return labels
 
 

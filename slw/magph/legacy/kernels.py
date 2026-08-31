@@ -163,9 +163,12 @@ def Magnon_Hamiltonian_collinear_bdg(k, S, J0, R, atom_pos, spin_pattern, nmag, 
     """General collinear LSWT BdG kernel using site spin alignment.
 
     spin_pattern entries are +/-1 in the magnetic basis.  The input exchange is
-    assumed to follow the TB2J normalized-spin convention and J_eff=J*S^2, so
-    the magnon scale is J_eff/S.  Directed i!=j bond lists should use
-    bond_factor=1.
+    normalized to unit spin directions and the magnon scale is J_eff/S.  This
+    low-level kernel assembles the canonical one-half-weight directed sum:
+    ``bond_factor=1`` is therefore correct only for an already canonicalized
+    payload.  A raw TB2J mate-complete list has source directed-bond weight 1
+    and must use ``bond_factor=2``.  Callers should resolve that factor from
+    source metadata instead of relying on this compatibility default.
     """
     A = np.zeros((nmag, nmag), dtype=np.complex128)
     B = np.zeros((nmag, nmag), dtype=np.complex128)

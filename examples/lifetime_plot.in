@@ -1,0 +1,24 @@
+&control
+  calculation = 'lifetime_plot',
+  prefix = 'sample',
+  outdir = './slw-tmp',
+  verbosity = 'normal'
+/
+
+&post
+  input = '${savedir}/sample.lifetime.npz',
+  output_dir = '${savedir}/lifetime-plots',
+
+  ! New lifetime products embed the lattice and atom geometry. Uncomment this
+  ! only when plotting an older native v1 product without embedded geometry.
+  ! exchange_h5 = '${savedir}/sample.j.h5',
+
+  plane_axes = 0, 1,
+  slices = 0.0, 0.5,
+  plots = 'energy', 'linewidth', 'scattering-rate', 'lifetime', 'splitting',
+  formats = 'png', 'pdf',
+  bz_mode = 'clip',
+  linewidth_scale = 1.0,
+  linewidth_unit = 'meV',
+  overwrite = .false.
+/

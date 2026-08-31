@@ -95,6 +95,7 @@ _J_WANNIER_DEFAULTS: dict[str, Any] = {
     "spinor_hr": None,
     "groupby": None,
     "centres": None,
+    "centre_tolerance_ang": None,
     "hr_unit": "ev",
     "ref_epr_up": None,
     "ref_epr_dn": None,

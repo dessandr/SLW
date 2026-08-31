@@ -113,13 +113,14 @@ their kernel family, source spin magnitude, and either
 lack them are rejected unless the Python caller supplies an explicit
 `ExchangeConvention`; filename or value-sign inference is not accepted.
 
-The scalar LKAG and direct-tensor reference routes use that one-half weight on
-a mate-complete list. The retained TB2J decomposition has a different directed
-pair convention and records a weight of one instead; it is therefore rejected
-by the first native canonical importer until a dedicated conversion is backed
-by scalar/direct/TB2J parity tests. Likewise, a canonical-half bond list and a
-tensor-axis subset are valid retained exchange artifacts but are not silently
-expanded by the native magnon path.
+The scalar LKAG and retained TB2J routes produce source coefficients for a
+mate-complete directed sum with weight one. The direct-tensor reference route
+uses the native one-half weight. Source-weight-one payloads are not accepted by
+the canonical importer as if they were already converted: the audited TB2J
+adapter maps them to native values with `J_native = 2 J_source`, while other
+source families fail closed until an explicit converter is selected. Likewise,
+a canonical-half bond list and a tensor-axis subset are valid retained exchange
+artifacts but are not silently expanded by the native magnon path.
 
 ## Single-ion anisotropy
 
@@ -410,13 +411,17 @@ regenerates a missing plot from that NPZ. `from_scratch` recomputes and
 atomically replaces completed products. Partial lifetime checkpoints are not
 yet part of the native output contract.
 
-## Native lifetime output v1
+## Native lifetime output v2
 
 The registered lifetime product records:
 
 - external fractional k points and physical magnon energies;
 - the complex on-shell self-energy;
 - HWHM, FWHM, rate, and lifetime with the conventions and units above;
+- for bipartite AFM, the ordered-spin-axis magnon chirality and a canonical
+  `chi=+1, chi=-1` branch order applied consistently to energy, self-energy,
+  linewidth, rate, lifetime, and validity arrays;
+- lattice, atomic positions, and labels needed for self-contained BZ plots;
 - temperature, broadening, spin state, exchange/dJ/phonon source paths,
   exchange representation/kernel, derivative ASR outcome, phonon mass/schema
   convention, derivative space-group covariance provenance,
@@ -433,6 +438,33 @@ preferred over per-rank final files. Parallel shards are temporary products
 and must be merged deterministically before the run is considered complete.
 Generated HDF5/NPZ data, plots, logs, caches, and scheduler output remain
 outside version control.
+
+The native post route reads this schema directly:
+
+```fortran
+&control
+  calculation = 'lifetime_plot'
+/
+&post
+  input = './slw-tmp/sample.save/sample.lifetime.npz',
+  output_dir = './slw-tmp/sample.save/lifetime-plots',
+  slices = 0.0, 0.5,
+  plots = 'energy', 'linewidth', 'scattering-rate', 'lifetime', 'splitting',
+  formats = 'png', 'pdf'
+/
+```
+
+The requested slice is periodic and snaps to the closest stored plane. Thus a
+half-shifted 20-point normal mesh maps requests `0.0` and `0.5` to one of the
+neighboring `0.025/0.975` and `0.475/0.525` planes. Voronoi geometry is built
+once per selected plane and reused for every observable and magnon mode.
+Existing v1 products can supply the original `exchange_h5` to the plot input.
+The postprocessor recomputes only the inexpensive LSWT eigenvectors on the
+stored k mesh, verifies their energies against the lifetime product, and then
+reorders every stored observable into the same chirality branches. It does not
+rerun the vertex or self-energy integration. The signed AFM splitting is
+reported as `E_chi+ - E_chi-`, rather than the difference between independently
+energy-sorted mode indices.
 
 ## Registered QE-style lifetime input
 

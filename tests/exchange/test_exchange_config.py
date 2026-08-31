@@ -154,6 +154,131 @@ class ExchangeConfigTests(unittest.TestCase):
                 savedir="save",
             )
 
+    def test_spinor_wannier_tensor_can_match_centres_without_slices(self):
+        automatic = {
+            "input_format": "wannier",
+            "efermi": 0.0,
+            "kmesh": (2, 2, 2),
+            "mag_atoms": [0, 1],
+            "spinor_hr": "spinor_hr.dat",
+            "win": "model.win",
+            "centres": "model_centres.xyz",
+            "groupby": "orbital",
+            "centre_tolerance_ang": 0.35,
+        }
+        request = build_exchange_request(
+            "j_tensor",
+            automatic,
+            prefix="w",
+            savedir="save",
+        )
+        self.assertEqual(request.slices, ())
+        self.assertEqual(request.slice_map, {})
+
+        _module, _function, namespace = build_namespace(request)
+        self.assertEqual(namespace.slices, "")
+        self.assertEqual(namespace.win, "model.win")
+        self.assertEqual(namespace.centres, "model_centres.xyz")
+        self.assertEqual(namespace.centre_tolerance_ang, 0.35)
+
+        manual = build_exchange_request(
+            "j_tensor",
+            {**automatic, "slices": "0:0:5,1:5:10"},
+            prefix="w",
+            savedir="save",
+        )
+        self.assertEqual(manual.slice_map, {0: slice(0, 5), 1: slice(5, 10)})
+
+    def test_automatic_centre_matching_has_a_narrow_input_contract(self):
+        automatic = {
+            "input_format": "wannier",
+            "efermi": 0.0,
+            "kmesh": (2, 2, 2),
+            "mag_atoms": [0, 1],
+            "spinor_hr": "spinor_hr.dat",
+            "win": "model.win",
+            "centres": "model_centres.xyz",
+            "groupby": "spin",
+        }
+        for missing in ("win", "centres"):
+            incomplete = {key: value for key, value in automatic.items() if key != missing}
+            with (
+                self.subTest(missing=missing),
+                self.assertRaisesRegex(ExchangeInputError, "required exchange parameter: slices"),
+            ):
+                build_exchange_request(
+                    "j_tensor",
+                    incomplete,
+                    prefix="w",
+                    savedir="save",
+                )
+
+        missing_groupby = dict(automatic)
+        missing_groupby.pop("groupby")
+        with self.assertRaisesRegex(ExchangeInputError, "requires explicit groupby"):
+            build_exchange_request(
+                "j_tensor",
+                missing_groupby,
+                prefix="w",
+                savedir="save",
+            )
+
+        scalar = {
+            "input_format": "wannier",
+            "efermi": 0.0,
+            "kmesh": (2, 2, 2),
+            "mag_atoms": [0],
+            "up_hr": "up_hr.dat",
+            "dn_hr": "dn_hr.dat",
+        }
+        with self.assertRaisesRegex(ExchangeInputError, "required exchange parameter: slices"):
+            build_exchange_request("j", scalar, prefix="w", savedir="save")
+
+        epr_tensor = _common(input_format="epr")
+        epr_tensor.pop("slices")
+        with self.assertRaisesRegex(ExchangeInputError, "required exchange parameter: slices"):
+            build_exchange_request(
+                "j_tensor",
+                epr_tensor,
+                prefix="e",
+                savedir="save",
+            )
+
+    def test_centre_tolerance_is_optional_and_strictly_positive(self):
+        automatic = {
+            "input_format": "wannier",
+            "efermi": 0.0,
+            "kmesh": (2, 2, 2),
+            "mag_atoms": [0],
+            "spinor_hr": "spinor_hr.dat",
+            "win": "model.win",
+            "centres": "model_centres.xyz",
+            "groupby": "orbital",
+        }
+        request = build_exchange_request(
+            "j_tensor",
+            automatic,
+            prefix="w",
+            savedir="save",
+        )
+        _module, _function, namespace = build_namespace(request)
+        self.assertIsNone(namespace.centre_tolerance_ang)
+
+        for invalid in (0.0, -0.1, float("nan")):
+            with (
+                self.subTest(value=invalid),
+                self.assertRaisesRegex(
+                    ExchangeInputError,
+                    "centre_tolerance_ang must (?:be greater than|be finite)",
+                ),
+            ):
+                build_exchange_request(
+                    "j_tensor",
+                    {**automatic, "centre_tolerance_ang": invalid},
+                    prefix="w",
+                    savedir="save",
+                )
+
     def test_dj_is_epr_only_and_spinor_base_requires_tensor(self):
         request = build_exchange_request(
             "dj_tensor",

@@ -1,0 +1,28 @@
+\section{Direct mixed vertex and moving projectors}
+\label{app:direct}
+
+The exact one-particle mixed derivative contains
+\begin{equation}
+\bT^{(1)}_{\ell a,\kappa\mu}
+=\frac{\partial^2H}
+{\partial\pi_{\ell a}\partial u_{\kappa\mu}},
+\label{eq:direct-vertex}
+\end{equation}
+in addition to the bubble. If the displacement derivative of the exchange field, $g_{\XC}=\partial H_{\XC}/\partial u$, is available and the projectors are fixed, then a rotation-coordinate version is
+\begin{equation}
+\Gamma^{(1)}_{\ell c,\kappa\mu}
+=\frac{\ii}{2}
+[\bL_\ell(g_{\XC,\kappa\mu}),
+ \bm u_{\ell c}\cdot\bm\sigma].
+\label{eq:direct-rotation}
+\end{equation}
+The full DFPT vertex must not replace $g_{\XC}$ in this commutator, because it may contain scalar and SOC derivatives that are fixed to the lattice.
+
+If the magnetic projector itself changes under displacement,
+\begin{equation}
+\partial_u\bL_\ell[X]
+=\frac12[(\partial_uP_\ell)X+X(\partial_uP_\ell)]
++\bL_\ell[\partial_uX].
+\label{eq:projector-motion}
+\end{equation}
+The first term is a projector-response correction and requires additional gauge information. Consequently, the direct term is enabled only when the exchange-field derivative and projector policy are supplied explicitly and validated by a mixed finite difference.

@@ -290,8 +290,8 @@ _REGISTRY: dict[str, tuple[Action, ...]] = {
         ),
         _action(
             "lifetime_plot",
-            "Plot lifetime data with reciprocal-space symmetry",
-            "slw.magph.legacy.plot_lifetime_symmetry",
+            "Plot native lifetime data over Brillouin-zone planes",
+            "slw.magph.lifetime_plot",
         ),
         _action(
             "magnon_plot",

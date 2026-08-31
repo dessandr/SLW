@@ -58,6 +58,7 @@ NATIVE_MODULES = {
     "engine.py",
     "epr_phonon.py",
     "lifetime.py",
+    "lifetime_plot.py",
     "lswt.py",
     "mesh.py",
     "model.py",
@@ -67,6 +68,7 @@ NATIVE_MODULES = {
     "pipeline.py",
     "screening.py",
     "self_energy.py",
+    "tb2j.py",
     "vertex.py",
 }
 

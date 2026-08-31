@@ -1,0 +1,48 @@
+\section{Magnetic-force-theorem mixed derivative}
+\label{sec:mixed-response}
+
+At fixed chemical potential, the one-particle free-energy derivative can be written as
+\begin{equation}
+\frac{\partial\bF}{\partial\lambda}
+=-\frac{1}{\pi}\operatorname{Im}
+\int\dd\varepsilon\,f(\varepsilon)
+\Tr[V_\lambda G^R],
+\qquad
+V_\lambda=\frac{\partial H}{\partial\lambda}.
+\label{eq:first-derivative}
+\end{equation}
+Using
+\begin{equation}
+\frac{\partial G}{\partial\eta}=GV_\eta G,
+\label{eq:dyson-derivative}
+\end{equation}
+we obtain
+\begin{equation}
+\frac{\partial^2\bF}{\partial\lambda\partial\eta}
+=-\frac{1}{\pi}\operatorname{Im}
+\int\dd\varepsilon\,f(\varepsilon)
+\Tr\left[V_{\lambda\eta}G^R+V_\lambda G^R V_\eta G^R\right].
+\label{eq:mixed-general}
+\end{equation}
+The second term is the mixed bubble. The same perturbative structure appears in the site-diagonal spin-lattice torque derivation of Ref.~\cite{Mankovsky2023SLC}; there the propagator and lattice vertex are KKR objects.
+
+For a DFPT displacement,
+\begin{equation}
+g_{\kappa\mu}(\kk,\qq)
+=\left\langle w_{\kk+\qq}\middle|
+\frac{\partial H}{\partial u_{\kappa\mu}(\qq)}
+\middle|w_{\kk}\right\rangle.
+\label{eq:dfpt-g}
+\end{equation}
+This is the screened Hamiltonian derivative supplied by DFPT and transformed into the same Wannier gauge as $H$. The bubble-only approximation sets the mixed Hamiltonian derivative $V_{\lambda\eta}$ to zero. This is the minimal independent-perturbation implementation; the direct term is discussed in \cref{app:direct}.
+
+The target energy coupling is
+\begin{equation}
+\mathcal H_{\rm SL}^{(1,1)}
+=\sum_{\qq,\ell a,\kappa\mu}
+\pi_{\ell a}(-\qq)
+K_{\ell a,\kappa\mu}(\qq)
+ u_{\kappa\mu}(\qq).
+\label{eq:coupling-energy}
+\end{equation}
+The corresponding tangent effective field is $H^{\rm eff}_{\ell a}=-K_{\ell a,\kappa\mu}u_{\kappa\mu}$, while the physical torque is $\bm\tau_\ell=\bm n_\ell\times\bm H^{\rm eff}_\ell$, consistent with the torque-energy relation summarized in Ref.~\cite{Mankovsky2023SLC}.

@@ -2,16 +2,40 @@
 
 from __future__ import annotations
 
+import shlex
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
-import warnings
 
 import h5py
 import numpy as np
 
-from slw.magph.legacy.plotting.common import build_kpath, point_table, prepare_matplotlib
-from slw.magph.legacy.lswt import build_spin_frame_info, bdg_matrix_from_tensor, solve_tensor_lswt
+from slw.magph.legacy.lswt import (
+    bdg_matrix_from_tensor,
+    build_spin_frame_info,
+    solve_tensor_lswt,
+)
+from slw.magph.legacy.plotting.common import (
+    build_kpath,
+    point_table,
+    prepare_matplotlib,
+)
 from slw.magph.legacy.utils import parsing_POSCAR
+
+_CANONICAL_DIRECTED_BOND_WEIGHT = 0.5
+
+
+@dataclass(frozen=True)
+class JConventionMetadata:
+    """Convention declarations and topology evidence retained from the source."""
+
+    kernel: str | None
+    kernel_family: str | None
+    hamiltonian_sign: str | None
+    bond_coverage: str | None
+    directed_bond_weight: float | None
+    command_all_bonds: bool
+    mate_complete: bool
 
 
 @dataclass(frozen=True)
@@ -28,6 +52,7 @@ class JPayload:
     distance_ang: np.ndarray | None
     j_source: str
     mag_atom_ids: np.ndarray
+    convention: JConventionMetadata
 
 
 def _decode_strings(arr) -> list[str]:
@@ -38,6 +63,150 @@ def _decode_strings(arr) -> list[str]:
         else:
             out.append(str(value))
     return out
+
+
+def _read_optional_scalar_text(h5, key: str) -> str | None:
+    if key not in h5:
+        return None
+    raw = np.asarray(h5[key])
+    if raw.size != 1:
+        raise ValueError(f"{key} must contain one scalar string")
+    value = raw.reshape(()).item()
+    if isinstance(value, bytes):
+        value = value.decode("utf-8")
+    text = str(value).strip()
+    return text or None
+
+
+def _read_optional_scalar_float(h5, key: str) -> float | None:
+    if key not in h5:
+        return None
+    raw = np.asarray(h5[key])
+    if raw.size != 1:
+        raise ValueError(f"{key} must contain one scalar number")
+    try:
+        return float(raw.reshape(()).item())
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{key} must contain one scalar number") from exc
+
+
+def _command_requests_all_bonds(command: str | None) -> bool:
+    if not command:
+        return False
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        tokens = command.split()
+    return "--all_bonds" in tokens
+
+
+def _has_mate_complete_topology(
+    ii: np.ndarray,
+    jj: np.ndarray,
+    rr: np.ndarray,
+) -> bool:
+    """Return whether every retained directed bond has the same-count mate."""
+
+    if ii.size == 0:
+        return False
+    directed = np.column_stack((ii, jj, rr)).astype(np.int64, copy=False)
+    mates = np.column_stack((jj, ii, -rr)).astype(np.int64, copy=False)
+    keys = tuple(directed[:, column] for column in range(4, -1, -1))
+    mate_keys = tuple(mates[:, column] for column in range(4, -1, -1))
+    return bool(
+        np.array_equal(
+            directed[np.lexsort(keys)],
+            mates[np.lexsort(mate_keys)],
+        )
+    )
+
+
+def _normalise_convention_token(value: str | None) -> str | None:
+    if value is None:
+        return None
+    return value.strip().lower().replace("-", "_").replace(" ", "_")
+
+
+def _resolve_bond_factor(config, payload: JPayload) -> float:
+    """Map the source directed-pair coefficient to legacy SLW's 1/2 sum.
+
+    An explicit ``bond_factor`` remains an escape hatch for audited external
+    files. Automatic mode is deliberately fail-closed: a directed source
+    weight is used only for a demonstrably mate-complete bond list.
+    """
+
+    requested = config.get("bond_factor")
+    if requested is not None and str(requested).strip().lower() not in {"", "auto"}:
+        try:
+            factor = float(requested)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("bond_factor must be a finite number or 'auto'") from exc
+        if not np.isfinite(factor) or factor <= 0.0:
+            raise ValueError("bond_factor must be a positive finite number or 'auto'")
+        return factor
+
+    meta = payload.convention
+    kernel_declarations = {
+        token
+        for token in (
+            _normalise_convention_token(meta.kernel),
+            _normalise_convention_token(meta.kernel_family),
+        )
+        if token is not None
+    }
+    if kernel_declarations in ({"scalar"}, {"scalar", "scalar_lkag"}):
+        kernel_declarations = {"scalar_lkag"}
+    if len(kernel_declarations) > 1:
+        raise ValueError(
+            "Conflicting exchange-kernel metadata in HDF5: "
+            f"kernel={meta.kernel!r}, kernel_family={meta.kernel_family!r}. "
+            "Set bond_factor explicitly only after auditing the file."
+        )
+    kernel = next(iter(kernel_declarations), None)
+
+    sign = _normalise_convention_token(meta.hamiltonian_sign)
+    if sign is None and kernel == "tb2j":
+        sign = "minus"
+    if sign != "minus":
+        raise ValueError(
+            "Cannot infer legacy SLW bond_factor: HDF5 must declare "
+            "basic_data/hamiltonian_sign='minus' (raw TB2J implies it). "
+            "Set bond_factor explicitly only after auditing the sign convention."
+        )
+
+    coverage = _normalise_convention_token(meta.bond_coverage)
+    if coverage is not None and coverage != "directed_mate_complete":
+        raise ValueError(
+            "Automatic legacy SLW conversion requires "
+            "basic_data/bond_coverage='directed_mate_complete'; "
+            f"got {meta.bond_coverage!r}. Set bond_factor explicitly only for "
+            "an independently converted bond list."
+        )
+    if not meta.mate_complete:
+        raise ValueError(
+            "Cannot infer legacy SLW bond_factor because the retained HDF5 bonds "
+            "are not mate-complete (i,j,R) <-> (j,i,-R). Set bond_factor "
+            "explicitly only after supplying the intended bond-count convention."
+        )
+
+    source_weight = meta.directed_bond_weight
+    if source_weight is None:
+        old_tb2j_evidence = kernel == "tb2j" and (
+            coverage == "directed_mate_complete" or meta.command_all_bonds
+        )
+        if not old_tb2j_evidence:
+            raise ValueError(
+                "Cannot infer legacy SLW bond_factor: HDF5 has no "
+                "basic_data/directed_bond_weight and is not an auditable raw "
+                "TB2J --all_bonds/mate-complete payload. Add convention metadata "
+                "or set bond_factor explicitly after auditing the file."
+            )
+        # TB2J sums its mate-complete directed list with unit coefficient;
+        # legacy SLW kernels implement a one-half directed sum.
+        source_weight = 1.0
+    if not np.isfinite(source_weight) or source_weight <= 0.0:
+        raise ValueError("basic_data/directed_bond_weight must be positive and finite")
+    return float(source_weight) / _CANONICAL_DIRECTED_BOND_WEIGHT
 
 
 def _read_structure_from_h5(h5) -> tuple[np.ndarray, np.ndarray, list[str]]:
@@ -68,7 +237,13 @@ def _extract_j_values(h5, source: str, component: str) -> tuple[np.ndarray, str]
     source = source.strip().lower()
     component = component.strip().lower()
     if source == "auto":
-        candidates = ["J_iso_r", "tb2j_extra/jiso_tb2j", "J_iso_tensor_r", "J_tensor_r"]
+        candidates = [
+            "J_iso_r",
+            "J_r/value",
+            "tb2j_extra/jiso_tb2j",
+            "J_iso_tensor_r",
+            "J_tensor_r",
+        ]
     else:
         candidates = [source]
 
@@ -118,6 +293,16 @@ def load_j_h5(config) -> tuple[JPayload, str]:
             else None
         )
         j_mev, used_j_source = _extract_j_values(h5, j_source, component)
+        kernel = _read_optional_scalar_text(h5, "basic_data/kernel")
+        kernel_family = _read_optional_scalar_text(h5, "basic_data/kernel_family")
+        hamiltonian_sign = _read_optional_scalar_text(h5, "basic_data/hamiltonian_sign")
+        bond_coverage = _read_optional_scalar_text(h5, "basic_data/bond_coverage")
+        directed_bond_weight = _read_optional_scalar_float(
+            h5, "basic_data/directed_bond_weight"
+        )
+        command_all_bonds = _command_requests_all_bonds(
+            _read_optional_scalar_text(h5, "basic_data/command")
+        )
 
     if not (mag_i.size == mag_j.size == rr.shape[0] == j_mev.size):
         raise ValueError(
@@ -143,6 +328,15 @@ def load_j_h5(config) -> tuple[JPayload, str]:
             distance_ang = distance_ang[mask]
     if j_mev.size == 0:
         raise ValueError("All bonds were removed by plot.in filters")
+    convention = JConventionMetadata(
+        kernel=kernel,
+        kernel_family=kernel_family,
+        hamiltonian_sign=hamiltonian_sign,
+        bond_coverage=bond_coverage,
+        directed_bond_weight=directed_bond_weight,
+        command_all_bonds=command_all_bonds,
+        mate_complete=_has_mate_complete_topology(ii, jj, rr),
+    )
     if config.get_bool("debug_bonds", False) or config.get_bool("debug_bdg", False):
         _print_filter_summary(n_before, j_mev, shell, distance_ang)
 
@@ -165,6 +359,7 @@ def load_j_h5(config) -> tuple[JPayload, str]:
             distance_ang=None if distance_ang is None else np.asarray(distance_ang, dtype=np.float64),
             j_source=used_j_source,
             mag_atom_ids=mag_atom_ids,
+            convention=convention,
         ),
         structure_source,
     )
@@ -388,7 +583,7 @@ def solve_magnon_bands(config, payload: JPayload, kfrac: np.ndarray) -> np.ndarr
         raise ValueError("solver must be one of: local_frame, full_bdg, strict")
 
     prefactor = _j_prefactor(config, spin)
-    bond_factor = config.get_float("bond_factor", 1.0)
+    bond_factor = _resolve_bond_factor(config, payload)
     anisotropy = config.get_float("anisotropy_mev", 0.0)
     hermitize = config.get_bool("hermitize", True)
     zero_mode_tol = config.get_float("zero_mode_tol", 1.0e-8)
@@ -437,7 +632,7 @@ def _solve_magnon_bands_full_bdg(
     spin_pattern: np.ndarray,
 ) -> np.ndarray:
     prefactor = _j_prefactor(config, spin)
-    bond_factor = config.get_float("bond_factor", 1.0)
+    bond_factor = _resolve_bond_factor(config, payload)
     anisotropy = config.get_float("anisotropy_mev", 0.0)
     spin_direction = np.asarray(
         [float(x) for x in config.get_list("spin_direction", ["0", "1", "0"])],
@@ -500,7 +695,7 @@ def _solve_magnon_bands_full_bdg_manual(
     spin_pattern: np.ndarray,
 ) -> np.ndarray:
     prefactor = _j_prefactor(config, spin)
-    bond_factor = config.get_float("bond_factor", 1.0)
+    bond_factor = _resolve_bond_factor(config, payload)
     anisotropy = config.get_float("anisotropy_mev", 0.0)
     hermitize = config.get_bool("hermitize", True)
     bond_class = config.get_str("bond_class", "sign")
@@ -605,7 +800,7 @@ def _solve_magnon_bands_local_frame(
     spin_pattern: np.ndarray,
 ) -> np.ndarray:
     prefactor = _j_prefactor(config, spin)
-    bond_factor = config.get_float("bond_factor", 1.0)
+    bond_factor = _resolve_bond_factor(config, payload)
     anisotropy = config.get_float("anisotropy_mev", 0.0)
     spin_direction = np.asarray(
         [float(x) for x in config.get_list("spin_direction", ["0", "1", "0"])],
@@ -757,7 +952,7 @@ def plot_magnon_h5(config):
             payload_npz["bdg_norms"] = _LAST_FULL_BDG["norms"]
         np.savez(npz_path, **payload_npz)
 
-    print(f"kind = magnon_h5")
+    print("kind = magnon_h5")
     print(f"input = {payload.path}")
     print(f"J source = {payload.j_source}")
     print(f"structure = {structure_source}")

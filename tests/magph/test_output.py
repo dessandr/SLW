@@ -50,8 +50,31 @@ class NativeLifetimeOutputTests(unittest.TestCase):
                 )
                 metadata = json.loads(str(payload["metadata_json"]))
                 self.assertEqual(metadata["calculation"], "lifetime")
-                self.assertEqual(metadata["schema_version"], 1)
+                self.assertEqual(
+                    metadata["schema_version"], LIFETIME_OUTPUT_SCHEMA_VERSION
+                )
                 np.testing.assert_allclose(payload["gamma_hwhm_mev"], ((0.1,),))
+
+    def test_lifetime_output_stores_validated_magnon_chirality(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "result.npz"
+            chirality = np.asarray(((1.0,),))
+            write_lifetime_npz(
+                output,
+                _result(),
+                metadata={"magnon_mode_order": "chirality_descending"},
+                magnon_chirality=chirality,
+            )
+            with np.load(output, allow_pickle=False) as payload:
+                np.testing.assert_allclose(payload["magnon_chirality"], chirality)
+
+            with self.assertRaisesRegex(ValueError, "chirality shape"):
+                write_lifetime_npz(
+                    Path(directory) / "bad.npz",
+                    _result(),
+                    metadata={},
+                    magnon_chirality=np.ones((2, 1)),
+                )
 
     def test_existing_output_is_not_clobbered_by_default(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

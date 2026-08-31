@@ -1,0 +1,54 @@
+\section{Spinor Wannier Hamiltonian and exchange field}
+\label{sec:spinor-model}
+
+\subsection{Wannier representation}
+
+Let $|w_{n\rr}\rangle$ denote orthonormal spinor Wannier functions, and adopt atomic-position Bloch sums
+\begin{equation}
+|w_{n\kk}\rangle
+=\frac{1}{\sqrt N}\sum_{\rr}
+ e^{\ii\kk\cdot(\rr+\bm\tau_n)}|w_{n\rr}\rangle.
+\label{eq:atomic-bloch}
+\end{equation}
+Writing
+\begin{equation}
+H_{nm}(\rr)=\langle w_{n\mathbf 0}|H|w_{m\rr}\rangle,
+\end{equation}
+the Hamiltonian matrix in this gauge is
+\begin{equation}
+H_{nm}(\kk)=\sum_{\rr}
+ e^{\ii\kk\cdot(\rr+\bm\tau_m-\bm\tau_n)}H_{nm}(\rr).
+\label{eq:atomic-hamiltonian}
+\end{equation}
+The retarded Green function is
+\begin{equation}
+G^R_{\kk}(\varepsilon)=[(\varepsilon+\ii\eta)I-H(\kk)]^{-1}.
+\label{eq:green}
+\end{equation}
+All spin-orbit terms remain in $H$ and hence in $G^R$. Equation~\eqref{eq:atomic-hamiltonian} also fixes the reciprocal-lattice sewing used below; no cell-gauge Fourier transform is mixed into the atomic-position convention.
+
+\subsection{Time-reversal decomposition}
+
+The relativistic localized-orbital formalism separates the time-reversal-symmetric Hamiltonian, which contains the scalar crystal Hamiltonian and SOC, from the time-reversal-broken exchange field~\cite{MartinezCarracedo2023}. We assume that no additional time-reversal-breaking one-particle term, such as an external orbital or Zeeman field, is present; otherwise that term must be separated explicitly. In a general Wannier gauge, let $B_\Theta(\kk)$ be the sewing matrix that represents time reversal between the bases at $-\kk$ and $\kk$. We define
+\begin{equation}
+H^\Theta(\kk)
+=B_\Theta(\kk)H(-\kk)^*B_\Theta(\kk)^\dagger,
+\label{eq:tr-transform}
+\end{equation}
+followed by
+\begin{equation}
+H_{\TRS}(\kk)=\frac{H(\kk)+H^\Theta(\kk)}{2},
+\qquad
+H_{\XC}(\kk)=\frac{H(\kk)-H^\Theta(\kk)}{2}.
+\label{eq:tr-split}
+\end{equation}
+In a direct product of real orbital functions and spin eigenstates, $B_\Theta$ reduces to $I_{\rm orb}\otimes \ii\sigma_y$ up to the declared Wannier gauge. This reduction must not be assumed for a generic spinor Wannierization.
+
+An explicit upstream decomposition $H=H_{\TRS}+H_{\XC}$ is preferable. For collinear spin blocks in a common orbital gauge, one may instead construct
+\begin{equation}
+H_{\rm avg}=\frac{H_\uparrow+H_\downarrow}{2},
+\qquad
+H_{\rm diff}=\frac{H_\uparrow-H_\downarrow}{2},
+\label{eq:collinear-split}
+\end{equation}
+and lift $H_{\rm diff}$ along the chosen reference spin direction. Every route must reproduce $H$, yield a time-reversal-even $H_{\TRS}$ and a time-reversal-odd $H_{\XC}$, and state its factor convention.

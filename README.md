@@ -36,6 +36,28 @@ python -m pip install -e '.[mpi,phonon,kpath]'
   runners, analysis tools, and plotting code retained behind that stage.
 - `slw.interactions`: Wannier-gauge reference density and intersite-V tools.
 - `slw.phonon`: phonon parsing shared by the active workflows.
+- `slw.wtorque`: gauge-explicit spinor-Wannier mixed torque response, restartable
+  q-pair kernels, phonon projection, and externally supplied magnon BdG
+  projection. This package is additive and does not change the existing
+  `slw_*` stage interfaces.
+
+The new torque workflow uses a strict YAML configuration and keeps magnons
+external:
+
+```bash
+wtorque inspect run.yml
+mpirun -np 8 wtorque compute-kernel run.yml
+wtorque test-collinear-epr-q0 --help
+wtorque project-phonons run.yml
+wtorque project-magnons run.yml
+wtorque assemble-polaron run.yml
+wtorque validate run.yml --report validation.md
+```
+
+All orbital masks, local frames, meshes, gauges, normalizations, input paths,
+and integration settings come from the configuration or validated HDF5 input.
+See [docs/WTORQUE.md](docs/WTORQUE.md) for the strict input, MPI, restart, and
+validation contracts.
 
 ## Stage executables
 
@@ -63,8 +85,9 @@ calculation-by-calculation option reference is in
 [docs/INPUT_REFERENCE.md](docs/INPUT_REFERENCE.md).
 The native magnon–phonon redesign boundary and FM/AFM admission policy are in
 [docs/MAGPH_DESIGN.md](docs/MAGPH_DESIGN.md). Native
-`calculation='lifetime'` is registered; hybrid, Berry, spectral, and plotting
-routes remain behind the compatibility boundary.
+`calculation='lifetime'` and post-processing `calculation='lifetime_plot'` are
+registered; hybrid, Berry, and spectral routes remain behind the compatibility
+boundary.
 
 Native lifetime accepts an explicit dense `phonon_qmesh`. The phonons are
 evaluated on that mesh while real-space `dJ(R,Rp)` is Fourier interpolated from
@@ -120,8 +143,9 @@ Historical magph modules are likewise quarantined under `slw.magph.legacy`.
 The retained compatibility drivers live in `slw.magph.legacy.reference`;
 helper and post-processing modules remain one level above them. Old
 `slw.magph.<module>` paths have no compatibility shims and are not public
-interfaces. `slw_magph.x` dispersion and lifetime now use only native typed modules; the
-remaining registered magph calculations still use the compatibility boundary.
+interfaces. `slw_magph.x` dispersion/lifetime and `slw_post.x` lifetime plots
+now use only native typed modules; the remaining registered magph calculations
+still use the compatibility boundary.
 
 See [docs/SCOPE.md](docs/SCOPE.md) for the extraction boundary and retained
 module inventory.

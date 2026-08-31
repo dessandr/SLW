@@ -91,6 +91,7 @@ _J_TENSOR_EPR_OPTIONS = {
     "spin_magnitude",
 }
 _J_TENSOR_WANNIER_OPTIONS = {
+    "centre_tolerance_ang",
     "hr_unit",
     "ref_epr_up",
     "ref_epr_dn",
@@ -242,6 +243,9 @@ _ADVANCED_OPTION_SPECS: dict[str, _OptionSpec] = {
     "debug_shell": _OptionSpec("int", minimum=0.0, allow_none=True),
     **{name: _OptionSpec("float") for name in ("angle_tolerance", "emin")},
     "cfr_beta": _OptionSpec("float", minimum=0.0, strict_minimum=True),
+    "centre_tolerance_ang": _OptionSpec(
+        "float", minimum=0.0, strict_minimum=True, allow_none=True
+    ),
     "d_max": _OptionSpec("float", minimum=0.0, strict_minimum=True),
     "spin_magnitude": _OptionSpec("float", minimum=0.0, strict_minimum=True),
     "symprec": _OptionSpec("float", minimum=0.0, strict_minimum=True),
@@ -654,8 +658,14 @@ def _one_slice(item: Any) -> OrbitalSlice:
     return result
 
 
-def _orbital_slices(values: dict[str, Any]) -> tuple[OrbitalSlice, ...]:
+def _orbital_slices(
+    values: dict[str, Any],
+    *,
+    allow_automatic: bool = False,
+) -> tuple[OrbitalSlice, ...]:
     if "slices" not in values:
+        if allow_automatic:
+            return ()
         raise ExchangeInputError("missing required exchange parameter: slices")
     raw = values.pop("slices")
     entries: list[Any]
@@ -671,6 +681,8 @@ def _orbital_slices(values: dict[str, Any]) -> tuple[OrbitalSlice, ...]:
     else:
         entries = _items(raw)
     if not entries:
+        if allow_automatic:
+            return ()
         raise ExchangeInputError("slices must contain at least one orbital interval")
     parsed = tuple(sorted((_one_slice(item) for item in entries), key=lambda item: item.site))
     sites = [item.site for item in parsed]
@@ -694,6 +706,9 @@ def _validate_site_contract(
     needs_two_sites = source is ExchangeSource.EPR and not (calculation is ExchangeCalculation.DJ and ltensor)
     if needs_two_sites and len(mag_atoms) < 2:
         raise ExchangeInputError(f"{calculation.value} EPR {'tensor' if ltensor else 'scalar'} requires mag_atoms to contain at least two atoms")
+
+    if not slices:
+        return
 
     keys = {item.site for item in slices}
     local_keys = set(range(len(mag_atoms)))
@@ -977,16 +992,27 @@ def build_exchange_request(
     efermi = _required_float(values, "efermi")
     kmesh = _positive_mesh(values)
     mag_atoms, atom_base = _magnetic_atoms(values)
-    slices = _orbital_slices(values)
-    _validate_site_contract(
-        mag_atoms,
-        slices,
+    files = _input_files(
+        values,
         calculation=mode,
         ltensor=ltensor,
         source=source,
     )
-    files = _input_files(
+    automatic_centre_matching = (
+        mode is ExchangeCalculation.J
+        and ltensor
+        and source is ExchangeSource.WANNIER
+        and files.spinor_hr is not None
+        and files.win is not None
+        and files.centres is not None
+    )
+    slices = _orbital_slices(
         values,
+        allow_automatic=automatic_centre_matching,
+    )
+    _validate_site_contract(
+        mag_atoms,
+        slices,
         calculation=mode,
         ltensor=ltensor,
         source=source,

@@ -1,0 +1,53 @@
+\section{Finite-q Wannier kernel and gauge covariance}
+\label{sec:finite-q}
+
+Using the Fourier conventions in \cref{eq:atomic-bloch}, the DFPT vertex transfers an electron from $\kk$ to $\kk+\qq$, while the spin vertex at $-\qq$ closes the loop. Define the complex retarded loop
+\begin{equation}
+\begin{split}
+\bA^R_{\ell a,\kappa\mu}(\qq)
+=&\frac{1}{N_k}\int\dd\varepsilon\,f(\varepsilon)
+\sum_{\kk}\tr\Big[
+\bT_{\ell a}(-\qq;\kk,\kk+\qq)
+G^R_{\kk+\qq}(\varepsilon)\\
+&\hspace{35mm}\times
+g_{\kappa\mu}(\kk,\qq)
+G^R_{\kk}(\varepsilon)\Big].
+\end{split}
+\label{eq:retarded-loop}
+\end{equation}
+This is the q-resolved Wannier realization proposed here. The phonon-like effective field of Ref.~\cite{Mankovsky2023SLC} motivates the finite-q object, but the explicit momentum-space DFPT loop is a project extension.
+
+A real-space Hermitian response need not have a real Fourier coefficient at a generic q. The physical kernel is obtained from the retarded/advanced q pair,
+\begin{equation}
+K^{\rm bub}_{\ell a,\kappa\mu}(\qq)
+=-\frac{1}{2\pi\ii}
+\left[
+\bA^R_{\ell a,\kappa\mu}(\qq)
+-\bA^R_{\ell a,\kappa\mu}(-\qq)^*
+\right].
+\label{eq:qpair-kernel}
+\end{equation}
+It follows that
+\begin{equation}
+K(-\qq)=K(\qq)^*.
+\label{eq:q-reality}
+\end{equation}
+At a self-inverse q point, \cref{eq:qpair-kernel} reduces to the familiar $-\operatorname{Im}\bA^R/\pi$. Applying an elementwise imaginary part to one generic-q loop would incorrectly discard the phase of the Fourier coefficient.
+
+If $\kk+\qq=\overline{\kk+\qq}+\bm G$, the atomic-position gauge uses
+\begin{equation}
+D_{\bm G}=\operatorname{diag}_n
+ e^{\ii\bm G\cdot\bm\tau_n}\otimes I_{\rm spin},
+\end{equation}
+and
+\begin{equation}
+G(\kk+\qq)=D_{\bm G}^\dagger
+G(\overline{\kk+\qq})D_{\bm G}.
+\label{eq:wrap-green}
+\end{equation}
+The final-state index of $g(\kk,\qq)$ transforms consistently. After conversion, Hermitian lattice perturbations obey
+\begin{equation}
+g(\kk,\qq)^\dagger=g(\kk+\qq,-\qq),
+\label{eq:g-hermiticity}
+\end{equation}
+with the appropriate wrapped indices.

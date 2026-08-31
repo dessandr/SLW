@@ -1,0 +1,28 @@
+\section{Validation hierarchy}
+\label{sec:validation}
+
+The method is sensitive to basis localization, spin conventions, and q-space phases. Validation is therefore part of the definition of the calculation.
+
+\subsection{Exchange decomposition and locality}
+
+The time-reversal decomposition must reconstruct $H$, while $H_{\TRS}$ and $H_{\XC}$ have the correct parity. The local fields and torque vertices must be Hermitian. The local partition must close on the magnetic support in \cref{eq:local-xc}. The norms of the residual support and the difference between local and onsite projections are reported. Following the sensitivity found in Ref.~\cite{MartinezCarracedo2023}, the result is compared for a localized magnetic-orbital set and a larger atom-centered set.
+
+\subsection{Spin-vertex checks}
+
+A central finite rotation of $H_{\XC,\ell}$ must reproduce \cref{eq:rotation-vertex}. A rotation about the local moment direction must give zero. Scaling SOC changes the Green function but not a vertex generated from a fixed $H_{\XC}$. Direction and angle vertices must satisfy \cref{eq:coordinate-map}.
+
+\subsection{Mixed finite difference}
+
+Within a linearized Wannier model, the analytic mixed response is compared with
+\begin{equation}
+K^{\rm FD}=
+\frac{\bF(+\delta\pi,+\delta u)-\bF(+\delta\pi,-\delta u)
+-\bF(-\delta\pi,+\delta u)+\bF(-\delta\pi,-\delta u)}
+{4\delta\pi\delta u}.
+\label{eq:mixed-fd}
+\end{equation}
+The same fixed-vertex approximation must be used on both sides. For a collinear stationary reference with spin-rotation-invariant electronic terms, the linear transverse kernel should vanish when SOC and other anisotropic spin interactions are removed.
+
+\subsection{Gauge, translation, and bosonic invariance}
+
+The DFPT Hermiticity relation \cref{eq:g-hermiticity}, the q reality condition \cref{eq:q-reality}, and atomic-gauge wrapping are tested directly. At $\qq=0$, the sum of Cartesian kernels over a rigid translation of all atoms must vanish before phonon normalization. Independent phase changes of phonon and magnon eigenvectors may change individual complex couplings but must leave $|g|$, degenerate-subspace singular values, and polaron eigenvalues invariant.

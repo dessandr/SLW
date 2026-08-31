@@ -1,0 +1,10 @@
+\section{Discussion and limitations}
+\label{sec:discussion}
+
+The construction preserves the main physical distinction required by relativistic LKAG: the spin degree of freedom is rotated relative to a fixed crystal. SOC therefore remains in the propagator, while the local perturbation is generated from the exchange field. This avoids interpreting a global spinor rotation of the complete Hamiltonian as a physical moment rotation.
+
+The local torque kernel should not automatically be called a pure single-ion anisotropy derivative. As emphasized by the spin-lattice source~\cite{Mankovsky2023SLC}, an effective field at one site can contain nonlocal anisotropic intersite contributions. The full Green functions similarly allow the Wannier kernel to collect propagation through the entire crystal. Direct projection onto magnon eigenvectors is therefore natural when the objective is the total linear hybridization.
+
+Several approximations remain visible. First, a collinear lift of DFPT data may omit spin-flip lattice perturbations and $\partial H_{\rm SOC}/\partial u$. Second, the bubble-only approximation omits the displacement dependence of the exchange-field torque vertex. Third, fixed reference projectors omit Wannier-gauge or Pulay-like projector motion. Fourth, the magnetic-force-theorem derivative is evaluated at fixed chemical potential in the minimal implementation. These approximations can be relaxed independently if the required upstream data are available.
+
+The methodological novelty is correspondingly narrow and testable: a q-resolved spinor-Wannier implementation of displacement-induced magnetic torque using screened DFPT matrix elements, completed by gauge-controlled projection onto independently calculated phonon and magnon modes. The local relativistic torque formalism, the KKR spin-lattice expression, DFPT, Wannier interpolation, and paraunitary boson theory are established ingredients and should be cited as such.

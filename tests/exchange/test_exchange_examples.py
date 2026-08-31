@@ -50,6 +50,9 @@ def test_exchange_examples_validate_without_scientific_io(
     if filename.endswith("wannier_soc.in"):
         assert request.groupby is not None
         assert request.groupby.value == "orbital"
+        assert request.slices == ()
+        assert request.files.win is not None
+        assert request.files.centres is not None
         assert request.soc is not None
         assert tuple(item.selector for item in request.soc.manifolds) == (
             "Ligand-p",

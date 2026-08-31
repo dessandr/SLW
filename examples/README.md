@@ -17,8 +17,9 @@ integration setting with values for the calculation at hand.
 
 The four EPR templates intentionally share `prefix='sample'`, so their
 distinct mode-derived filenames can coexist in one `sample.save` directory.
-The listed `kmesh`, `qmesh`, `empoints`, atoms, slices, and SOC strengths are
-only parseable examples. In particular, dJ requires EPR files containing
+The listed `kmesh`, `qmesh`, `empoints`, atoms, explicit EPR slices, and SOC
+strengths are only parseable examples. The spinor Wannier template instead
+demonstrates automatic `win` + `centres` assignment. In particular, dJ requires EPR files containing
 electron-phonon data, and its explicit `qmesh` must agree with EPR `qc_dim` and
 divide the electronic `kmesh`.
 
@@ -51,6 +52,7 @@ Other stage templates can be checked independently:
 ```bash
 slw_magph.x -in examples/dispersion.in --dry-run
 slw_magph.x -in examples/lifetime.in --dry-run
+slw_post.x -in examples/lifetime_plot.in --dry-run
 ```
 
 `dispersion.in` uses the explicit Wannier90 `kpoint_path` block in
@@ -62,3 +64,10 @@ Native dispersion and lifetime use `restart_mode='error'` by default. Select
 `restart` to validate and reuse a completed NPZ, or `from_scratch` to
 atomically replace an existing result. Native lifetime does not yet resume a
 partial self-energy grid.
+
+`lifetime_plot.in` reads the native lifetime NPZ directly and produces
+mode-resolved energy, HWHM, rate, lifetime, and mode-splitting BZ maps. Native
+AFM schema-v2 files use `chi=+1, chi=-1` mode order, so the default splitting is
+the signed chirality splitting. For old native results, set `exchange_h5` to
+the static J product used by the lifetime calculation; this also lets the
+plotter reconstruct chirality without rerunning the self-energy.

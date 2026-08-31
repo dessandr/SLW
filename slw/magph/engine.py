@@ -38,7 +38,7 @@ from .dispersion import (
     compute_magnon_dispersion,
 )
 from .epr_phonon import EPRPhononBuildReport, write_epr_phonon_cache
-from .lswt import uniform_fractional_mesh
+from .lswt import magnon_mode_chirality, uniform_fractional_mesh
 from .mesh import build_magnon_mesh_cache
 from .output import (
     DISPERSION_OUTPUT_SCHEMA_VERSION,
@@ -49,7 +49,7 @@ from .output import (
 )
 from .parallel import CollectiveExecutionError, RankFailure
 from .phonon import load_phonon_cache, zero_point_displacements
-from .pipeline import compute_lifetime_grid
+from .pipeline import LifetimeGridResult, compute_lifetime_grid
 from .screening import load_exchange_h5, screen_magnetic_configuration
 
 
@@ -535,6 +535,75 @@ def _cache_storage(coupling: Any, magnon_cache: Any) -> tuple[int, int]:
     return coupling_bytes, lswt_bytes
 
 
+def _external_union_indices(magnon_cache: Any) -> np.ndarray:
+    """Map every external k point to the broadcast union cache vectorially."""
+
+    union = np.asarray(magnon_cache.union_mesh_shape, dtype=np.int64)
+    external_mesh = np.asarray(magnon_cache.k_mesh_shape, dtype=np.int64)
+    coordinates = magnon_cache.external_k_grid_indices * (union // external_mesh)
+    return np.asarray(
+        np.ravel_multi_index(
+            (coordinates[:, 0], coordinates[:, 1], coordinates[:, 2]),
+            magnon_cache.union_mesh_shape,
+        ),
+        dtype=np.int64,
+    )
+
+
+def _canonicalize_lifetime_mode_order(
+    result: LifetimeGridResult,
+    magnon_cache: Any,
+    configuration: Any,
+) -> tuple[LifetimeGridResult, np.ndarray | None]:
+    """Order bipartite-AFM observables as chirality ``+1, -1``."""
+
+    if configuration.order.value != "collinear_afm":
+        return result, None
+    physical_count = int(magnon_cache.physical_mode_count)
+    external_union = _external_union_indices(magnon_cache)
+    cache_energy = magnon_cache.signed_energies_mev[
+        external_union, :physical_count
+    ]
+    energy_error = float(
+        np.max(np.abs(cache_energy - result.energy_mev), initial=0.0)
+    )
+    energy_scale = max(float(np.max(np.abs(cache_energy), initial=0.0)), 1.0)
+    if energy_error > 256.0 * np.finfo(np.float64).eps * energy_scale:
+        raise ValueError(
+            "lifetime energy grid is inconsistent with the external LSWT cache; "
+            f"maximum error={energy_error:.6g} meV"
+        )
+    transformation = magnon_cache.transformation[
+        external_union, :, :physical_count
+    ]
+    raw_chirality = magnon_mode_chirality(
+        transformation,
+        configuration.spin_pattern,
+        physical_mode_count=physical_count,
+    )
+    permutation = np.argsort(-raw_chirality, axis=1, kind="stable")
+
+    def reorder(value: Any) -> np.ndarray:
+        return np.take_along_axis(np.asarray(value), permutation, axis=1)
+
+    canonical = LifetimeGridResult(
+        k_points_frac=result.k_points_frac,
+        energy_mev=reorder(result.energy_mev),
+        self_energy_onshell_mev=reorder(result.self_energy_onshell_mev),
+        gamma_hwhm_mev=reorder(result.gamma_hwhm_mev),
+        fwhm_mev=reorder(result.fwhm_mev),
+        scattering_rate_ps_inv=reorder(result.scattering_rate_ps_inv),
+        lifetime_ps=reorder(result.lifetime_ps),
+        valid_damping=reorder(result.valid_damping),
+        temperature_k=result.temperature_k,
+        broadening_mev=result.broadening_mev,
+        negative_tolerance_mev=result.negative_tolerance_mev,
+    )
+    chirality = reorder(raw_chirality)
+    chirality.setflags(write=False)
+    return canonical, chirality
+
+
 def _output_metadata(
     request: MagphLifetimeRequest,
     *,
@@ -554,6 +623,15 @@ def _output_metadata(
     return {
         "calculation": "lifetime",
         "exchange_h5": str(request.exchange_h5),
+        "lattice_ang": (
+            None
+            if exchange.lattice_ang is None
+            else exchange.lattice_ang.tolist()
+        ),
+        "tau_frac": (
+            None if exchange.tau_frac is None else exchange.tau_frac.tolist()
+        ),
+        "atom_labels": list(exchange.atom_labels),
         "derivative_h5": str(request.derivative_h5),
         "phonon_cache": str(request.phonon_cache),
         "phonon_epr": (
@@ -629,6 +707,16 @@ def _output_metadata(
         "spin_magnitudes": configuration.spin_magnitudes.tolist(),
         "spin_pattern": configuration.spin_pattern.tolist(),
         "quantization_axis": configuration.quantization_axis.tolist(),
+        "magnon_mode_order": (
+            "chirality_descending"
+            if configuration.order.value == "collinear_afm"
+            else "energy_ascending"
+        ),
+        "magnon_chirality_definition": (
+            "-sum_i eta_i (abs(u_i)^2-abs(v_i)^2) / "
+            "sum_i abs(abs(u_i)^2-abs(v_i)^2)"
+        ),
+        "magnon_chirality_axis": "ordered_spin_axis",
         "single_ion_anisotropy": _anisotropy_metadata(anisotropy),
         "kmesh": list(request.kmesh),
         "kshift": list(request.kshift),
@@ -853,6 +941,13 @@ def run_lifetime(
             try:
                 if distributed.global_result is None:
                     raise RuntimeError("rank zero did not receive the lifetime grid")
+                canonical_result, magnon_chirality = (
+                    _canonicalize_lifetime_mode_order(
+                        distributed.global_result,
+                        magnon_cache,
+                        configuration,
+                    )
+                )
                 metadata = _output_metadata(
                     request,
                     parallel=runtime,
@@ -872,8 +967,9 @@ def run_lifetime(
                 with logger.phase("output", label="Writing lifetime output"):
                     write_lifetime_npz(
                         request.output,
-                        distributed.global_result,
+                        canonical_result,
                         metadata=metadata,
+                        magnon_chirality=magnon_chirality,
                         overwrite=request.overwrite,
                     )
             except Exception as exc:  # noqa: BLE001 - release non-root ranks

@@ -44,6 +44,8 @@ from .lifetime import (
 from .lswt import (
     MagnonDispersion,
     MagnonSpectrum,
+    local_spin_frames,
+    magnon_mode_chirality,
     solve_isotropic_lswt,
     solve_isotropic_lswt_energies,
     uniform_fractional_mesh,
@@ -100,6 +102,10 @@ from .self_energy import (
     compute_retarded_self_energy,
     normalize_q_weights,
 )
+from .tb2j import (
+    ProjectedScalarTB2JReport,
+    load_projected_scalar_tb2j_h5,
+)
 from .vertex import (
     MagnonPhononScatteringProblem,
     build_bare_isotropic_vertex,
@@ -146,6 +152,7 @@ __all__ = (
     "PhononCache",
     "PhononInputError",
     "PhononMassUnit",
+    "ProjectedScalarTB2JReport",
     "RestartMode",
     "SelfEnergyResult",
     "SingleIonAnisotropy",
@@ -176,6 +183,9 @@ __all__ = (
     "load_exchange_derivative_h5",
     "load_exchange_h5",
     "load_phonon_cache",
+    "load_projected_scalar_tb2j_h5",
+    "local_spin_frames",
+    "magnon_mode_chirality",
     "normalize_q_weights",
     "run_dispersion",
     "run_lifetime",

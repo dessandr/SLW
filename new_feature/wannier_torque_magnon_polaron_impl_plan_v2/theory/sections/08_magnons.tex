@@ -1,0 +1,61 @@
+\section{Projection onto external magnon modes}
+\label{sec:magnons}
+
+Let $N_m$ be the number of magnetic sublattices. Define the magnon Nambu spinor
+\begin{equation}
+\Psi_m(\qq)=
+\begin{pmatrix}\bm a_{\qq}\\ \bm a_{-\qq}^\dagger\end{pmatrix}
+=T_m(\qq)\Gamma_m(\qq),
+\label{eq:magnon-nambu}
+\end{equation}
+where the external transformation satisfies
+\begin{equation}
+T_m^\dagger(\qq)\Sigma_m T_m(\qq)=\Sigma_m,
+\qquad
+\Sigma_m=\operatorname{diag}(I_{N_m},-I_{N_m}).
+\label{eq:paraunitary}
+\end{equation}
+This is the standard paraunitary structure of a stable quadratic boson Hamiltonian~\cite{Colpa1978}.
+
+In the local spin frames, the linearized unit-spin coordinates are
+\begin{align}
+\pi_{\ell1}(-\qq)
+&=\frac{a_{\ell,-\qq}+a_{\ell,\qq}^\dagger}{\sqrt{2S_\ell}},\\
+\pi_{\ell2}(-\qq)
+&=\frac{-\ii a_{\ell,-\qq}+\ii a_{\ell,\qq}^\dagger}{\sqrt{2S_\ell}}.
+\label{eq:hp-linear}
+\end{align}
+Collect these coefficients into $C_m$,
+\begin{equation}
+\bm\pi^T(-\qq)=\Psi_m^\dagger(\qq)C_m.
+\label{eq:cm-map}
+\end{equation}
+For a phonon Nambu spinor $\Psi_p$ and coordinate matrix $C_p$, the coupling in the original boson bases is
+\begin{equation}
+V_{mp}(\qq)=C_m V_{\pi\nu}(\qq)C_p.
+\label{eq:nambu-coupling}
+\end{equation}
+Substitution of $\Psi_m=T_m\Gamma_m$ and $\Psi_p=T_p\Gamma_p$ gives
+\begin{equation}
+\widetilde V_{mp}(\qq)
+=T_m(\qq)^\dagger V_{mp}(\qq)T_p(\qq).
+\label{eq:mode-transform}
+\end{equation}
+No additional metric occurs in \cref{eq:mode-transform}; the metric belongs to the eigenproblem and normalization in \cref{eq:paraunitary}. Adding it again would change the operator coefficients incorrectly.
+
+The positive-frequency rows and particle/hole phonon columns of $\widetilde V_{mp}$ define normal and anomalous couplings. For a one-sublattice ferromagnet with no anomalous magnon mixing,
+\begin{equation}
+g^{mp}_\nu(\qq)
+=\frac{V_{1\nu}(\qq)+\ii V_{2\nu}(\qq)}{\sqrt{2S}}.
+\label{eq:fm-circular}
+\end{equation}
+In a rotating-wave treatment, an isolated set of magnon and phonon bands is coupled by
+\begin{equation}
+\mathcal H_{\rm RWA}(\qq)=
+\begin{pmatrix}
+\Omega_m(\qq) & g^{mp}(\qq)\\
+[g^{mp}(\qq)]^\dagger & \Omega_{ph}(\qq)
+\end{pmatrix}.
+\label{eq:rwa}
+\end{equation}
+A full bosonic BdG assembly retains the anomalous blocks. Examples of topological magnon-polaron BdG models can be found in Ref.~\cite{Klogetvedt2023}; the present work only supplies the microscopic coupling input.

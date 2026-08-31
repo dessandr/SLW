@@ -1,5 +1,6 @@
 ! Tensor J from a raw spinor Wannier Hamiltonian plus optional atomic SOC.
-! groupby describes the input HR layout; it is never inferred from centres.
+! groupby describes the input HR layout.  win + centres assign each Wannier
+! orbital to its nearest atom, so manual slices are unnecessary here.
 &control
   calculation = 'j',
   prefix = 'sample_soc',
@@ -27,7 +28,6 @@
   kmesh = 4, 4, 4,
   mag_atoms = 0, 1,
   mag_atoms_base = 0,
-  slices = '0:0:5,1:5:10',
   axes = 'xyz',
   spin_direction = 0.0, 0.0, 1.0,
   n_shells = 1,

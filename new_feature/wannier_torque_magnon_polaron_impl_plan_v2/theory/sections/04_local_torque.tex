@@ -1,0 +1,106 @@
+\section{Local magnetic subspace and spin vertices}
+\label{sec:local-torque}
+
+\subsection{Hermitian local partition}
+
+Let $P_\ell$ project onto the explicitly selected localized magnetic Wannier orbitals of site $\ell$, with $P_M=\sum_\ell P_\ell$. The orthonormal limit of the Hermitian local operator proposed in Ref.~\cite{MartinezCarracedo2023} is
+\begin{equation}
+\bL_\ell[X]=\frac{1}{2}(P_\ell X+XP_\ell).
+\label{eq:local-partition}
+\end{equation}
+The local exchange fields are
+\begin{equation}
+H_{\XC,\ell}=\bL_\ell[H_{\XC}],
+\qquad
+\sum_\ell H_{\XC,\ell}
+=\frac12(P_MH_{\XC}+H_{\XC}P_M).
+\label{eq:local-xc}
+\end{equation}
+The difference between $H_{\XC}$ and the right-hand side is an explicit magnetic-support residual. The onsite-only choice $P_\ell H_{\XC}P_\ell$ is useful as a sensitivity test but is not the default.
+
+The definition of $P_\ell$ is physical rather than merely numerical. Ref.~\cite{MartinezCarracedo2023} reports large changes when nonlocalized orbitals are included in the rotated subspace. A production calculation must therefore list the selected Wannier functions and compare at least a localized magnetic-orbital set with a larger atom-centered set.
+
+\subsection{Local frames and transverse coordinates}
+
+At each magnetic site, choose a right-handed frame
+\begin{equation}
+(\bm t_{\ell1},\bm t_{\ell2},\bm n_\ell),
+\qquad
+\bm t_{\ell1}\times\bm t_{\ell2}=\bm n_\ell,
+\label{eq:local-frame}
+\end{equation}
+where $\bm n_\ell$ is the equilibrium moment direction. A small unit-vector fluctuation is
+\begin{equation}
+\bm e_\ell=\bm n_\ell
++\pi_{\ell1}\bm t_{\ell1}
++\pi_{\ell2}\bm t_{\ell2}+O(\pi^2).
+\label{eq:pi-coordinate}
+\end{equation}
+The transverse-direction vertex is
+\begin{equation}
+\bT_{\ell a}
+=\left.\frac{\partial H}{\partial\pi_{\ell a}}\right|_0.
+\label{eq:direction-vertex}
+\end{equation}
+For a rigid local exchange field
+\begin{equation}
+H_{\XC,\ell}
+=\frac12\Delta_\ell\otimes
+(\bm n_\ell\cdot\bm\sigma),
+\end{equation}
+this becomes
+\begin{equation}
+\bT_{\ell a}
+=\frac12\Delta_\ell\otimes
+(\bm t_{\ell a}\cdot\bm\sigma).
+\label{eq:rigid-direction-vertex}
+\end{equation}
+
+\subsection{Rotation-angle vertex and exchange-field-only rotation}
+
+For an infinitesimal rotation around a unit axis $\bm u_{\ell c}$, the first-order exchange-field perturbation is~\cite{MartinezCarracedo2023}
+\begin{equation}
+\Gamma_{\ell c}
+=\frac{\ii}{2}
+[H_{\XC,\ell},\bm u_{\ell c}\cdot\bm\sigma]
+=-\ii[S_{\ell c},H_{\XC,\ell}].
+\label{eq:rotation-vertex}
+\end{equation}
+Only $H_{\XC,\ell}$ is rotated. Commuting the generator with the full Hamiltonian would rotate SOC relative to the lattice and does not implement the intended DFT-to-spin mapping~\cite{MartinezCarracedo2023}.
+
+Direction and angle derivatives differ by a tangent-plane rotation. With $\bm u_{\ell1}=\bm t_{\ell1}$ and $\bm u_{\ell2}=\bm t_{\ell2}$,
+\begin{equation}
+\Gamma_{\ell1}=-\bT_{\ell2},
+\qquad
+\Gamma_{\ell2}=+\bT_{\ell1}.
+\label{eq:coordinate-map}
+\end{equation}
+This distinction is essential for circular magnon combinations and torque signs.
+
+\subsection{Finite-q representation of the local partition}
+
+The real-space local partition generally produces a vertex that depends on both $\kk$ and $\qq$. Introduce the q-dependent site selector
+\begin{equation}
+P_\ell(\qq)
+=\left\langle w_{\kk+\qq}\middle|
+\sum_{\rr}e^{\ii\qq\cdot(\rr+\bm\tau_\ell)}P_{\rr\ell}
+\middle|w_{\kk}\right\rangle.
+\label{eq:q-projector}
+\end{equation}
+For diagonal orbital projectors in the atomic-position gauge,
+\begin{equation}
+[P_\ell(\qq)]_{nm}
+=\delta_{nm}\delta_{s(n),\ell}
+ e^{\ii\qq\cdot(\bm\tau_\ell-\bm\tau_n)}.
+\label{eq:q-projector-atomic}
+\end{equation}
+Let $\Gamma_c^{\rm global}(\kk)$ be the uniform exchange-field rotation around the local axis selected for site $\ell$. Fourier transformation of the Hermitian local partition gives the project implementation rule
+\begin{equation}
+\Gamma_{\ell c}(\kk+\qq,\kk)
+=\frac12\left[
+P_\ell(\qq)\Gamma_c^{\rm global}(\kk)
++\Gamma_c^{\rm global}(\kk+\qq)P_\ell(\qq)
+\right].
+\label{eq:q-local-vertex}
+\end{equation}
+Only in the strictly onsite atomic-center limit is this matrix independent of $\kk$ and $\qq$. Equation~\eqref{eq:q-local-vertex} is the orthonormal finite-q implementation of the local-partition prescription and is classified as a project extension.

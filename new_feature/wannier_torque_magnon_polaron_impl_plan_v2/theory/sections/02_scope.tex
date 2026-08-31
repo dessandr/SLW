@@ -1,0 +1,14 @@
+\section{Scope, assumptions, and provenance}
+\label{sec:scope}
+
+We distinguish three levels of provenance throughout.
+
+\begin{enumerate}
+\item \emph{Source-derived ingredients.} The local projection, exchange-field-only rotation, and commutator torque vertex follow Ref.~\cite{MartinezCarracedo2023}. The mixed spin-displacement Green-function structure, effective-field interpretation, and phonon-like finite-q motivation follow Ref.~\cite{Mankovsky2023SLC}.
+\item \emph{Standard supporting formalism.} DFPT, Wannier interpolation, and bosonic paraunitary diagonalization follow Refs.~\cite{Baroni2001,Giustino2007,Marzari2012,Pizzi2020,Colpa1978}.
+\item \emph{Project extensions.} The screened-DFPT Wannier substitution, arbitrary-gauge time-reversal sewing contract, explicit finite-q q-pair completion, and projection onto external magnon modes are the formulation developed for this implementation.
+\end{enumerate}
+
+The minimal implementation uses an orthonormal spinor Wannier basis, a fixed reference chemical potential, and a fixed local exchange-field vertex under the displacement. Thus the electronic mixed derivative contains the bubble term only. A direct mixed vertex is introduced as a separately controlled extension in \cref{app:direct}. Projector motion under displacement is outside the minimal approximation.
+
+The magnon Hamiltonian is external. The required inputs are its positive energies, local spin frames, spin lengths, Nambu ordering, and paraunitary eigenvectors. The present formalism does not recompute exchange tensors or magnon bands. It also does not assert an operator identity between a KKR inverse-scattering-matrix displacement and a DFPT Hamiltonian derivative; only the common Dyson-insertion structure is used.

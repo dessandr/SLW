@@ -11,7 +11,13 @@ from slw.cli.mpi import MPIContext
 from slw.cli.runner import run_stage
 from slw.cli.schema import parse_run_config
 from slw.exchange.config import build_exchange_request
-from slw.exchange.engine import ExchangeRunResult, _execute, prepare_run, run_exchange
+from slw.exchange.engine import (
+    ExchangeRunResult,
+    _execute,
+    format_help,
+    prepare_run,
+    run_exchange,
+)
 from slw.exchange.kernels.dispatch import KernelArtifacts, build_namespace
 from slw.exchange.kernels.dj_epr import _axis_list, _validate_local_parallelism
 
@@ -42,6 +48,18 @@ def _run_config(calculation, parameters, *, execution="auto", **parallel):
 
 
 class ExchangeEngineTests(unittest.TestCase):
+    def test_help_describes_spinor_wannier_automatic_subspace_exception(self):
+        help_text = format_help(
+            calculation="j",
+            requested_name="j",
+            source="epr|wannier",
+            parameters={},
+        )
+
+        self.assertIn("win/centres", help_text)
+        self.assertIn("allow slices to be omitted", help_text)
+        self.assertIn("keeps the full Hamiltonian", help_text)
+
     def test_j_tensor_prepares_one_native_serial_plan(self):
         parameters = _parameters(ltensor=True)
         config = _run_config("j", parameters)

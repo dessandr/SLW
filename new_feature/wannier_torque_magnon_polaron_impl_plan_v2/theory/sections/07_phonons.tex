@@ -1,0 +1,28 @@
+\section{Projection onto phonon modes}
+\label{sec:phonons}
+
+For a phonon branch $\nu$, let $e_{\kappa\mu,\nu}(\qq)$ denote the eigenvector in a declared normalization. The zero-point displacement is
+\begin{equation}
+\xi_{\kappa\mu,\nu}(\qq)
+=\sqrt{\frac{\hbar}{2M_\kappa\omega_{\qq\nu}}}
+ e_{\kappa\mu,\nu}(\qq).
+\label{eq:zpm}
+\end{equation}
+The Cartesian torque kernel projects to
+\begin{equation}
+V_{\ell a,\nu}(\qq)
+=\sum_{\kappa\mu}
+K_{\ell a,\kappa\mu}(\qq)
+\xi_{\kappa\mu,\nu}(\qq).
+\label{eq:phonon-proj}
+\end{equation}
+If the electron-phonon vertex is already mode normalized,
+\begin{equation}
+g_\nu(\kk,\qq)
+=\sum_{\kappa\mu}\xi_{\kappa\mu,\nu}(\qq)
+ g_{\kappa\mu}(\kk,\qq),
+\label{eq:mode-g}
+\end{equation}
+then \cref{eq:zpm} must not be applied again.
+
+Near an acoustic mode at $\qq=0$, the factor $1/\sqrt{\omega}$ makes a translational-sum-rule error visible. The Cartesian response to a rigid translation must therefore be checked before phonon projection. An exactly zero or imaginary frequency is reported rather than regularized silently.

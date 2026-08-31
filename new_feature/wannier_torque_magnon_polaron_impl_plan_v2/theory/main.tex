@@ -1,0 +1,70 @@
+\documentclass[aps,prb,preprint,superscriptaddress,nofootinbib]{revtex4-2}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,mathtools}
+\usepackage{newtxtext,newtxmath}
+\usepackage{bm}
+\usepackage{booktabs}
+\usepackage{microtype}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage[nameinlink,capitalise]{cleveref}
+\hypersetup{
+  colorlinks=true,
+  linkcolor=blue!45!black,
+  citecolor=blue!45!black,
+  urlcolor=blue!45!black,
+  pdftitle={Wannier-Green-Function Theory of Displacement-Induced Spin Torque for Magnon-Polaron Coupling},
+  pdfauthor={Author Name},
+  pdfsubject={Relativistic spin-lattice response in a spinor Wannier basis},
+  pdfkeywords={LKAG, spin torque, DFPT, Wannier functions, magnon-polaron}
+}
+
+\newcommand{\kk}{\mathbf k}
+\newcommand{\qq}{\mathbf q}
+\newcommand{\rr}{\mathbf R}
+\newcommand{\Tr}{\operatorname{Tr}}
+\newcommand{\tr}{\operatorname{tr}}
+\newcommand{\ii}{\mathrm{i}}
+\newcommand{\dd}{\mathrm{d}}
+\newcommand{\XC}{\mathrm{XC}}
+\newcommand{\TRS}{\mathrm{TRS}}
+\newcommand{\bA}{\mathcal A}
+\newcommand{\bF}{\mathcal F}
+\newcommand{\bT}{\mathcal T}
+\newcommand{\bL}{\mathcal L}
+\newcommand{\AuthorName}{Author Name}
+
+\begin{document}
+
+\title{Wannier-Green-Function Theory of Displacement-Induced Spin Torque for Magnon-Polaron Coupling}
+\author{\AuthorName}
+\affiliation{Affiliation to be inserted}
+\date{\today}
+
+\begin{abstract}
+We formulate a q-resolved mixed spin-lattice response in an orthonormal spinor Wannier basis for direct use in magnon-polaron calculations. The construction combines two established ingredients: a relativistic localized-orbital LKAG torque formalism in which only the exchange field is rotated, and a spin-lattice magnetic-force-theorem expansion whose site-diagonal term has the structure of a spin vertex, two propagators, and a lattice perturbation. The lattice vertex is supplied by a screened density-functional perturbation theory Hamiltonian derivative, while spin-orbit coupling remains in the full electronic Green function. We define a Hermitian local partition of the exchange field, distinguish transverse-direction from rotation-angle coordinates, derive a finite-q bubble and its retarded/advanced q-pair completion, and state the optional direct mixed vertex required for a total derivative. The resulting Cartesian torque kernel is projected onto phonon zero-point displacements and externally computed paraunitary magnon eigenvectors. Source-derived statements and project extensions are identified explicitly, and a validation hierarchy is given for time reversal, locality, finite differences, gauge covariance, acoustic translations, and bosonic rephasing.
+\end{abstract}
+
+\maketitle
+\tableofcontents
+
+\input{sections/01_introduction}
+\input{sections/02_scope}
+\input{sections/03_spinor_model}
+\input{sections/04_local_torque}
+\input{sections/05_mixed_response}
+\input{sections/06_finite_q}
+\input{sections/07_phonons}
+\input{sections/08_magnons}
+\input{sections/09_validation}
+\input{sections/10_implementation}
+\input{sections/11_discussion}
+\input{sections/12_conclusion}
+\appendix
+\input{sections/A_coordinates}
+\input{sections/B_qpair}
+\input{sections/C_direct}
+
+\bibliographystyle{apsrev4-2}
+\bibliography{references}
+\end{document}

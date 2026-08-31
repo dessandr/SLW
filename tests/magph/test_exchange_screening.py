@@ -580,7 +580,7 @@ def test_spin_operator_convention_requires_matching_spin_magnitude(
     assert screened.locally_stable
 
 
-def test_native_exchange_scalar_writer_emits_screenable_convention(
+def test_scalar_writer_emits_source_convention_and_native_fails_closed(
     tmp_path: Path,
 ) -> None:
     epr = tmp_path / "source_epr.h5"
@@ -613,14 +613,18 @@ def test_native_exchange_scalar_writer_emits_screenable_convention(
         {"n_chunks": 1},
     )
 
-    model, report = load_exchange_h5(output)
-    assert model.convention.spin_normalization is ExchangeSpinNormalization.UNIT_VECTOR
-    assert model.convention.kernel_family == "scalar_lkag"
-    assert model.convention.directed_bond_weight == 0.5
-    assert report.supports(ExchangeCapability.ISOTROPIC_STATIC_EXCHANGE)
+    with h5py.File(output, "r") as handle:
+        assert handle["basic_data/kernel_family"].asstr()[()] == "scalar_lkag"
+        assert (
+            handle["basic_data/bond_coverage"].asstr()[()]
+            == "directed_mate_complete"
+        )
+        assert float(handle["basic_data/directed_bond_weight"][()]) == 1.0
+    with pytest.raises(ValueError, match="directed_bond_weight=0.5"):
+        load_exchange_h5(output)
 
 
-def test_projected_scalar_writer_preserves_raw_values_and_passes_strict_screening(
+def test_projected_scalar_writer_preserves_source_values_and_fails_closed(
     tmp_path: Path,
 ) -> None:
     epr = tmp_path / "source_epr.h5"
@@ -692,19 +696,18 @@ def test_projected_scalar_writer_preserves_raw_values_and_passes_strict_screenin
 
     with h5py.File(output) as handle:
         np.testing.assert_array_equal(handle["J_r/value_raw"], raw)
-        canonical = np.asarray(handle["J_r/value"])
-        assert canonical[0] == canonical[1]
-        np.testing.assert_allclose(canonical, [3.0 + 1.0e-7] * 2)
+        projected_source = np.asarray(handle["J_r/value"])
+        assert projected_source[0] == projected_source[1]
+        np.testing.assert_allclose(projected_source, [3.0 + 1.0e-7] * 2)
         np.testing.assert_array_equal(handle["J_r/J_r_b1"][()], handle["J_r/J_r_b2"][()])
+        assert float(handle["basic_data/directed_bond_weight"][()]) == 1.0
         assert handle["basic_data/orbit_symmetry_policy"].asstr()[()] == "project"
         assert bool(handle["basic_data/orbit_symmetry_applied"][()])
         assert handle["symmetry/orbit_label"].asstr()[0] == "1a"
         assert handle["symmetry/grouping_source"].asstr()[()] == "spglib"
 
-    model, report = load_exchange_h5(output, reciprocity_atol_mev=0.0, rtol=0.0)
-    assert report.max_reciprocity_error_mev == 0.0
-    assert model.isotropic_mev[0] == model.isotropic_mev[1]
-    np.testing.assert_allclose(model.isotropic_mev, [3.0 + 1.0e-7] * 2)
+    with pytest.raises(ValueError, match="directed_bond_weight=0.5"):
+        load_exchange_h5(output, reciprocity_atol_mev=0.0, rtol=0.0)
 
 
 @pytest.mark.parametrize(
@@ -775,8 +778,8 @@ def test_epr_tensor_writer_records_audited_bond_weight(
 @pytest.mark.parametrize(
     ("kernel", "all_bonds", "expected_family", "expected_weight"),
     [
-        ("scalar", True, "scalar_lkag", 0.5),
-        ("scalar", False, "scalar_lkag", 1.0),
+        ("scalar", True, "scalar_lkag", 1.0),
+        ("scalar", False, "scalar_lkag", 2.0),
         ("direct", True, "direct", 0.5),
         ("tb2j", True, "tb2j", 1.0),
         ("tb2j", False, "tb2j", 2.0),
@@ -832,9 +835,8 @@ def test_wannier_tensor_writer_records_canonical_kernel_and_weight(
         assert handle["basic_data/kernel_family"].asstr()[()] == expected_family
         assert float(handle["basic_data/directed_bond_weight"][()]) == expected_weight
     if kernel == "scalar" and all_bonds:
-        model, report = load_exchange_h5(output)
-        assert model.convention.kernel_family == "scalar_lkag"
-        assert report.supports(ExchangeCapability.ISOTROPIC_STATIC_EXCHANGE)
+        with pytest.raises(ValueError, match="directed_bond_weight=0.5"):
+            load_exchange_h5(output)
 
 
 def test_screening_tolerances_must_be_finite(tmp_path: Path) -> None:

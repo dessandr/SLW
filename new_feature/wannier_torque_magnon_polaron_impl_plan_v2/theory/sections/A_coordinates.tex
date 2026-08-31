@@ -1,0 +1,17 @@
+\section{Rotation angles, direction coordinates, and physical torque}
+\label{app:coordinates}
+
+For a small rotation vector $\delta\bm\theta_\ell$,
+\begin{equation}
+\delta\bm e_\ell=\delta\bm\theta_\ell\times\bm n_\ell.
+\end{equation}
+Choosing $\delta\bm\theta=\delta\theta_1\bm t_1+\delta\theta_2\bm t_2$ gives
+\begin{equation}
+\delta\bm e=-\delta\theta_1\bm t_2+\delta\theta_2\bm t_1,
+\end{equation}
+which proves \cref{eq:coordinate-map}. If $\bm H^{\rm eff}=-\partial\bF/\partial\bm e$, then
+\begin{equation}
+\delta\bF=-\delta\bm\theta\cdot
+(\bm n\times\bm H^{\rm eff}),
+\end{equation}
+so the physical torque is $\bm\tau=\bm n\times\bm H^{\rm eff}$ and a rotation-angle component satisfies $\tau_c=-\partial\bF/\partial\theta_c$. The direction-coordinate kernel must therefore be rotated in the tangent plane before it is interpreted as a torque-vector response.

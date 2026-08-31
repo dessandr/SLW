@@ -1,0 +1,22 @@
+\section{Implementation contract}
+\label{sec:implementation}
+
+The numerical implementation is organized into four layers.
+
+\begin{enumerate}
+\item \textbf{Electronic model.} Load and canonicalize the spinor Wannier Hamiltonian, time-reversal metadata, exchange-field decomposition, magnetic projectors, and local frames.
+\item \textbf{Mixed electronic response.} Stream screened DFPT perturbations, build wrapped Green functions, accumulate the complex retarded loop, and complete q pairs.
+\item \textbf{Mode projection.} Convert Cartesian kernels to phonon zero-point modes and then to external magnon quasiparticles.
+\item \textbf{Validation and output.} Store HDF5 metadata, source hashes, restart status, decomposition residuals, q-symmetry tests, subspace sensitivity, and convergence tables.
+\end{enumerate}
+
+The reference matrix contraction for a batch of torque vertices $T_t$ and displacement perturbations $g_p$ uses
+\begin{equation}
+A_p=G_{\kk+\qq}g_pG_\kk,
+\qquad
+L_{tp}=\tr[T_tA_p],
+\label{eq:batch-contraction}
+\end{equation}
+without materializing a tensor carrying both vertex labels and two matrix indices. q pairs are the primary parallel unit, while deterministic serial reductions remain available for validation.
+
+All input files declare Bloch and Fourier gauges, basis ordering, time-reversal sewing convention, magnetic orbital masks, site projection, spin coordinate, and DFPT normalization. Missing metadata is an error rather than an invitation to infer conventions from array shapes.
