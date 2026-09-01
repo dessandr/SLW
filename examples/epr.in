@@ -2,7 +2,7 @@
   calculation = 'gkq',
   prefix = 'sample',
   outdir = './slw-tmp',
-  verbosity = 'high'
+  verbosity = 'normal'
 /
 
 &epr
@@ -10,6 +10,7 @@
   out = '${savedir}/gkq.h5',
   rotate = .true.,
   u_mat = './input/sample_u.mat',
-  nproc = 8,
+  ! Portable local-worker default; allocate parallel resources in the launcher.
+  nproc = 1,
   mode_block = 6
 /

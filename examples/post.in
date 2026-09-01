@@ -2,7 +2,7 @@
   calculation = 'dj_asr',
   prefix = 'sample',
   outdir = './slw-tmp',
-  verbosity = 'high'
+  verbosity = 'normal'
 /
 
 &post

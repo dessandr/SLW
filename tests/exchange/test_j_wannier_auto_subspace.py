@@ -18,7 +18,6 @@ from slw.exchange.kernels.j_tensor_epr import (
 from slw.exchange.kernels.j_wannier import (
     _infer_spinor_magnetic_selectors,
     _pbc_nearest_atom_assignments,
-    _spinor_canonical_index_map,
     _write_tensor_h5_simple,
 )
 from slw.exchange.kernels.j_wannier import run as run_wannier_tensor
@@ -84,17 +83,6 @@ def test_auto_subspace_uses_x_rows_groupby_and_mag_atom_order(
     np.testing.assert_array_equal(metadata["orbital_atom_index"], [0, 2, 1, 2, 0])
     assert metadata["partner_file_indices"].shape == (5, 2)
     assert np.max(metadata["partner_distance_ang"]) == pytest.approx(0.11)
-
-    # A structure-only .win must not require a projections block merely for
-    # spinor basis canonicalisation or centre matching.
-    canonical, mode, labels, file_labels = _spinor_canonical_index_map(
-        10, groupby=groupby, win=win
-    )
-    assert canonical.shape == (10,)
-    assert mode == groupby
-    assert labels == []
-    assert file_labels == []
-
 
 def test_pbc_nearest_atom_uses_cartesian_metric_for_skew_cell() -> None:
     lattice = np.asarray([[1.0, 0.0, 0.0], [0.9, 0.2, 0.0], [0.0, 0.0, 1.0]])

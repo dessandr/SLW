@@ -62,13 +62,11 @@ from slw.exchange.kernels.spinor import (
 from slw.exchange.kernels.wannier_projected import (
     compute_projected_tb2j,
     load_projected_wannier_context,
-    spin_product_separability,
 )
 from slw.soc.manifold import _win_projection_groups
 from slw.soc.spinor import (
     CANONICAL_SPINOR_GROUPBY,
     canonicalize_spinor_matrix,
-    groupby_to_spin_major_indices,
     normalize_groupby,
 )
 
@@ -173,199 +171,6 @@ def _read_wannier_centre_coords(path, expected_count):
     return centres
 
 
-def _read_centres_xyz_coords(path, n):
-    _labels, coords = _read_centres_xyz_rows(path)
-    if len(coords) < int(n):
-        raise ValueError(f"{path}: found {len(coords)} coordinate rows, expected at least {n}")
-    return coords[: int(n)]
-
-
-def _parse_collinear_label_bounds(labels):
-    out = []
-    for label in labels:
-        text = str(label)
-        if "[" not in text or ":" not in text or not text.endswith("]"):
-            continue
-        head, rest = text.rsplit("[", 1)
-        try:
-            lo_s, hi_s = rest[:-1].split(":", 1)
-            lo = int(lo_s)
-            hi = int(hi_s)
-        except ValueError:
-            continue
-        out.append((head, lo, hi))
-    return out
-
-
-def _centres_pair_rms(coords_a, coords_b):
-    diff = np.asarray(coords_a, dtype=np.float64) - np.asarray(coords_b, dtype=np.float64)
-    if diff.size == 0:
-        return float("inf")
-    return float(np.sqrt(np.mean(np.sum(diff * diff, axis=-1))))
-
-
-def _infer_spinor_order_from_centres(centres_path, spinor_dim, labels):
-    dim = int(spinor_dim)
-    nwan = dim // 2
-    coords = _read_centres_xyz_coords(centres_path, dim)
-    scores = {}
-    scores["legacy_sector_spin"] = _centres_pair_rms(coords[:nwan], coords[nwan:])
-    scores["wannier_orbital"] = _centres_pair_rms(coords[0::2], coords[1::2])
-    parsed = _parse_collinear_label_bounds(labels)
-    group_diffs = []
-    offset = 0
-    for _head, lo, hi in parsed:
-        n = hi - lo
-        if offset + 2 * n > dim:
-            group_diffs = []
-            break
-        group_diffs.append(coords[offset:offset + n] - coords[offset + n:offset + 2 * n])
-        offset += 2 * n
-    if group_diffs and offset == dim:
-        diff = np.concatenate(group_diffs, axis=0)
-        scores["wannier_spin"] = float(np.sqrt(np.mean(np.sum(diff * diff, axis=-1))))
-    else:
-        scores["wannier_spin"] = float("inf")
-    best = min(scores, key=scores.get)
-    return best, scores
-
-
-def _win_collinear_group_labels(win_path, nwan):
-    if not win_path:
-        return []
-    has_projections = False
-    with open(win_path, "r", encoding="utf-8") as stream:
-        for raw in stream:
-            line = raw.split("!", 1)[0].split("#", 1)[0].strip().casefold()
-            if line.startswith("begin projections"):
-                has_projections = True
-                break
-    if not has_projections:
-        return []
-    try:
-        _atoms, groups, nproj = _win_projection_groups(win_path)
-    except ValueError as exc:
-        print(
-            f"[J-wannier-tensor] projection basis diagnostics unavailable: {exc}",
-            flush=True,
-        )
-        return []
-    if int(nproj) != int(nwan):
-        print(
-            "[J-wannier-tensor] projection basis diagnostics skipped: "
-            f"{win_path} projection count={nproj} but spinor hr.dat half-dim={nwan}",
-            flush=True,
-        )
-        return []
-    return [
-        f"{g['atom_label']}:{g['orbital']}[{g['indices'][0]}:{g['indices'][-1] + 1}]"
-        for g in groups
-    ]
-
-
-def _file_order_group_labels(labels, nwan, order):
-    mode = str(order).strip().lower()
-    parsed = []
-    for label in labels:
-        text = str(label)
-        if "[" not in text or ":" not in text or not text.endswith("]"):
-            continue
-        head, rest = text.rsplit("[", 1)
-        try:
-            lo_s, hi_s = rest[:-1].split(":", 1)
-            lo = int(lo_s)
-            hi = int(hi_s)
-        except ValueError:
-            continue
-        parsed.append((head, lo, hi))
-    if not parsed:
-        return []
-    out = []
-    if mode in {"spin", "spin_major", "sector_spin"}:
-        for head, lo, hi in parsed:
-            out.append(f"{head}:up file[{lo}:{hi}]")
-        for head, lo, hi in parsed:
-            out.append(f"{head}:down file[{int(nwan) + lo}:{int(nwan) + hi}]")
-    elif mode in {"wannier_spin", "projection_spinor"}:
-        offset = 0
-        for head, lo, hi in parsed:
-            n = hi - lo
-            out.append(f"{head} file[up={offset}:{offset + n},dn={offset + n}:{offset + 2 * n}]")
-            offset += 2 * n
-    elif mode in {"orbital", "wannier_orbital", "orbital_spinor"}:
-        for head, lo, hi in parsed:
-            out.append(f"{head} file[orbital_up_down_pairs={2 * lo}:{2 * hi}]")
-    return out
-
-
-def _spinor_canonical_index_map(spinor_dim, *, groupby, win=None):
-    dim = int(spinor_dim)
-    if dim % 2:
-        raise ValueError(f"Spinor hr.dat dimension must be even, got {dim}")
-    nwan = dim // 2
-    mode = normalize_groupby(groupby)
-    labels = _win_collinear_group_labels(win, nwan)
-    canonical = groupby_to_spin_major_indices(nwan, mode)
-    return canonical, mode.value, labels, _file_order_group_labels(
-        labels, nwan, mode.value
-    )
-
-
-
-
-def _spinor_label_from_collinear_label(label, nwan):
-    text = str(label)
-    if "[" not in text or ":" not in text or not text.endswith("]"):
-        return text
-    head, rest = text.rsplit("[", 1)
-    bounds = rest[:-1].split(":", 1)
-    if len(bounds) != 2:
-        return text
-    try:
-        lo = int(bounds[0])
-        hi = int(bounds[1])
-    except ValueError:
-        return text
-    return f"{head}[up={lo}:{hi},dn={int(nwan) + lo}:{int(nwan) + hi}]"
-
-
-def _spinor_labels_from_collinear(labels, nwan):
-    return [_spinor_label_from_collinear_label(label, nwan) for label in labels]
-
-
-def _spinor_slice_summary(slices, nwan):
-    selectors = _normalise_site_selectors(slices, nwan)
-    out = {}
-    for site, indices in selectors.items():
-        out[int(site)] = {
-            "up": indices.tolist(),
-            "dn": (indices + int(nwan)).tolist(),
-        }
-    return out
-
-
-def _slice_file_order_summary(slices, nwan, groupby):
-    selectors = _normalise_site_selectors(slices, nwan)
-    mode = normalize_groupby(groupby).value
-    if mode == "orbital":
-        return {
-            int(site): {
-                "orbital_up_down_pairs_file": np.column_stack(
-                    [2 * indices, 2 * indices + 1]
-                ).tolist()
-            }
-            for site, indices in selectors.items()
-        }
-    if mode == "spin":
-        out = {}
-        for site, indices in selectors.items():
-            out[int(site)] = {
-                "up_file": indices.tolist(),
-                "down_file": (indices + int(nwan)).tolist(),
-            }
-        return out
-    return _spinor_slice_summary(selectors, nwan)
-
 def _load_spinor_hr_hk(
     spinor_hr,
     kpts,
@@ -388,18 +193,17 @@ def _load_spinor_hr_hk(
         degens=degens,
         unit_scale=_unit_scale_to_ev(hr_unit),
     )
-    _canonical_idx, resolved_order, labels, file_labels = _spinor_canonical_index_map(
-        dim, groupby=groupby, win=win
-    )
+    # ``groupby`` is the complete numerical ordering contract.  Do not parse
+    # WIN projections here merely to produce basis-label diagnostics: those
+    # labels neither change the permutation nor enter the tensor kernel.
+    del win
+    resolved_order = normalize_groupby(groupby).value
     hk = canonicalize_spinor_matrix(hk, source=resolved_order)
     meta = {
         "spinor_dim": int(dim),
         "nwan": int(dim) // 2,
         "input_groupby": resolved_order,
         "internal_groupby": CANONICAL_SPINOR_GROUPBY.value,
-        "basis_groups_internal": _spinor_labels_from_collinear(labels, int(dim) // 2),
-        "basis_groups_file": file_labels,
-        "basis_groups_collinear_half": labels,
         "centres": centres or "",
     }
     return hk, meta
@@ -1041,21 +845,6 @@ def _write_tensor_h5_simple(path, args, labels, pair_meta, tensor, trace_acc, el
                     )
                 else:
                     validation.create_dataset(key, data=np.asarray(value))
-        separability = getattr(args, "_spin_separability_meta", None)
-        if separability is not None:
-            validation = h5.require_group("spin_operator_validation")
-            validation.create_dataset(
-                "bare_pauli_separability_residual",
-                data=np.asarray(float(separability["residual"])),
-            )
-            validation.create_dataset(
-                "bare_pauli_dominant_axis",
-                data=np.asarray(separability["axis"], dtype=np.float64),
-            )
-            validation.create_dataset(
-                "bare_pauli_gram_eigenvalues",
-                data=np.asarray(separability["eigenvalues"], dtype=np.float64),
-            )
         soc_entries = getattr(args, "_soc_entries", []) or []
         basic.create_dataset("additional_soc", data=np.asarray(bool(soc_entries)))
         basic.create_dataset(
@@ -1296,19 +1085,6 @@ def run(args, comm=None):
             f"band=({float(spin_evals0.min()):.6g},{float(spin_evals0.max()):.6g}) eV",
             flush=True,
         )
-        if spinor_meta.get("basis_groups_file"):
-            print(f"[J-wannier-tensor] basis_groups_file_order={spinor_meta['basis_groups_file']}", flush=True)
-        if spinor_meta.get("basis_groups_internal"):
-            print(f"[J-wannier-tensor] basis_groups_internal_spin_major={spinor_meta['basis_groups_internal']}", flush=True)
-        separability = spin_product_separability(h_spin)
-        args._spin_separability_meta = separability
-        print(
-            "[J-wannier-tensor] bare-Pauli separability "
-            f"residual={float(separability['residual']):.6e} "
-            f"axis={np.asarray(separability['axis']).tolist()} "
-            f"policy={spin_operator_policy}",
-            flush=True,
-        )
         if spin_operator_policy == "auto":
             print(
                 "[J-wannier-tensor] spin_operator=auto resolved to the "
@@ -1464,7 +1240,7 @@ def run(args, comm=None):
             flush=True,
         )
     elif spinor_input and not manual_slices and explicit_mag_subspace:
-        slices, slice_labels = _infer_collinear_slices_from_win(
+        slices, _slice_labels = _infer_collinear_slices_from_win(
             args.win, dim, args.mag_subspace
         )
         magnetic_subspace_meta = _manual_selector_metadata(slices, dim, mag_atoms)
@@ -1475,7 +1251,6 @@ def run(args, comm=None):
                 "win_path": str(structure_path),
             }
         )
-        print(f"[J-wannier-tensor] mag_subspace={slice_labels}", flush=True)
     elif spinor_input and not manual_slices:
         if args.win is None:
             raise ValueError(
@@ -1490,23 +1265,6 @@ def run(args, comm=None):
             centre_tolerance_ang=getattr(args, "centre_tolerance_ang", None),
             structure_source=structure_source,
         )
-        print(
-            "[J-wannier-tensor] automatic magnetic subspace "
-            f"source={magnetic_subspace_meta['source']} "
-            f"structure_source={structure_source} groupby={args.groupby} "
-            f"orbital_to_atom={magnetic_subspace_meta['orbital_atom_index'].tolist()} "
-            f"partner_distances_ang={magnetic_subspace_meta['partner_distance_ang'].tolist()}",
-            flush=True,
-        )
-        for local_site, atom_index in enumerate(mag_atoms):
-            print(
-                "[J-wannier-tensor] automatic magnetic site "
-                f"local={local_site} atom={atom_index} label={labels[atom_index]} "
-                f"orbitals={slices[local_site].tolist()} "
-                f"max_centre_distance_ang="
-                f"{magnetic_subspace_meta['site_max_distance_ang'][local_site]:.8g}",
-                flush=True,
-            )
     else:
         slices = _load_slices(args, dim)
         magnetic_subspace_meta = _manual_selector_metadata(slices, dim, mag_atoms)
@@ -1519,17 +1277,17 @@ def run(args, comm=None):
                 flush=True,
             )
     args._magnetic_subspace_meta = magnetic_subspace_meta
-    if spinor_input and not projected_mode:
+    if not projected_mode:
+        selector_counts = {
+            int(site): int(indices.size)
+            for site, indices in _normalise_site_selectors(slices, dim).items()
+        }
         print(
-            f"[J-wannier-tensor] mag_subspace_file_order={_slice_file_order_summary(slices, dim, args.groupby)}",
+            "[J-wannier-tensor] magnetic subspace "
+            f"source={magnetic_subspace_meta['source']} "
+            f"orbitals_per_site={selector_counts}",
             flush=True,
         )
-        print(
-            f"[J-wannier-tensor] mag_subspace_internal_spin_major={_spinor_slice_summary(slices, dim)}",
-            flush=True,
-        )
-    elif not projected_mode:
-        print(f"[J-wannier-tensor] slices={ {int(k): (v.start, v.stop) for k, v in slices.items()} }", flush=True)
 
     dynamic_soc_val = False if spinor_input else getattr(args, "dynamic_soc", False)
     d_idx, p_idx = None, None
@@ -1704,11 +1462,6 @@ def run(args, comm=None):
         if reduced is None:  # pragma: no cover - defensive communicator guard
             raise RuntimeError("MPI root did not receive Wannier J reduction")
         tensor, trace_acc, extra = reduced
-        exe_info = {
-            "n_chunks": max(1, size),
-            "nproc": size if size > 1 else int(args.nproc),
-            "mpi_size": size,
-        }
         args._mpi_size = size
         elapsed = time.time() - t0
 
@@ -1766,14 +1519,6 @@ def run(args, comm=None):
             axes,
             extra=extra,
         )
-        print(
-            f"[J-wannier-tensor] done elapsed_s={elapsed:.2f} "
-            f"n_chunks={exe_info.get('n_chunks', 1)} "
-            f"nproc={exe_info.get('nproc', 1)}",
-            flush=True,
-        )
-        print(f"[J-wannier-tensor] wrote {out_txt}", flush=True)
-        print(f"[J-wannier-tensor] wrote {out_h5}", flush=True)
         return out_h5
 
     collective_root_call(comm, finalize_root, phase="Wannier J output write")

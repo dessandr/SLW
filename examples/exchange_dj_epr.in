@@ -4,7 +4,7 @@
   calculation = 'dj',
   prefix = 'sample',
   outdir = './slw-tmp',
-  verbosity = 'high'
+  verbosity = 'normal'
 /
 
 &parallel

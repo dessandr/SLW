@@ -97,7 +97,13 @@ def _write_spinor_inputs(root: Path, groupby: str) -> tuple[Path, Path]:
     return hr_path, centres_path
 
 
-def _run_groupby(root: Path, win: Path, groupby: str) -> dict[str, np.ndarray]:
+def _run_groupby(
+    root: Path,
+    win: Path,
+    groupby: str,
+    *,
+    verbosity: str = "quiet",
+) -> dict[str, np.ndarray]:
     hr_path, centres_path = _write_spinor_inputs(root, groupby)
     request = build_exchange_request(
         "j_tensor",
@@ -126,7 +132,7 @@ def _run_groupby(root: Path, win: Path, groupby: str) -> dict[str, np.ndarray]:
         request,
         context=MPIContext(),
         execution="serial",
-        verbosity="quiet",
+        verbosity=verbosity,
     )
 
     with h5py.File(request.output.h5_path, "r") as handle:
@@ -162,6 +168,7 @@ def _run_groupby(root: Path, win: Path, groupby: str) -> dict[str, np.ndarray]:
             handle["basic_data/spin_operator_resolved"].asstr()[()]
             == "pauli_product_basis"
         )
+        assert "spin_operator_validation" not in handle
 
         tensor = handle["J_tensor_r"][:]
         assert tensor.size > 0
@@ -190,6 +197,25 @@ def test_automatic_subspace_is_groupby_invariant_end_to_end(tmp_path: Path) -> N
         rtol=1.0e-11,
         atol=1.0e-11,
     )
+
+
+def test_standard_spinor_high_verbosity_omits_internal_basis_dumps(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    win = tmp_path / "model.win"
+    _write_structure(win)
+
+    _run_groupby(tmp_path, win, "orbital", verbosity="high")
+    output = capsys.readouterr().out
+
+    assert "separability" not in output
+    assert "basis_groups" not in output
+    assert "orbital_to_atom" not in output
+    assert "partner_distances" not in output
+    assert "mag_subspace_file_order" not in output
+    assert output.count("magnetic subspace") == 1
+    assert "orbitals_per_site={0: 1, 1: 2}" in output
 
 
 def _write_two_site_collinear_inputs(

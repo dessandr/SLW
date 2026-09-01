@@ -2,13 +2,13 @@
   calculation = 'hybrid',
   prefix = 'sample',
   outdir = './slw-tmp',
-  verbosity = 'high'
+  verbosity = 'normal'
 /
 
 &parallel
   execution = 'auto',
-  ! Compatibility hybrid maps this to both phonon and LSWT local pools.
-  workers_per_rank = 8,
+  ! Set the MPI rank count in the launcher; keep rank-local pools disabled.
+  workers_per_rank = 1,
   threads_per_worker = 1
 /
 

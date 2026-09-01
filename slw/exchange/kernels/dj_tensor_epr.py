@@ -41,12 +41,13 @@ from slw.exchange.kernels.epr import (
 from slw.exchange.kernels.j_epr import (
     _split_chunks,
 )
-from slw.exchange.kernels.j_tensor_epr import _apply_model_soc
+from slw.exchange.kernels.j_tensor_epr import (
+    _apply_model_soc,
+    _normalise_site_selectors,
+)
 from slw.exchange.kernels.j_wannier import (
     _infer_collinear_slices_from_win,
     _load_spinor_hr_hk,
-    _slice_file_order_summary,
-    _spinor_slice_summary,
 )
 from slw.exchange.kernels.lkag import (
     get_cfr_pole_mesh,
@@ -843,10 +844,6 @@ def run_analytic(args):
             centres=args.centres,
         )
         dim_col = int(spinor_meta["nwan"])
-        if spinor_meta.get("basis_groups_file"):
-            print(f"[dJ-epr-tensor] basis_groups_file_order={spinor_meta['basis_groups_file']}", flush=True)
-        if spinor_meta.get("basis_groups_internal"):
-            print(f"[dJ-epr-tensor] basis_groups_internal_spin_major={spinor_meta['basis_groups_internal']}", flush=True)
         h_spin, soc_entries, soc_win = _apply_model_soc(h_spin, args, dim_col)
         if soc_entries:
             print(
@@ -854,16 +851,18 @@ def run_analytic(args):
                 f"win={soc_win}",
                 flush=True,
             )
-        slices, slice_labels = _load_spinor_slices_for_global_atoms(args, dim_col, mag_atoms)
-        if slice_labels:
-            print(f"[dJ-epr-tensor] mag_subspace={slice_labels}", flush=True)
-        print(
-            f"[dJ-epr-tensor] mag_subspace_file_order="
-            f"{_slice_file_order_summary(slices, dim_col, args.groupby)}",
-            flush=True,
+        slices, _slice_labels = _load_spinor_slices_for_global_atoms(
+            args, dim_col, mag_atoms
         )
+        selector_counts = {
+            int(atom_id): int(indices.size)
+            for atom_id, indices in _normalise_site_selectors(
+                slices, dim_col
+            ).items()
+        }
         print(
-            f"[dJ-epr-tensor] mag_subspace_internal_spin_major={_spinor_slice_summary(slices, dim_col)}",
+            "[dJ-epr-tensor] magnetic subspace "
+            f"orbitals_per_atom={selector_counts}",
             flush=True,
         )
     else:

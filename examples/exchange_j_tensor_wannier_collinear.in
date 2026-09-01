@@ -1,0 +1,42 @@
+! Tensor J from separate collinear spin-up and spin-down Wannier90 HR files.
+! Both channels must use the same Wannier orbital order and gauge. SLW combines
+! them into its internal spinor order before entering the tensor kernel.
+&control
+  calculation = 'j',
+  prefix = 'sample_collinear',
+  outdir = './slw-tmp',
+  verbosity = 'normal'
+/
+
+&parallel
+  ! Set the MPI rank count in the launcher, not in this input file.
+  execution = 'auto',
+  workers_per_rank = 1,
+  threads_per_worker = 1
+/
+
+&exchange
+  input_format = 'wannier',
+  ltensor = .true.,
+  tensor_kernel = 'tb2j',
+
+  up_hr = './input/sample_up_hr.dat',
+  dn_hr = './input/sample_dn_hr.dat',
+  win = './input/sample.win',
+
+  hr_unit = 'ev',
+  efermi = 0.0,
+  kmesh = 4, 4, 4,
+  mag_atoms = 0, 1,
+  mag_atoms_base = 0,
+  ! Manual half-open orbital ranges in either collinear channel.
+  slices = '0:0:5,1:5:10',
+
+  axes = 'xyz',
+  spin_direction = 0.0, 0.0, 1.0,
+  n_shells = 1,
+  all_bonds = .true.,
+  integrator = 'contour',
+  ! Small syntax-test value; converge this for production.
+  empoints = 64
+/

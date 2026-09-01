@@ -7,6 +7,7 @@ import pytest
 from slw.cli.namelist import load
 from slw.cli.schema import parse_run_config
 from slw.exchange.config import build_exchange_request
+from slw.exchange.kernels.dispatch import build_namespace
 
 EXAMPLE_ROOT = Path(__file__).resolve().parents[2] / "examples"
 
@@ -18,7 +19,8 @@ EXAMPLE_ROOT = Path(__file__).resolve().parents[2] / "examples"
         ("exchange_j_tensor_epr.in", "j", True, "epr"),
         ("exchange_dj_epr.in", "dj", False, "epr"),
         ("exchange_dj_tensor_epr.in", "dj", True, "epr"),
-        ("exchange_j_tensor_wannier_soc.in", "j", True, "wannier"),
+        ("exchange_j_tensor_wannier_collinear.in", "j", True, "wannier"),
+        ("exchange_j_tensor_wannier_spinor.in", "j", True, "wannier"),
         ("exchange_j_tensor_wannier_spn.in", "j", True, "wannier"),
     ),
 )
@@ -48,17 +50,29 @@ def test_exchange_examples_validate_without_scientific_io(
     assert config.parallel.threads_per_worker == 1
     assert not Path(config.control.savedir).exists()
 
-    if filename.endswith("wannier_soc.in"):
+    if filename.endswith("wannier_spinor.in"):
         assert request.groupby is not None
         assert request.groupby.value == "orbital"
         assert request.slices == ()
         assert request.files.win is not None
         assert request.files.centres is not None
-        assert request.soc is not None
-        assert tuple(item.selector for item in request.soc.manifolds) == (
-            "Ligand-p",
-            "Mag1-d",
+        assert all(
+            getattr(request.files, name) is None
+            for name in ("amn", "eig", "spn", "u_mat", "u_dis_mat")
         )
+        assert "spin_operator" not in config.parameters
+        _module, _function, namespace = build_namespace(request)
+        assert namespace.spin_operator == "pauli"
+        assert request.soc is None
+    elif filename.endswith("wannier_collinear.in"):
+        assert request.groupby is None
+        assert request.files.up_hr is not None
+        assert request.files.dn_hr is not None
+        assert request.files.spinor_hr is None
+        assert request.files.win is not None
+        assert request.files.centres is None
+        assert request.slices
+        assert request.soc is None
     elif filename.endswith("wannier_spn.in"):
         assert request.groupby is not None
         assert request.groupby.value == "orbital"
@@ -82,6 +96,7 @@ def test_exchange_example_inventory_is_explicit() -> None:
         "exchange_j_tensor_epr.in",
         "exchange_dj_epr.in",
         "exchange_dj_tensor_epr.in",
-        "exchange_j_tensor_wannier_soc.in",
+        "exchange_j_tensor_wannier_collinear.in",
+        "exchange_j_tensor_wannier_spinor.in",
         "exchange_j_tensor_wannier_spn.in",
     }
