@@ -65,7 +65,12 @@ from slw.exchange.kernels.wannier_projected import (
     spin_product_separability,
 )
 from slw.soc.manifold import _win_projection_groups
-from slw.soc.spinor import groupby_to_spin_major_indices, normalize_groupby
+from slw.soc.spinor import (
+    CANONICAL_SPINOR_GROUPBY,
+    canonicalize_spinor_matrix,
+    groupby_to_spin_major_indices,
+    normalize_groupby,
+)
 
 
 def _read_wannier_hr_compat(path):
@@ -383,16 +388,15 @@ def _load_spinor_hr_hk(
         degens=degens,
         unit_scale=_unit_scale_to_ev(hr_unit),
     )
-    canonical_idx, resolved_order, labels, file_labels = _spinor_canonical_index_map(
+    _canonical_idx, resolved_order, labels, file_labels = _spinor_canonical_index_map(
         dim, groupby=groupby, win=win
     )
-    if not np.array_equal(canonical_idx, np.arange(int(dim), dtype=np.int64)):
-        hk = hk[:, canonical_idx[:, None], canonical_idx]
+    hk = canonicalize_spinor_matrix(hk, source=resolved_order)
     meta = {
         "spinor_dim": int(dim),
         "nwan": int(dim) // 2,
         "input_groupby": resolved_order,
-        "internal_groupby": "spin",
+        "internal_groupby": CANONICAL_SPINOR_GROUPBY.value,
         "basis_groups_internal": _spinor_labels_from_collinear(labels, int(dim) // 2),
         "basis_groups_file": file_labels,
         "basis_groups_collinear_half": labels,
@@ -920,7 +924,15 @@ def _write_tensor_h5_simple(path, args, labels, pair_meta, tensor, trace_acc, el
             "u_mat": getattr(args, "u_mat", None) or "",
             "u_dis_mat": getattr(args, "u_dis_mat", None) or "",
             "u_dis_layout": getattr(args, "u_dis_layout", None) or "",
-            "spin_operator_policy": getattr(args, "spin_operator", "auto"),
+            "spin_operator_policy": getattr(args, "spin_operator", "pauli"),
+            "spin_operator_resolved": getattr(
+                args, "_resolved_spin_operator", "pauli_product_basis"
+            ),
+            "spin_basis_assumption": (
+                "amn_spn_projected_basis"
+                if projected_context is not None
+                else "common_orbital_spin_product_basis"
+            ),
             "input_groupby": getattr(args, "groupby", "") or "",
             "groupby_semantics": (
                 "amn_projection_columns"
@@ -1183,7 +1195,7 @@ def _projection_anchored_mode(args):
             f"{', '.join(_PROJECTED_SPIN_FILE_NAMES)}; missing {', '.join(missing)}"
         )
     complete = len(present) == len(_PROJECTED_SPIN_FILE_NAMES)
-    policy = str(getattr(args, "spin_operator", "auto")).strip().lower()
+    policy = str(getattr(args, "spin_operator", "pauli")).strip().lower()
     if policy not in {"auto", "pauli", "spn"}:
         raise ValueError("spin_operator must be auto, pauli, or spn")
     layout = getattr(args, "u_dis_layout", None)
@@ -1209,6 +1221,9 @@ def run(args, comm=None):
     kpts = _full_k_mesh(args.kmesh)
     spinor_input = bool(args.spinor_hr)
     projected_mode, spin_operator_policy = _projection_anchored_mode(args)
+    args._resolved_spin_operator = (
+        "spn_projected_basis" if projected_mode else "pauli_product_basis"
+    )
     if projected_mode and not spinor_input:
         raise ValueError("Projection-anchored spin input requires spinor_hr")
     if projected_mode and args.kernel != "tb2j":
@@ -1295,13 +1310,10 @@ def run(args, comm=None):
             flush=True,
         )
         if spin_operator_policy == "auto":
-            raise ValueError(
-                "spin_operator='auto' cannot certify the transverse orbital "
-                "partner gauge of a bare spinor_hr, even when its Pauli "
-                f"separability residual is {float(separability['residual']):.6e}. "
-                "Supply AMN/EIG/SPN/U/U_dis for projection-anchored exchange, "
-                "or set spin_operator='pauli' only when the HR rows are "
-                "independently known to be a common orbital-spin product basis."
+            print(
+                "[J-wannier-tensor] spin_operator=auto resolved to the "
+                "TB2J-compatible common orbital-spin product basis",
+                flush=True,
             )
         h_spin, soc_entries, soc_win_path = _apply_model_soc(h_spin, args, dim)
     elif not spinor_input:
@@ -1790,10 +1802,10 @@ def main():
     ap.add_argument(
         "--spin_operator",
         choices=["auto", "pauli", "spn"],
-        default="auto",
+        default="pauli",
         help=(
-            "Use an explicit certified bare-Pauli basis, or an SPN-validated "
-            "AMN-anchored atomic-Pauli projection frame"
+            "TB2J-compatible orbital-spin product basis (default), or an "
+            "explicit SPN-validated AMN-anchored projection frame"
         ),
     )
     ap.add_argument(

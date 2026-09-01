@@ -955,7 +955,10 @@ def _validate_advanced_combinations(
         getattr(files, name) is not None
         for name in _PROJECTION_ANCHORED_FILE_KEYS
     )
-    spin_operator = values.get("spin_operator", "auto")
+    # The standard TB2J-compatible contract is an explicitly ordered
+    # orbital x spin product basis.  SPN projection is an opt-in validation
+    # mode, not a prerequisite for a native spinor Hamiltonian.
+    spin_operator = values.get("spin_operator", "pauli")
     u_dis_layout = values.get("u_dis_layout")
     if anchored_complete and spin_operator == "pauli":
         raise ExchangeInputError(
@@ -966,20 +969,6 @@ def _validate_advanced_combinations(
         raise ExchangeInputError(
             "spin_operator='spn' requires the complete projection-anchored "
             "spin bundle"
-        )
-    if (
-        calculation is ExchangeCalculation.J
-        and ltensor
-        and source is ExchangeSource.WANNIER
-        and files.spinor_hr is not None
-        and not anchored_complete
-        and spin_operator == "auto"
-    ):
-        raise ExchangeInputError(
-            "spin_operator='auto' cannot certify the orbital-partner gauge of "
-            "a bare spinor_hr; provide the complete projection-anchored bundle "
-            "or explicitly select spin_operator='pauli' for an independently "
-            "verified orbital-spin product basis"
         )
     if anchored_complete and u_dis_layout is None:
         raise ExchangeInputError(

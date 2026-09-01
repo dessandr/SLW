@@ -8,6 +8,11 @@ import numpy as np
 
 from .model import SpinorGroupBy
 
+# Every numerical exchange kernel uses this layout.  File layouts are
+# converted exactly once at the I/O boundary; selectors therefore always
+# address the spatial half of this canonical basis.
+CANONICAL_SPINOR_GROUPBY = SpinorGroupBy.SPIN
+
 
 def normalize_groupby(value: str | SpinorGroupBy) -> SpinorGroupBy:
     if isinstance(value, SpinorGroupBy):
@@ -77,6 +82,20 @@ def reorder_spinor_matrix(
     return values[..., indices[:, None], indices]
 
 
+def canonicalize_spinor_matrix(
+    matrix: Any,
+    *,
+    source: str | SpinorGroupBy,
+) -> np.ndarray:
+    """Convert a declared TB2J file layout to SLW's canonical spin-major basis."""
+
+    return reorder_spinor_matrix(
+        matrix,
+        source=source,
+        target=CANONICAL_SPINOR_GROUPBY,
+    )
+
+
 def reorder_spinor_rows(
     rows: list[str] | tuple[str, ...],
     *,
@@ -100,6 +119,8 @@ def reorder_spinor_rows(
 
 
 __all__ = [
+    "CANONICAL_SPINOR_GROUPBY",
+    "canonicalize_spinor_matrix",
     "groupby_to_spin_major_indices",
     "normalize_groupby",
     "reorder_spinor_matrix",

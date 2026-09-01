@@ -624,7 +624,7 @@ def test_spin_product_separability_identifies_single_and_mixed_axes() -> None:
     np.testing.assert_allclose(nonseparable["eigenvalues"], (0.5, 0.5, 0.0))
 
 
-def test_rank_one_pauli_diagnostic_does_not_auto_certify_partner_gauge(
+def test_rank_one_pauli_diagnostic_does_not_change_declared_basis_contract(
     tmp_path: Path,
 ) -> None:
     up = np.diag((-0.8, -0.3)).astype(np.complex128)
@@ -663,8 +663,12 @@ def test_rank_one_pauli_diagnostic_does_not_auto_certify_partner_gauge(
         win=None,
         centres=None,
     )
-    with pytest.raises(ValueError, match="cannot certify.*orbital partner gauge"):
-        j_wannier.run(args)
+    projected, policy = j_wannier._projection_anchored_mode(args)
+    assert not projected
+    assert policy == "auto"
+    # A zero residual is retained as a diagnostic only.  The standard path is
+    # governed by the caller's common orbital-spin product-basis contract.
+    assert diagnostic["residual"] < 1.0e-15
 
 
 def test_public_projected_run_two_rank_matches_serial_and_loads_on_root_once(

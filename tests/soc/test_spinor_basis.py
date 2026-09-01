@@ -86,7 +86,14 @@ def test_collinear_builder_permutes_hr_and_centres_together(
     assert dimension == 4
     assert degeneracies == [1, 2]
     expected_spin = np.diag([1.0, 2.0, 3.0, 4.0])
-    expected = reorder_spinor_matrix(expected_spin, source="spin", target=groupby)
+    # Keep this oracle independent from the production reorder helper used by
+    # the loader: C=[up...|down...], F=[w0 up,w0 down,...].
+    permutation = (
+        np.arange(4, dtype=np.int64)
+        if groupby == "spin"
+        else np.asarray([0, 2, 1, 3], dtype=np.int64)
+    )
+    expected = expected_spin[np.ix_(permutation, permutation)]
     np.testing.assert_allclose(blocks[r0], expected)
 
     canonical_hk, metadata = _load_spinor_hr_hk(
@@ -106,8 +113,7 @@ def test_collinear_builder_permutes_hr_and_centres_together(
     assert int(lines[0]) == 6
     wannier_rows = lines[2:6]
     spin_rows = ["X 0.1 0 0", "X 0.2 0 0", "X 0.3 0 0", "X 0.4 0 0"]
-    indices = spin_major_to_groupby_indices(2, groupby)
-    assert wannier_rows == [spin_rows[int(index)] for index in indices]
+    assert wannier_rows == [spin_rows[int(index)] for index in permutation]
     assert lines[6:] == ["Mn1 0.0 0 0", "Te1 0.5 0.5 0.5"]
 
 

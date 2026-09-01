@@ -29,11 +29,12 @@ a denser exchange mesh. In particular,
 dJ requires EPR files containing electron-phonon data, and its explicit
 `qmesh` must agree with EPR `qc_dim` and divide the electronic `kmesh`.
 
-The SPN template sets `spin_operator='spn'` explicitly. `auto` selects the same
-projection-anchored route when the complete bundle is present. A raw
-`spinor_hr` without that bundle must explicitly select `spin_operator='pauli'`,
-and only when its rows are independently known to share one orbital-spin
-product gauge. Choose
+The standard raw-`spinor_hr` template uses the TB2J-compatible common
+orbital-spin product-basis contract; `spin_operator='pauli'` is the default and
+can be omitted. The SPN template is an optional validation mode and sets
+`spin_operator='spn'` explicitly. The legacy `auto` value resolves to the
+standard Pauli path without a bundle and to the projected path when the complete
+bundle is supplied. Choose
 `u_dis_layout='global_bands'` for globally indexed rows or
 `'compact_outer_window'` for an old packed U_dis file. Keep
 `collinear_override=.false.` for SOC data; enable it only for a Hamiltonian

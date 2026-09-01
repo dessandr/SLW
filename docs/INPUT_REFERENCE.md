@@ -288,8 +288,10 @@ multiprocessing path.
 
 ### Spinor basis and atomic SOC
 
-Without the projection bundle, raw `spinor_hr` input must declare exactly one
-HR-row TB2J layout:
+The standard Wannier tensor path accepts either common-gauge collinear
+`up_hr`/`dn_hr` files or a native `spinor_hr`. Both enter one canonical internal
+basis, `[all up orbitals | all down orbitals]`. Native `spinor_hr` input must
+declare exactly one HR-row TB2J layout:
 
 | Key | Allowed values | Meaning |
 |---|---|---|
@@ -325,22 +327,23 @@ known orbital-spin product basis, supply this complete five-file bundle:
 | `u_mat` | `seedname_u.mat` | Final Wannier-gauge rotation. |
 | `u_dis_mat` | `seedname_u_dis.mat` | Disentanglement rotation. |
 
-The bundle is all-or-nothing and is accepted only for spinor Wannier tensor J
+This optional validation bundle is all-or-nothing and is accepted only for spinor Wannier tensor J
 with an explicit `win`, `tensor_kernel='tb2j'`, and no additional `SOC
 (atomic)` card. Here `groupby` declares AMN trial-column spin ordering; it does
-not reinterpret HR rows. Select
-`spin_operator='auto'` or `'spn'`; both use the supplied AMN-anchored,
-SPN-validated atomic-Pauli path when the bundle is complete, while `'pauli'` is
-rejected. `u_dis_layout` is
+not reinterpret HR rows. Select `spin_operator='spn'` to use the supplied
+AMN-anchored, SPN-validated atomic-Pauli path; `'pauli'` is rejected when the
+bundle is supplied. The legacy `'auto'` value remains a compatibility alias
+that selects this path only when the complete bundle is present. `u_dis_layout` is
 mandatory: use `global_bands` when U_dis rows already carry the original EIG
 band indices, or `compact_outer_window` for the old packed outer-window layout.
 The compact layout requires `dis_win_min` and `dis_win_max` in `win`.
 
-Without the bundle, `spin_operator='auto'` rejects raw `spinor_hr`: a
-block-diagonal or rank-one Pauli diagnostic cannot prove that independently
-Wannierized spin sectors share the transverse orbital-partner gauge.
-`spin_operator='pauli'` is therefore an explicit unsafe opt-in reserved for a
-basis whose common orbital-spin product structure is known independently.
+Without the bundle, `spin_operator='pauli'` is the default TB2J-compatible
+contract and `'auto'` resolves to the same path. The caller is responsible for
+supplying the declared common orbital-spin product basis; a block-diagonal or
+rank-one diagnostic cannot prove that independently Wannierized spin sectors
+share an orbital gauge. This assumption and the resolved operator path are
+written to the HDF5 provenance.
 
 The magnetic subspace is derived from `mag_atoms`, the projection groups in
 `win`, and AMN. Omit `slices`; manual slices are rejected. A `centres` file is
@@ -636,7 +639,7 @@ Native engine: `slw.exchange.engine`; numerical kernel:
 | `emin` | float | no | `-25.0` | Advanced native-kernel option.<br>CLI aliases: `--emin` |
 | `empoints` | int | no | `500` | Advanced native-kernel option.<br>CLI aliases: `--empoints` |
 | `cfr_beta` | float | no | `1000.0` | Advanced native-kernel option.<br>CLI aliases: `--cfr_beta` |
-| `spin_operator` | enum {auto, pauli, spn} | no | `auto` | `auto` uses the projection-anchored path when the complete bundle is present and rejects an unverified bare `spinor_hr` otherwise. `spn` requires the bundle. `pauli` is an explicit opt-in for an independently certified orbital-spin product basis and is rejected with the bundle. |
+| `spin_operator` | enum {auto, pauli, spn} | no | `pauli` | Standard `pauli` uses the declared TB2J-compatible common orbital-spin product basis and is rejected with a projection bundle. `spn` explicitly selects the complete projection bundle. Legacy `auto` resolves to `pauli` without a bundle and to the projected path with a complete bundle. |
 | `u_dis_layout` | enum {global_bands, compact_outer_window} | with projection bundle | — | Explicit U_dis row convention. Compact outer-window data also requires `dis_win_min`/`dis_win_max` in `win`. |
 | `projection_rank_tolerance` | float | projection bundle only | `1.0e-4` | Minimum magnetic-AMN singular value. Explicit use outside the bundle is rejected. |
 | `spin_projection_tolerance` | float | projection bundle only | `0.4` | Maximum combined or per-axis SPN residual in the projection-anchored atomic-Pauli frame. Explicit use outside the bundle is rejected. |

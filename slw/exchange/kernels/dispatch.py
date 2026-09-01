@@ -101,7 +101,7 @@ _J_WANNIER_DEFAULTS: dict[str, Any] = {
     "u_mat": None,
     "u_dis_mat": None,
     "centre_tolerance_ang": None,
-    "spin_operator": "auto",
+    "spin_operator": "pauli",
     "u_dis_layout": None,
     "projection_rank_tolerance": 1.0e-4,
     "spin_projection_tolerance": 0.4,

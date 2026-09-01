@@ -99,10 +99,16 @@ choices such as meshes, magnetic atoms, orbital slices, spin direction, and
 reciprocal-space paths remain explicit inputs. Unless overridden, exchange
 outputs are written to `${savedir}/${prefix}.<mode>.{h5,txt}`.
 
-For a spinor Wannier Hamiltonian whose MLWF rows are not a known
-orbital-spin-product basis, tensor J accepts one projection-anchored bundle:
+Wannier tensor J has two standard Hamiltonian inputs: a common-gauge collinear
+`up_hr`/`dn_hr` pair, or one native `spinor_hr`. Both are normalized once to
+SLW's internal spin-major order. Native spinor input declares its file layout
+with `groupby='spin'|'orbital'`; the standard TB2J-compatible Pauli basis is the
+default and needs no AMN/U/SPN files.
+
+For optional SPN validation of a spinor Wannier Hamiltonian, tensor J also
+accepts one projection-anchored bundle:
 `amn`, `eig`, `spn`, `u_mat`, and `u_dis_mat`. Supply all five with
-`spinor_hr`, `win`, `tensor_kernel='tb2j'`, `spin_operator='auto'|'spn'`, and
+`spinor_hr`, `win`, `tensor_kernel='tb2j'`, `spin_operator='spn'`, and
 an explicit `u_dis_layout`. The magnetic frame comes from WIN+AMN, so omit
 both `slices` and `centres`. The requested `kmesh` dimensions must match the
 native U/AMN/SPN mesh. Coordinates, ordering, and any Monkhorst-Pack shift are

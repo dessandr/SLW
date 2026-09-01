@@ -1,9 +1,7 @@
 ! Tensor J from a raw spinor Wannier Hamiltonian plus optional atomic SOC.
 ! groupby describes the input HR layout.  win + centres assign each Wannier
 ! orbital to its nearest atom, so manual slices are unnecessary here.
-! WARNING: spin_operator='pauli' is an unsafe opt-in. Use this example only
-! when the HR rows are independently certified as one common orbital-spin
-! product basis; generic spinor MLWFs require the AMN/EIG/SPN/U/U_dis bundle.
+! The standard TB2J contract assumes one common orbital x spin product basis.
 &control
   calculation = 'j',
   prefix = 'sample_soc',
@@ -23,7 +21,6 @@
   tensor_kernel = 'tb2j',
   spinor_hr = './input/sample_spinor_hr.dat',
   groupby = 'orbital',
-  spin_operator = 'pauli',
   win = './input/sample.win',
   centres = './input/sample_centres.xyz',
   hr_unit = 'ev',

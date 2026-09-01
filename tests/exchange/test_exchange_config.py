@@ -214,6 +214,7 @@ class ExchangeConfigTests(unittest.TestCase):
                 "spinor_hr": "model_hr.dat",
                 "win": "model.win",
                 "groupby": "orbital",
+                "spin_operator": "spn",
                 "u_dis_layout": "compact-outer-window",
                 **_projection_anchored_bundle(),
             },
@@ -237,7 +238,7 @@ class ExchangeConfigTests(unittest.TestCase):
         self.assertEqual(namespace.spn, "model.spn")
         self.assertEqual(namespace.u_mat, "model_u.mat")
         self.assertEqual(namespace.u_dis_mat, "model_u_dis.mat")
-        self.assertEqual(namespace.spin_operator, "auto")
+        self.assertEqual(namespace.spin_operator, "spn")
         self.assertEqual(namespace.u_dis_layout, "compact_outer_window")
 
     def test_projection_anchored_bundle_is_all_or_nothing(self):
@@ -249,6 +250,7 @@ class ExchangeConfigTests(unittest.TestCase):
             "spinor_hr": "model_hr.dat",
             "win": "model.win",
             "groupby": "orbital",
+            "spin_operator": "spn",
             "u_dis_layout": "global_bands",
             **_projection_anchored_bundle(),
         }
@@ -276,6 +278,7 @@ class ExchangeConfigTests(unittest.TestCase):
             "kmesh": (1, 1, 1),
             "mag_atoms": [0],
             "slices": "0:0:2",
+            "spin_operator": "spn",
             "u_dis_layout": "global_bands",
             **bundle,
         }
@@ -353,16 +356,18 @@ class ExchangeConfigTests(unittest.TestCase):
             **_projection_anchored_bundle(),
         }
 
-        with self.assertRaisesRegex(
-            ExchangeInputError, "auto.*cannot certify.*orbital-partner gauge"
-        ):
-            build_exchange_request(
-                "j_tensor", spinor, prefix="w", savedir="save"
-            )
+        bare = build_exchange_request(
+            "j_tensor", spinor, prefix="w", savedir="save"
+        )
+        _module, _function, bare_namespace = build_namespace(bare)
+        self.assertEqual(bare_namespace.spin_operator, "pauli")
 
         with self.assertRaisesRegex(ExchangeInputError, "u_dis_layout is required"):
             build_exchange_request(
-                "j_tensor", complete, prefix="w", savedir="save"
+                "j_tensor",
+                {**complete, "spin_operator": "spn"},
+                prefix="w",
+                savedir="save",
             )
         with self.assertRaisesRegex(ExchangeInputError, "spin_operator='pauli'"):
             build_exchange_request(
@@ -443,6 +448,7 @@ class ExchangeConfigTests(unittest.TestCase):
                 "j_tensor",
                 {
                     **complete,
+                    "spin_operator": "spn",
                     "u_dis_layout": "global_bands",
                     "centres": "model_centres.xyz",
                 },
@@ -463,6 +469,7 @@ class ExchangeConfigTests(unittest.TestCase):
                     "j_tensor",
                     {
                         **complete,
+                        "spin_operator": "spn",
                         "u_dis_layout": "global_bands",
                         ignored_name: ignored_value,
                     },
@@ -484,6 +491,7 @@ class ExchangeConfigTests(unittest.TestCase):
         anchored = {
             **{key: value for key, value in base.items() if key != "slices"},
             **_projection_anchored_bundle(),
+            "spin_operator": "spn",
             "u_dis_layout": "global_bands",
         }
         names = (
