@@ -244,10 +244,12 @@ aliases that inject `ltensor=.true.`.
 
 All four modes require `input_format`, `efermi`, a positive three-component
 `kmesh`, and explicit `mag_atoms`. Non-overlapping `slices` are required except
-for spinor Wannier tensor J with both `win` and `centres`; that path assigns
-Wannier orbitals to atoms automatically. EPR modes require `epr_up` and
-`epr_dn`. Scalar Wannier J requires `up_hr` and `dn_hr`; tensor Wannier J
-accepts that pair or one `spinor_hr`. Native filename stems are
+for spinor Wannier tensor J using either `win` + `centres` or the complete
+AMN/EIG/SPN/U/U_dis projection bundle. The former assigns Wannier centres to
+atoms; the latter constructs the magnetic atomic frame from `win` projections
+and AMN. EPR modes require `epr_up` and `epr_dn`. Scalar Wannier J requires
+`up_hr` and `dn_hr`; tensor Wannier J accepts that pair or one `spinor_hr`.
+Native filename stems are
 `${prefix}.j`, `${prefix}.j_tensor`, `${prefix}.dj`, and
 `${prefix}.dj_tensor` under `${savedir}`. `out_dir`, `out_h5`, and `out_name`
 override those paths.
@@ -279,22 +281,25 @@ multiprocessing path.
 | `kmesh` | int[3] | yes | — | Positive uniform electronic mesh. |
 | `mag_atoms` | list[int] | yes | — | Explicit magnetic atom indices. |
 | `mag_atoms_base` | enum {0, 1} | no | `0` | Input atom-index base; normalized internally to zero-based. |
-| `slices` | string | conditional | — | Non-overlapping `site:start:stop` orbital ranges. May be omitted only for spinor Wannier tensor J with explicit `win` and `centres`. |
+| `slices` | string | conditional | — | Non-overlapping `site:start:stop` orbital ranges. Omit for projection-anchored spinor Wannier tensor J; it is also optional for the separate `win` + `centres` matching path. |
 | `out_dir` | path | no | `${savedir}` | Product directory. |
 | `out_h5` | path | no | mode-derived | HDF5 product path. |
 | `out_name` | path | no | mode-derived | Text product path when the mode writes one. |
 
 ### Spinor basis and atomic SOC
 
-Raw `spinor_hr` input must declare exactly one TB2J layout:
+Without the projection bundle, raw `spinor_hr` input must declare exactly one
+HR-row TB2J layout:
 
 | Key | Allowed values | Meaning |
 |---|---|---|
 | `groupby` | `spin` | `[all up orbitals | all down orbitals]` |
 | `groupby` | `orbital` | `[orb1 up, orb1 down, orb2 up, orb2 down, ...]` |
 
-SLW never infers `groupby` from `wannier_centres.xyz`. Internally both layouts
-are converted to `groupby='spin'`. For spinor Wannier tensor J, explicit
+SLW never infers `groupby` from `wannier_centres.xyz`. On this raw-HR path both
+layouts are converted internally to `groupby='spin'`. The projection-bundle
+path is different: there `groupby` describes AMN trial columns and HR rows are
+neither reordered nor reinterpreted. For spinor Wannier tensor J, explicit
 `win` + `centres` may instead infer the magnetic orbital indices: each
 spinless orbital centre is assigned to its nearest atom under periodic boundary
 conditions, and `mag_atoms` selects the resulting site blocks. This matches the
@@ -306,6 +311,81 @@ The same spin-layout permutation is applied to HR rows, HR columns, and
 Wannier-centre rows when collinear up/down inputs are exported as a spinor
 model. A centre export requires both spin-channel centre files; atomic rows
 must match and are written once.
+
+#### Projection-anchored atomic-Pauli frame (SPN-validated)
+
+For a spinor HR whose maximally-localized Wannier rows are not an independently
+known orbital-spin product basis, supply this complete five-file bundle:
+
+| Key | Wannier90 file | Role |
+|---|---|---|
+| `amn` | `seedname.amn` | Anchors the magnetic atomic projection columns declared by `win`. |
+| `eig` | `seedname.eig` | Reconstructs the Hamiltonian before the Wannier rotations. |
+| `spn` | `seedname.spn` | Supplies reference Pauli matrices in the Bloch eigenstate basis for fail-closed validation. |
+| `u_mat` | `seedname_u.mat` | Final Wannier-gauge rotation. |
+| `u_dis_mat` | `seedname_u_dis.mat` | Disentanglement rotation. |
+
+The bundle is all-or-nothing and is accepted only for spinor Wannier tensor J
+with an explicit `win`, `tensor_kernel='tb2j'`, and no additional `SOC
+(atomic)` card. Here `groupby` declares AMN trial-column spin ordering; it does
+not reinterpret HR rows. Select
+`spin_operator='auto'` or `'spn'`; both use the supplied AMN-anchored,
+SPN-validated atomic-Pauli path when the bundle is complete, while `'pauli'` is
+rejected. `u_dis_layout` is
+mandatory: use `global_bands` when U_dis rows already carry the original EIG
+band indices, or `compact_outer_window` for the old packed outer-window layout.
+The compact layout requires `dis_win_min` and `dis_win_max` in `win`.
+
+Without the bundle, `spin_operator='auto'` rejects raw `spinor_hr`: a
+block-diagonal or rank-one Pauli diagnostic cannot prove that independently
+Wannierized spin sectors share the transverse orbital-partner gauge.
+`spin_operator='pauli'` is therefore an explicit unsafe opt-in reserved for a
+basis whose common orbital-spin product structure is known independently.
+
+The magnetic subspace is derived from `mag_atoms`, the projection groups in
+`win`, and AMN. Omit `slices`; manual slices are rejected. A `centres` file is
+not used and is rejected. The Green function still propagates
+through the full spinor Wannier Hamiltonian; only its magnetic endpoints are
+expressed in the projection-anchored atomic frame.
+
+SPN is transformed into that frame and checked against the atomic-trial Pauli
+matrices, including a per-axis residual. It is a fail-closed validation, not a
+k-dependent exchange vertex; the accumulator uses the atomic-trial Pauli
+operator. The chosen tolerance therefore controls a documented projection
+approximation and its measured residuals are stored in
+`spin_operator_validation`.
+
+The site-resolved magnetic directions are inferred from the projected
+time-reversal-odd field, so `spin_direction` does not set the axis on this
+path. They are stored in `magnetic_subspace/site_spin_directions`; the legacy
+`basic_data/spin_direction` field records site 0's inferred direction and its
+`spin_direction_source` identifies that provenance.
+
+No k-space interpolation is performed for this path. `kmesh` dimensions must
+reproduce the native U/AMN/SPN grid. The actual fractional coordinates,
+ordering, and any uniform Monkhorst-Pack shift are read from U; U_dis must use
+the same order and the native grid must be closed under k -> -k. The coordinates
+used are stored in `basic_data/native_kpoints_crystal` in the HDF5 output. U, U_dis,
+EIG, SPN, AMN, HR, and `win` must all come from the same Wannierization.
+The loader fails closed when their dimensions, gauge reconstruction, projection
+rank, SPN-to-atomic-Pauli validation, or magnetic-field locality checks disagree.
+
+The validation thresholds are positive dimensionless numbers unless a unit is
+shown:
+
+| Key | Default | Validation |
+|---|---:|---|
+| `projection_rank_tolerance` | `1.0e-4` | Minimum allowed singular value of the selected magnetic AMN projection. |
+| `spin_projection_tolerance` | `0.4` | Maximum combined or per-axis relative SPN residual in the projection-anchored atomic Pauli frame. |
+| `hamiltonian_tolerance_ev` | `1.0e-4` eV | Maximum elementwise residual between HR and the U_dis/U/EIG reconstruction. |
+| `noncollinear_tolerance` | `0.25` | Maximum residual from one collinear time-reversal-odd field direction per magnetic site. |
+| `intersite_xc_tolerance` | `0.1` | Maximum nonlocal fraction of the time-reversal-odd field, applied to both intersite blocks and site-block k dependence. |
+
+`collinear_override=.true.` is a diagnostic correction for a Hamiltonian known
+independently to be both no-SOC and collinear. It replaces the inferred
+longitudinal component by the transverse average along the detected magnetic
+axis. Leave it `.false.` for every SOC calculation, because enabling it would
+remove physical anisotropy.
 
 Additional onsite SOC is a final QE-style card, not a namelist option:
 
@@ -429,7 +509,7 @@ Frontend-fixed values: `kernel='scalar'`. Supplying a conflicting value is an er
 | `slices` | string | yes | — | Manual local orbital slices, e.g. `0:0:5,1:5:10`. |
 | `apply_degeneracy` | boolean | no | .true. | Divide HR blocks by Wannier90 degeneracy before H(k) construction; standard Wannier90 needs this<br>CLI aliases: `--apply_degeneracy`, `--no-apply_degeneracy` |
 | `axes` | string | no | `xyz` | Isotropic tensor-envelope axes used by the current scalar writer.<br>CLI aliases: `--axes` |
-| `spin_direction` | float[3] | no | `[0.0, 0.0, 1.0]` | Advanced native-kernel option.<br>CLI aliases: `--spin_direction` |
+| `spin_direction` | float[3] | no | `[0.0, 0.0, 1.0]` | Collinear/model input direction. The projection-anchored path instead infers every site's direction from its time-reversal-odd field.<br>CLI aliases: `--spin_direction` |
 | `win` | string | no | none | Optional explicit Wannier90 structure source; scalar J does not accept an SOC card. |
 | `n_shells` | int | no | `10` | Advanced native-kernel option.<br>CLI aliases: `--n_shells` |
 | `d_max` | float | no | `20.0` | Advanced native-kernel option.<br>CLI aliases: `--d_max` |
@@ -453,10 +533,17 @@ Frontend-fixed values: `kernel='scalar'`. Supplying a conflicting value is an er
 `mag_atoms`. Wannier requires `efermi`, `kmesh`, `mag_atoms`, and either
 `spinor_hr` or the complete `up_hr` + `dn_hr` pair. Explicit `slices` are
 required except when raw spinor input supplies both `win` and `centres`, which
-enables automatic nearest-atom assignment. Raw spinor input always requires
+enables automatic nearest-atom assignment, or when it supplies `win` plus all
+of `amn`, `eig`, `spn`, `u_mat`, and `u_dis_mat`, which enables the
+AMN-anchored atomic-Pauli, SPN-validated path. Raw spinor input always requires
 `groupby='spin'|'orbital'` regardless of how the magnetic indices are built.
-The optional `SOC (atomic)` card requires `win` and may be combined with either
-collinear or spinor input; it always denotes an additional onsite term.
+For the projection bundle it describes AMN trial-column spin ordering, not
+MLWF/HR row ordering; outside that path it retains the HR-row meaning.
+The projection bundle requires `tensor_kernel='tb2j'`, an explicit
+`u_dis_layout`, and matching native Wannier k-grid dimensions; it rejects manual `slices`
+and an additional `SOC (atomic)` card. Outside that path, the optional SOC card
+requires `win` and may be combined with collinear or spinor input; it always
+denotes an additional onsite term.
 
 **Outputs:** `${savedir}/${prefix}.j_tensor.txt` and `.h5` with
 `J_tensor_r`, `J_iso_r`, `J_gamma_r`, `J_dmi_tensor_r`, and `DMI_r`.
@@ -518,23 +605,28 @@ Native engine: `slw.exchange.engine`; numerical kernel:
 | `up_hr` | string | conditional | — | Spin-up collinear Wannier90 hr.dat; supply together with `dn_hr`, or supply `spinor_hr` instead.<br>CLI aliases: `--up_hr` |
 | `dn_hr` | string | conditional | — | Spin-down collinear Wannier90 hr.dat; supply together with `up_hr`, or supply `spinor_hr` instead.<br>CLI aliases: `--dn_hr` |
 | `spinor_hr` | string | conditional | — | Full spinor Wannier90 hr.dat; mutually exclusive with the collinear pair.<br>CLI aliases: `--spinor_hr` |
-| `groupby` | enum {spin, orbital} | with `spinor_hr` | — | Explicit TB2J spinor layout; normalized internally to spin-major. |
+| `groupby` | enum {spin, orbital} | with `spinor_hr` | — | Without the projection bundle, declares HR row ordering and is normalized to spin-major. With the bundle, declares AMN trial-column spin ordering; HR rows remain in their Wannier gauge. |
 | `centres` | string | with automatic matching | none / runtime | Wannier90 centres.xyz. Together with `win`, enables TB2J-style periodic nearest-atom assignment for spinor input.<br>CLI aliases: `--centres` |
-| `centre_tolerance_ang` | float | no | no cutoff | Optional positive maximum centre-to-assigned-atom distance in angstrom. |
+| `amn` | string | projection bundle | none / runtime | Wannier90 AMN atomic-projection matrix. Must be supplied with `eig`, `spn`, `u_mat`, and `u_dis_mat`.<br>CLI aliases: `--amn` |
+| `eig` | string | projection bundle | none / runtime | Wannier90 band eigenvalues from the same run as the projection bundle.<br>CLI aliases: `--eig` |
+| `spn` | string | projection bundle | none / runtime | Wannier90 reference Pauli matrices in the Bloch eigenstate basis, used to validate the AMN-anchored atomic-Pauli frame.<br>CLI aliases: `--spn` |
+| `u_mat` | string | projection bundle | none / runtime | Wannier90 final U rotation.<br>CLI aliases: `--u_mat` |
+| `u_dis_mat` | string | projection bundle | none / runtime | Wannier90 disentanglement rotation.<br>CLI aliases: `--u_dis_mat` |
+| `centre_tolerance_ang` | float | automatic centre matching only | no cutoff | Optional positive maximum centre-to-assigned-atom distance in angstrom. It is rejected with the projection bundle, which does not use centres. |
 | `efermi` | float | yes | — | Fermi energy in eV<br>CLI aliases: `--efermi` |
 | `hr_unit` | enum {ev, ry, ha} | no | `ev` | Unit of input hr.dat matrix elements; Wannier90 default is eV<br>CLI aliases: `--hr_unit` |
 | `ref_epr_up` | string | no | none / runtime | Optional reference EPR up HDF5 for H(k) scale/gauge diagnostics<br>CLI aliases: `--ref_epr_up` |
 | `ref_epr_dn` | string | no | none / runtime | Optional reference EPR down HDF5 for H(k) scale/gauge diagnostics<br>CLI aliases: `--ref_epr_dn` |
 | `ref_hr_unit` | enum {ev, ry, ha} | no | `ry` | Reference EPR hopping unit<br>CLI aliases: `--ref_hr_unit` |
-| `kmesh` | int[3] | yes | — | Advanced native-kernel option.<br>CLI aliases: `--kmesh` |
+| `kmesh` | int[3] | yes | — | Uniform integration-grid dimensions. With the projection bundle they must equal the native U/AMN/SPN dimensions; coordinates, ordering, and shift come from U and are not interpolated.<br>CLI aliases: `--kmesh` |
 | `mag_atoms` | list[int] | yes | — | Magnetic atom indices<br>CLI aliases: `--mag_atoms` |
 | `mag_atoms_base` | enum {0, 1} | no | `0` | Advanced native-kernel option.<br>CLI aliases: `--mag_atoms_base` |
-| `slices` | string | conditional | `''` | Manual local orbital slices, e.g. '0:0:5,1:5:10'. Required unless spinor input supplies both `win` and `centres`; when present, it overrides automatic assignment.<br>CLI aliases: `--slices` |
+| `slices` | string | conditional | `''` | Manual local orbital slices, e.g. '0:0:5,1:5:10'. Required unless spinor input uses `win` + `centres` or the complete projection bundle. A projection-anchored run rejects this key because WIN+AMN defines its magnetic frame.<br>CLI aliases: `--slices` |
 | `apply_degeneracy` | boolean | no | .true. | Divide HR blocks by Wannier90 degeneracy before H(k) construction; standard Wannier90 needs this<br>CLI aliases: `--apply_degeneracy`, `--no-apply_degeneracy` |
 | `tensor_kernel` | enum {direct, tb2j} | no | `tb2j` | Tensor integration/decomposition convention. The compatibility alias `kernel` accepts the same values.<br>CLI aliases: `--kernel` |
 | `axes` | string | no | `xyz` | Tensor axes to compute, subset of xyz<br>CLI aliases: `--axes` |
-| `spin_direction` | float[3] | no | `[0.0, 0.0, 1.0]` | Advanced native-kernel option.<br>CLI aliases: `--spin_direction` |
-| `win` | string | with SOC card or automatic matching | none | Wannier90 structure/projections used for centre assignment and SOC site/species manifolds. |
+| `spin_direction` | float[3] | outside projection bundle | `[0.0, 0.0, 1.0]` | Input/model spin axis. It is rejected with the projection bundle, where every site direction is inferred from the projected time-reversal-odd field.<br>CLI aliases: `--spin_direction` |
+| `win` | string | with SOC card, automatic matching, or projection bundle | none | Wannier90 structure/projections used for centre assignment, SOC selectors, or projection-anchored AMN column selection. |
 | `n_shells` | int | no | `10` | Advanced native-kernel option.<br>CLI aliases: `--n_shells` |
 | `d_max` | float | no | `20.0` | Advanced native-kernel option.<br>CLI aliases: `--d_max` |
 | `all_bonds` | boolean | no | .true. | Keep directed bonds; default matches compute_J_epr_tensor<br>CLI aliases: `--all_bonds`, `--canonical_bonds` |
@@ -544,7 +636,14 @@ Native engine: `slw.exchange.engine`; numerical kernel:
 | `emin` | float | no | `-25.0` | Advanced native-kernel option.<br>CLI aliases: `--emin` |
 | `empoints` | int | no | `500` | Advanced native-kernel option.<br>CLI aliases: `--empoints` |
 | `cfr_beta` | float | no | `1000.0` | Advanced native-kernel option.<br>CLI aliases: `--cfr_beta` |
-| `collinear_override` | boolean | no | .false. | Override J_zz with (J_xx+J_yy)/2 in collinear calculations<br>CLI aliases: `--collinear_override` |
+| `spin_operator` | enum {auto, pauli, spn} | no | `auto` | `auto` uses the projection-anchored path when the complete bundle is present and rejects an unverified bare `spinor_hr` otherwise. `spn` requires the bundle. `pauli` is an explicit opt-in for an independently certified orbital-spin product basis and is rejected with the bundle. |
+| `u_dis_layout` | enum {global_bands, compact_outer_window} | with projection bundle | — | Explicit U_dis row convention. Compact outer-window data also requires `dis_win_min`/`dis_win_max` in `win`. |
+| `projection_rank_tolerance` | float | projection bundle only | `1.0e-4` | Minimum magnetic-AMN singular value. Explicit use outside the bundle is rejected. |
+| `spin_projection_tolerance` | float | projection bundle only | `0.4` | Maximum combined or per-axis SPN residual in the projection-anchored atomic-Pauli frame. Explicit use outside the bundle is rejected. |
+| `hamiltonian_tolerance_ev` | float | projection bundle only | `1.0e-4` | Maximum HR versus U_dis/U/EIG reconstruction residual in eV. Explicit use outside the bundle is rejected. |
+| `noncollinear_tolerance` | float | projection bundle only | `0.25` | Maximum sitewise residual from a collinear time-reversal-odd field. Explicit use outside the bundle is rejected. |
+| `intersite_xc_tolerance` | float | projection bundle only | `0.1` | Maximum nonlocal fraction of the projected time-reversal-odd field, including intersite support and onsite-block k dependence. Explicit use outside the bundle is rejected. |
+| `collinear_override` | boolean | no | .false. | For a known no-SOC collinear Hamiltonian only, replace the longitudinal tensor component by the transverse average along the inferred magnetic axis. Never enable for SOC input.<br>CLI aliases: `--collinear_override` |
 | `spin_magnitude` | float | no | `1.0` | Spin magnitude S to scale J by 1/S^2<br>CLI aliases: `--spin_magnitude` |
 | `out_dir` | string | no | `J_wannier_tensor` | Advanced native-kernel option.<br>CLI aliases: `--out_dir` |
 | `out_name` | string | no | `J_wannier_tensor.txt` | Advanced native-kernel option.<br>CLI aliases: `--out_name` |

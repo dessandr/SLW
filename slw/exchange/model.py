@@ -58,6 +58,11 @@ class ExchangeFiles:
     spinor_hr: str | None = None
     win: str | None = None
     centres: str | None = None
+    amn: str | None = None
+    eig: str | None = None
+    spn: str | None = None
+    u_mat: str | None = None
+    u_dis_mat: str | None = None
 
 
 @dataclass(frozen=True)

@@ -41,7 +41,13 @@ from slw.exchange.kernels.lkag import (
     get_cfr_pole_mesh,
     get_semicircle_contour,
 )
-from slw.exchange.kernels.parallel import collective_sum, partition_sequence, rank_size
+from slw.exchange.kernels.parallel import (
+    collective_call,
+    collective_root_call,
+    collective_sum,
+    partition_sequence,
+    rank_size,
+)
 from slw.exchange.kernels.soc_downfold import (
     _downfold_one_k,
     _group_indices,
@@ -52,6 +58,11 @@ from slw.exchange.kernels.spinor import (
     WANNIER90_D_ORDER,
     WANNIER90_P_ORDER,
     spinor_from_collinear,
+)
+from slw.exchange.kernels.wannier_projected import (
+    compute_projected_tb2j,
+    load_projected_wannier_context,
+    spin_product_separability,
 )
 from slw.soc.manifold import _win_projection_groups
 from slw.soc.spinor import groupby_to_spin_major_indices, normalize_groupby
@@ -859,13 +870,35 @@ def _group_orbits(neighbours, mode):
 def _write_tensor_h5_simple(path, args, labels, pair_meta, tensor, trace_acc, elapsed, nk, nE, axes, extra=None):
     os.makedirs(os.path.dirname(os.path.abspath(path)) or ".", exist_ok=True)
     str_dt = h5py.string_dtype(encoding="utf-8")
+    projected_context = getattr(args, "_projected_wannier_context", None)
+    reported_spin_direction = (
+        np.asarray(projected_context.site_spin_directions[0], dtype=np.float64)
+        if projected_context is not None
+        else np.asarray(args.spin_direction, dtype=np.float64)
+    )
     with h5py.File(path, "w") as h5:
         basic = h5.create_group("basic_data")
         basic.create_dataset("atom_labels", data=np.asarray(labels, dtype=object), dtype=str_dt)
         basic.create_dataset("kmesh", data=np.asarray(args.kmesh, dtype=np.int64))
         basic.create_dataset("efermi_ev", data=np.asarray(float(args.efermi)))
         basic.create_dataset("apply_degeneracy", data=np.asarray(bool(args.apply_degeneracy)))
-        basic.create_dataset("spin_direction", data=np.asarray(args.spin_direction, dtype=np.float64))
+        basic.create_dataset("spin_direction", data=reported_spin_direction)
+        basic.create_dataset(
+            "input_spin_direction",
+            data=np.asarray(args.spin_direction, dtype=np.float64),
+        )
+        basic.create_dataset(
+            "spin_direction_source",
+            data=np.array(
+                (
+                    "projected_time_reversal_odd_field_site_0"
+                    if projected_context is not None
+                    else "input"
+                ),
+                dtype=object,
+            ),
+            dtype=str_dt,
+        )
         basic.create_dataset("tensor_axes", data=np.asarray(axes, dtype=object), dtype=str_dt)
         basic.create_dataset("nk", data=np.asarray(int(nk), dtype=np.int64))
         basic.create_dataset("nE", data=np.asarray(int(nE), dtype=np.int64))
@@ -881,8 +914,24 @@ def _write_tensor_h5_simple(path, args, labels, pair_meta, tensor, trace_acc, el
             "up_hr": args.up_hr or "",
             "dn_hr": args.dn_hr or "",
             "spinor_hr": args.spinor_hr or "",
+            "amn": getattr(args, "amn", None) or "",
+            "eig": getattr(args, "eig", None) or "",
+            "spn": getattr(args, "spn", None) or "",
+            "u_mat": getattr(args, "u_mat", None) or "",
+            "u_dis_mat": getattr(args, "u_dis_mat", None) or "",
+            "u_dis_layout": getattr(args, "u_dis_layout", None) or "",
+            "spin_operator_policy": getattr(args, "spin_operator", "auto"),
             "input_groupby": getattr(args, "groupby", "") or "",
-            "internal_groupby": "spin",
+            "groupby_semantics": (
+                "amn_projection_columns"
+                if projected_context is not None
+                else "spinor_hr_rows"
+            ),
+            "internal_groupby": (
+                "projection_interleaved"
+                if getattr(args, "_projected_wannier_context", None) is not None
+                else "spin"
+            ),
             "centres": getattr(args, "centres", None) or "",
             "mag_subspace": getattr(args, "mag_subspace", ""),
             "win": args.win or "",
@@ -911,7 +960,11 @@ def _write_tensor_h5_simple(path, args, labels, pair_meta, tensor, trace_acc, el
         )
         tolerance_dataset.attrs["unit"] = "angstrom"
         magnetic = h5.create_group("magnetic_subspace")
-        magnetic.attrs["selector_index_basis"] = "canonical_spin_major_collinear_half"
+        magnetic.attrs["selector_index_basis"] = (
+            "win_spatial_projection"
+            if getattr(args, "_projected_wannier_context", None) is not None
+            else "canonical_spin_major_collinear_half"
+        )
         for key in (
             "selected_mag_atoms",
             "site_global_atom_index",
@@ -928,12 +981,96 @@ def _write_tensor_h5_simple(path, args, labels, pair_meta, tensor, trace_acc, el
                 )
                 if key.endswith("distance_ang"):
                     dataset.attrs["unit"] = "angstrom"
+        if projected_context is not None:
+            native_kpoints = basic.create_dataset(
+                "native_kpoints_crystal",
+                data=np.asarray(projected_context.kpoints, dtype=np.float64),
+            )
+            native_kpoints.attrs["coordinate_system"] = "fractional_reciprocal"
+            native_kpoints.attrs["source"] = "u_mat"
+            amn_columns = magnetic.create_dataset(
+                "selected_amn_columns",
+                data=np.asarray(projected_context.selected_amn_columns, dtype=np.int64),
+            )
+            amn_columns.attrs["index_basis"] = "amn_projection_column"
+            amn_columns.attrs["ordering"] = "site_orbital_spin_interleaved"
+            spatial_indices = magnetic.create_dataset(
+                "selected_spatial_indices",
+                data=np.asarray(projected_context.selected_spatial_indices, dtype=np.int64),
+            )
+            spatial_indices.attrs["index_basis"] = "win_spatial_projection"
+            magnetic.create_dataset(
+                "site_projection_offsets",
+                data=np.asarray(projected_context.site_offsets, dtype=np.int64),
+            )
+            magnetic.create_dataset(
+                "site_orbital_counts",
+                data=np.asarray(projected_context.site_orbital_counts, dtype=np.int64),
+            )
+            magnetic.create_dataset(
+                "site_spin_directions",
+                data=np.asarray(projected_context.site_spin_directions, dtype=np.float64),
+            )
+            validation = h5.create_group("spin_operator_validation")
+            for key, value in projected_context.diagnostics.items():
+                if isinstance(value, str):
+                    validation.create_dataset(
+                        key, data=np.array(value, dtype=object), dtype=str_dt
+                    )
+                elif (
+                    isinstance(value, (tuple, list))
+                    and value
+                    and all(isinstance(item, str) for item in value)
+                ):
+                    validation.create_dataset(
+                        key,
+                        data=np.asarray(value, dtype=object),
+                        dtype=str_dt,
+                    )
+                else:
+                    validation.create_dataset(key, data=np.asarray(value))
+        separability = getattr(args, "_spin_separability_meta", None)
+        if separability is not None:
+            validation = h5.require_group("spin_operator_validation")
+            validation.create_dataset(
+                "bare_pauli_separability_residual",
+                data=np.asarray(float(separability["residual"])),
+            )
+            validation.create_dataset(
+                "bare_pauli_dominant_axis",
+                data=np.asarray(separability["axis"], dtype=np.float64),
+            )
+            validation.create_dataset(
+                "bare_pauli_gram_eigenvalues",
+                data=np.asarray(separability["eigenvalues"], dtype=np.float64),
+            )
         soc_entries = getattr(args, "_soc_entries", []) or []
         basic.create_dataset("additional_soc", data=np.asarray(bool(soc_entries)))
         basic.create_dataset(
             "soc_mode",
             data=np.array("atomic" if soc_entries else "none", dtype=object),
             dtype=str_dt,
+        )
+        basic.create_dataset(
+            "additional_soc_mode",
+            data=np.array("atomic" if soc_entries else "none", dtype=object),
+            dtype=str_dt,
+        )
+        basic.create_dataset(
+            "base_hamiltonian_soc_provenance",
+            data=np.array(
+                (
+                    "unknown_embedded_content_of_spinor_hr"
+                    if args.spinor_hr
+                    else "collinear_channels_before_optional_model_soc"
+                ),
+                dtype=object,
+            ),
+            dtype=str_dt,
+        )
+        basic.create_dataset(
+            "collinear_override",
+            data=np.asarray(bool(getattr(args, "collinear_override", False))),
         )
         basic.create_dataset(
             "soc_entries",
@@ -1030,10 +1167,82 @@ def _ensure_scalar_kernel_is_soc_free(args):
         )
 
 
+_PROJECTED_SPIN_FILE_NAMES = ("amn", "eig", "spn", "u_mat", "u_dis_mat")
+
+
+def _projection_anchored_mode(args):
+    present = [
+        name
+        for name in _PROJECTED_SPIN_FILE_NAMES
+        if bool(getattr(args, name, None))
+    ]
+    if present and len(present) != len(_PROJECTED_SPIN_FILE_NAMES):
+        missing = [name for name in _PROJECTED_SPIN_FILE_NAMES if name not in present]
+        raise ValueError(
+            "Projection-anchored spin input requires all of "
+            f"{', '.join(_PROJECTED_SPIN_FILE_NAMES)}; missing {', '.join(missing)}"
+        )
+    complete = len(present) == len(_PROJECTED_SPIN_FILE_NAMES)
+    policy = str(getattr(args, "spin_operator", "auto")).strip().lower()
+    if policy not in {"auto", "pauli", "spn"}:
+        raise ValueError("spin_operator must be auto, pauli, or spn")
+    layout = getattr(args, "u_dis_layout", None)
+    if complete and not layout:
+        raise ValueError(
+            "Projection-anchored spin input requires explicit u_dis_layout"
+        )
+    if not complete and layout:
+        raise ValueError(
+            "u_dis_layout is valid only with the complete projection-anchored bundle"
+        )
+    if complete and policy == "pauli":
+        raise ValueError(
+            "spin_operator='pauli' cannot silently ignore a supplied SPN bundle"
+        )
+    if policy == "spn" and not complete:
+        raise ValueError("spin_operator='spn' requires the complete SPN/U/AMN bundle")
+    return complete and policy in {"auto", "spn"}, policy
+
+
 def run(args, comm=None):
     axes = _parse_axes(args.axes)
     kpts = _full_k_mesh(args.kmesh)
     spinor_input = bool(args.spinor_hr)
+    projected_mode, spin_operator_policy = _projection_anchored_mode(args)
+    if projected_mode and not spinor_input:
+        raise ValueError("Projection-anchored spin input requires spinor_hr")
+    if projected_mode and args.kernel != "tb2j":
+        raise ValueError(
+            "Projection-anchored spinor exchange currently preserves the full "
+            "TB2J tensor convention only; use tensor_kernel='tb2j'"
+        )
+    additional_soc_options = []
+    if tuple(getattr(args, "soc_manifolds", ()) or ()):
+        additional_soc_options.append("soc_manifolds")
+    if str(getattr(args, "soc", "") or "").strip():
+        additional_soc_options.append("soc")
+    if float(getattr(args, "lambda_te", 0.0) or 0.0) != 0.0:
+        additional_soc_options.append("lambda_te")
+    if bool(getattr(args, "intersite_soc", False)):
+        additional_soc_options.append("intersite_soc")
+    if bool(getattr(args, "dynamic_soc", False)):
+        additional_soc_options.append("dynamic_soc")
+    if projected_mode and additional_soc_options:
+        raise ValueError(
+            "Projection-anchored input already fixes the Hamiltonian gauge and "
+            "does not accept additional model SOC options: "
+            + ", ".join(additional_soc_options)
+        )
+    if projected_mode and not getattr(args, "win", None):
+        raise ValueError("Projection-anchored spin input requires an explicit win")
+    if projected_mode and getattr(args, "centres", None):
+        raise ValueError(
+            "Projection-anchored magnetic orbitals come from WIN+AMN; omit centres"
+        )
+    if projected_mode and getattr(args, "centre_tolerance_ang", None) is not None:
+        raise ValueError(
+            "Projection-anchored spin exchange does not use centre_tolerance_ang"
+        )
     if spinor_input and (args.up_hr or args.dn_hr):
         print("[J-wannier-tensor] --spinor_hr is set; ignoring --up_hr/--dn_hr", flush=True)
     if not spinor_input and (not args.up_hr or not args.dn_hr):
@@ -1047,9 +1256,11 @@ def run(args, comm=None):
     )
 
     hk_up, hk_dn = None, None
+    h_spin = None
+    projected_context = None
     soc_entries, soc_win_path = [], ""
     intersite_soc_meta = {}
-    if spinor_input:
+    if spinor_input and not projected_mode:
         if args.kernel == "scalar":
             raise ValueError("--kernel scalar requires collinear --up_hr/--dn_hr; use direct/tb2j for --spinor_hr")
         h_spin, spinor_meta = _load_spinor_hr_hk(
@@ -1074,8 +1285,26 @@ def run(args, comm=None):
             print(f"[J-wannier-tensor] basis_groups_file_order={spinor_meta['basis_groups_file']}", flush=True)
         if spinor_meta.get("basis_groups_internal"):
             print(f"[J-wannier-tensor] basis_groups_internal_spin_major={spinor_meta['basis_groups_internal']}", flush=True)
+        separability = spin_product_separability(h_spin)
+        args._spin_separability_meta = separability
+        print(
+            "[J-wannier-tensor] bare-Pauli separability "
+            f"residual={float(separability['residual']):.6e} "
+            f"axis={np.asarray(separability['axis']).tolist()} "
+            f"policy={spin_operator_policy}",
+            flush=True,
+        )
+        if spin_operator_policy == "auto":
+            raise ValueError(
+                "spin_operator='auto' cannot certify the transverse orbital "
+                "partner gauge of a bare spinor_hr, even when its Pauli "
+                f"separability residual is {float(separability['residual']):.6e}. "
+                "Supply AMN/EIG/SPN/U/U_dis for projection-anchored exchange, "
+                "or set spin_operator='pauli' only when the HR rows are "
+                "independently known to be a common orbital-spin product basis."
+            )
         h_spin, soc_entries, soc_win_path = _apply_model_soc(h_spin, args, dim)
-    else:
+    elif not spinor_input:
         hk_up, hk_dn = _load_hr_hk(
             args.up_hr,
             args.dn_hr,
@@ -1096,28 +1325,133 @@ def run(args, comm=None):
         args.epr_up = ""
         h_spin, soc_entries, soc_win_path = _apply_model_soc(h_spin, args, dim)
 
-    structure_path, structure_source = resolve_wannier_structure(os.getcwd(), args.win)
-    labels_map = atom_names_from_structure(structure_path)
-    labels = [
-        labels_map.get(i, f"Atom{i + 1}")
-        for i in range(max(labels_map.keys(), default=-1) + 1)
-    ]
-    mag_atoms = _normalize_mag_atoms(args)
-    if not mag_atoms:
-        raise ValueError("mag_atoms must contain at least one atom")
-    if len(set(mag_atoms)) != len(mag_atoms):
-        raise ValueError(f"mag_atoms contains duplicates: {mag_atoms}")
-    invalid_mag_atoms = [index for index in mag_atoms if index < 0 or index >= len(labels)]
-    if invalid_mag_atoms:
-        raise ValueError(
-            f"mag_atoms contains indices outside [0,{len(labels)}): {invalid_mag_atoms}"
+    def load_structure_metadata():
+        structure_path_value, structure_source_value = resolve_wannier_structure(
+            os.getcwd(), args.win
         )
+        labels_map = atom_names_from_structure(structure_path_value)
+        labels_value = [
+            labels_map.get(i, f"Atom{i + 1}")
+            for i in range(max(labels_map.keys(), default=-1) + 1)
+        ]
+        mag_atoms_value = _normalize_mag_atoms(args)
+        if not mag_atoms_value:
+            raise ValueError("mag_atoms must contain at least one atom")
+        if len(set(mag_atoms_value)) != len(mag_atoms_value):
+            raise ValueError(f"mag_atoms contains duplicates: {mag_atoms_value}")
+        invalid_mag_atoms = [
+            index
+            for index in mag_atoms_value
+            if index < 0 or index >= len(labels_value)
+        ]
+        if invalid_mag_atoms:
+            raise ValueError(
+                "mag_atoms contains indices outside "
+                f"[0,{len(labels_value)}): {invalid_mag_atoms}"
+            )
+        return (
+            structure_path_value,
+            structure_source_value,
+            labels_value,
+            mag_atoms_value,
+        )
+
+    structure_path, structure_source, labels, mag_atoms = collective_call(
+        comm,
+        load_structure_metadata,
+        phase="Wannier structure setup",
+    )
 
     manual_slices = bool(str(getattr(args, "slices", "") or "").strip())
     explicit_mag_subspace = bool(
         str(getattr(args, "mag_subspace", "") or "").strip()
     )
-    if spinor_input and not manual_slices and explicit_mag_subspace:
+    if projected_mode:
+        if manual_slices or explicit_mag_subspace:
+            raise ValueError(
+                "Projection-anchored spin exchange resolves magnetic orbitals "
+                "from WIN+AMN; manual slices/mag_subspace must be omitted"
+            )
+
+        def load_physical_context():
+            return load_projected_wannier_context(
+                spinor_hr=args.spinor_hr,
+                win=args.win,
+                amn=args.amn,
+                eig=args.eig,
+                spn=args.spn,
+                u_mat=args.u_mat,
+                u_dis_mat=args.u_dis_mat,
+                u_dis_layout=args.u_dis_layout,
+                groupby=args.groupby,
+                mag_atoms=mag_atoms,
+                kmesh=tuple(int(value) for value in args.kmesh),
+                kpoints=kpts,
+                efermi=float(args.efermi),
+                apply_degeneracy=bool(args.apply_degeneracy),
+                hr_unit=args.hr_unit,
+                projection_rank_tolerance=float(args.projection_rank_tolerance),
+                spin_projection_tolerance=float(args.spin_projection_tolerance),
+                hamiltonian_tolerance_ev=float(args.hamiltonian_tolerance_ev),
+                noncollinear_tolerance=float(args.noncollinear_tolerance),
+                intersite_xc_tolerance=float(args.intersite_xc_tolerance),
+            )
+
+        root_context = collective_root_call(
+            comm,
+            load_physical_context,
+            phase="projection-anchored Wannier setup",
+        )
+        projected_context = (
+            root_context if comm is None else comm.bcast(root_context, root=0)
+        )
+        if projected_context is None:  # pragma: no cover - communicator guard
+            raise RuntimeError("MPI root did not broadcast projected Wannier setup")
+        args._projected_wannier_context = projected_context
+        dim = int(projected_context.coefficients.shape[-1] // 2)
+        orbital_offsets = np.concatenate(
+            (
+                np.zeros(1, dtype=np.int64),
+                np.cumsum(projected_context.site_orbital_counts, dtype=np.int64),
+            )
+        )
+        magnetic_subspace_meta = {
+            "source": "win_amn_projection_polar",
+            "structure_source": str(structure_source),
+            "win_path": str(structure_path),
+            "centres_path": getattr(args, "centres", None) or "",
+            "groupby": str(args.groupby),
+            "centre_tolerance_ang": None,
+            "selected_mag_atoms": np.asarray(mag_atoms, dtype=np.int64),
+            "site_global_atom_index": np.asarray(mag_atoms, dtype=np.int64),
+            "selector_offsets": orbital_offsets,
+            "selector_indices": np.asarray(
+                projected_context.selected_spatial_indices, dtype=np.int64
+            ),
+            "site_max_distance_ang": np.full(len(mag_atoms), np.nan),
+        }
+        slices = {
+            site: np.arange(int(count), dtype=np.int64)
+            for site, count in enumerate(projected_context.site_orbital_counts)
+        }
+        diagnostics = projected_context.diagnostics
+        print(
+            "[J-wannier-tensor] projection-anchored magnetic frame "
+            f"labels={list(diagnostics['projection_labels'])} "
+            f"site_orbitals={projected_context.site_orbital_counts.tolist()} "
+            f"min_singular={float(diagnostics['projection_min_singular_value']):.6e} "
+            f"max_condition={float(diagnostics['projection_max_condition_number']):.6e}",
+            flush=True,
+        )
+        print(
+            "[J-wannier-tensor] physical-SPN validation "
+            f"relative_max={float(diagnostics['spin_projection_relative_max']):.6e} "
+            f"noncollinear_max={float(diagnostics['site_noncollinear_fraction_max']):.6e} "
+            f"intersite_xc={float(diagnostics['intersite_xc_fraction']):.6e} "
+            f"site_directions={projected_context.site_spin_directions.tolist()}",
+            flush=True,
+        )
+    elif spinor_input and not manual_slices and explicit_mag_subspace:
         slices, slice_labels = _infer_collinear_slices_from_win(
             args.win, dim, args.mag_subspace
         )
@@ -1173,7 +1507,7 @@ def run(args, comm=None):
                 flush=True,
             )
     args._magnetic_subspace_meta = magnetic_subspace_meta
-    if spinor_input:
+    if spinor_input and not projected_mode:
         print(
             f"[J-wannier-tensor] mag_subspace_file_order={_slice_file_order_summary(slices, dim, args.groupby)}",
             flush=True,
@@ -1182,7 +1516,7 @@ def run(args, comm=None):
             f"[J-wannier-tensor] mag_subspace_internal_spin_major={_spinor_slice_summary(slices, dim)}",
             flush=True,
         )
-    else:
+    elif not projected_mode:
         print(f"[J-wannier-tensor] slices={ {int(k): (v.start, v.stop) for k, v in slices.items()} }", flush=True)
 
     dynamic_soc_val = False if spinor_input else getattr(args, "dynamic_soc", False)
@@ -1228,27 +1562,52 @@ def run(args, comm=None):
     elif not spinor_input:
         h_spin, intersite_soc_meta = _apply_intersite_soc(h_spin, hk_up, hk_dn, args)
 
-    spin_evals = np.linalg.eigvalsh(h_spin)
-    print(
-        f"[J-wannier-tensor] final spinor H(k) band=({float(spin_evals.min()):.6g},{float(spin_evals.max()):.6g}) eV",
-        flush=True,
-    )
+    if projected_mode:
+        projected_bands = projected_context.eigenvalues + float(args.efermi)
+        print(
+            "[J-wannier-tensor] final full spinor H(k) "
+            f"band=({float(projected_bands.min()):.6g},"
+            f"{float(projected_bands.max()):.6g}) eV "
+            "green_space=full endpoint_space=magnetic_AMN",
+            flush=True,
+        )
+    else:
+        spin_evals = np.linalg.eigvalsh(h_spin)
+        print(
+            f"[J-wannier-tensor] final spinor H(k) band=({float(spin_evals.min()):.6g},{float(spin_evals.max()):.6g}) eV",
+            flush=True,
+        )
     args._soc_entries = soc_entries
     args._soc_win_path = soc_win_path
     args._intersite_soc_meta = intersite_soc_meta
 
-    neighbours = find_nearest_neighbours(
-        structure_path,
-        mag_atom_indices=mag_atoms,
-        n_shells=int(args.n_shells),
-        d_max=float(args.d_max),
-        all_bonds=bool(args.all_bonds),
+    def build_bond_metadata():
+        neighbours_value = find_nearest_neighbours(
+            structure_path,
+            mag_atom_indices=mag_atoms,
+            n_shells=int(args.n_shells),
+            d_max=float(args.d_max),
+            all_bonds=bool(args.all_bonds),
+        )
+        if args.nn_only:
+            neighbours_value = [
+                neighbour
+                for neighbour in neighbours_value
+                if int(neighbour.get("shell_idx", 0)) == 1
+            ]
+        pair_meta_value = _build_pair_meta(mag_atoms, neighbours_value)
+        _compare_reference_bonds(args, mag_atoms, pair_meta_value)
+        return (
+            neighbours_value,
+            pair_meta_value,
+            _group_orbits(neighbours_value, args.orbit_grouping),
+        )
+
+    _neighbours, pair_meta, orbits = collective_call(
+        comm,
+        build_bond_metadata,
+        phase="Wannier bond setup",
     )
-    if args.nn_only:
-        neighbours = [n for n in neighbours if int(n.get("shell_idx", 0)) == 1]
-    pair_meta = _build_pair_meta(mag_atoms, neighbours)
-    _compare_reference_bonds(args, mag_atoms, pair_meta)
-    orbits = _group_orbits(neighbours, args.orbit_grouping)
 
     if args.integrator == "contour":
         energy_mesh = get_semicircle_contour(emin=args.emin, emax=0.0, npoints=args.empoints)
@@ -1257,7 +1616,7 @@ def run(args, comm=None):
     else:
         energy_mesh = get_cfr_pole_mesh(npoles=args.empoints, beta_eV_inv=args.cfr_beta)
 
-    rank, size = rank_size(comm)
+    _rank, size = rank_size(comm)
     local_energy_mesh = partition_sequence(energy_mesh, comm)
     print(
         f"[J-wannier-tensor] computing tensor: kernel={args.kernel} nBond={len(pair_meta)} "
@@ -1268,6 +1627,15 @@ def run(args, comm=None):
     t0 = time.time()
 
     def integrate_local():
+        if projected_mode:
+            tensor_local, trace_local, extra_local, _info = compute_projected_tb2j(
+                projected_context,
+                pair_meta,
+                local_energy_mesh,
+                axes,
+                collinear_override=args.collinear_override,
+            )
+            return tensor_local, trace_local, extra_local
         if args.kernel == "scalar":
             _ensure_scalar_kernel_is_soc_free(args)
             j_local, trace_local, _kdata, _info = _compute_j_direct(
@@ -1319,50 +1687,84 @@ def run(args, comm=None):
         return tensor_local, trace_local, extra_local
 
     reduced = collective_sum(comm, integrate_local)
-    if rank != 0:
-        return
-    if reduced is None:  # pragma: no cover - defensive communicator guard
-        raise RuntimeError("MPI root did not receive Wannier J reduction")
-    tensor, trace_acc, extra = reduced
-    exe_info = {
-        "n_chunks": max(1, size),
-        "nproc": size if size > 1 else int(args.nproc),
-        "mpi_size": size,
-    }
-    args._mpi_size = size
-    elapsed = time.time() - t0
 
-    # Scale J by S^2
-    spin_magnitude_val = getattr(args, "spin_magnitude", 1.0)
-    if spin_magnitude_val != 1.0:
-        s2 = float(spin_magnitude_val) ** 2
-        tensor = tensor / s2
-        if extra:
-            for key in (
-                "jiso_tb2j",
-                "dmi_tb2j",
-                "jani_tb2j",
-                "J_iso_tensor_r",
-                "J_gamma_r",
-                "J_antisym_aab_r",
-                "J_dmi_tensor_r",
-                "J_aab_full_r",
-            ):
-                if key in extra:
-                    extra[key] = extra[key] / s2
+    def finalize_root():
+        if reduced is None:  # pragma: no cover - defensive communicator guard
+            raise RuntimeError("MPI root did not receive Wannier J reduction")
+        tensor, trace_acc, extra = reduced
+        exe_info = {
+            "n_chunks": max(1, size),
+            "nproc": size if size > 1 else int(args.nproc),
+            "mpi_size": size,
+        }
+        args._mpi_size = size
+        elapsed = time.time() - t0
 
-    os.makedirs(args.out_dir, exist_ok=True)
-    out_txt = args.out_name if os.path.isabs(args.out_name) else os.path.join(args.out_dir, args.out_name)
-    out_h5 = args.out_h5 if os.path.isabs(args.out_h5) else os.path.join(args.out_dir, args.out_h5)
-    _write_tensor_text(out_txt, labels, pair_meta, tensor, orbits, axes, args.kernel, extra=extra)
-    _write_tensor_h5_simple(out_h5, args, labels, pair_meta, tensor, trace_acc, elapsed, len(kpts), len(energy_mesh), axes, extra=extra)
-    print(
-        f"[J-wannier-tensor] done elapsed_s={elapsed:.2f} "
-        f"n_chunks={exe_info.get('n_chunks', 1)} nproc={exe_info.get('nproc', 1)}",
-        flush=True,
-    )
-    print(f"[J-wannier-tensor] wrote {out_txt}", flush=True)
-    print(f"[J-wannier-tensor] wrote {out_h5}", flush=True)
+        # Scale J by S^2 without changing the raw contour accumulator.
+        spin_magnitude_val = getattr(args, "spin_magnitude", 1.0)
+        if spin_magnitude_val != 1.0:
+            s2 = float(spin_magnitude_val) ** 2
+            tensor = tensor / s2
+            if extra:
+                for key in (
+                    "jiso_tb2j",
+                    "dmi_tb2j",
+                    "jani_tb2j",
+                    "J_iso_tensor_r",
+                    "J_gamma_r",
+                    "J_antisym_aab_r",
+                    "J_dmi_tensor_r",
+                    "J_aab_full_r",
+                ):
+                    if key in extra:
+                        extra[key] = extra[key] / s2
+
+        os.makedirs(args.out_dir, exist_ok=True)
+        out_txt = (
+            args.out_name
+            if os.path.isabs(args.out_name)
+            else os.path.join(args.out_dir, args.out_name)
+        )
+        out_h5 = (
+            args.out_h5
+            if os.path.isabs(args.out_h5)
+            else os.path.join(args.out_dir, args.out_h5)
+        )
+        _write_tensor_text(
+            out_txt,
+            labels,
+            pair_meta,
+            tensor,
+            orbits,
+            axes,
+            args.kernel,
+            extra=extra,
+            source_label="Wannier spinor H(k)",
+        )
+        _write_tensor_h5_simple(
+            out_h5,
+            args,
+            labels,
+            pair_meta,
+            tensor,
+            trace_acc,
+            elapsed,
+            len(kpts),
+            len(energy_mesh),
+            axes,
+            extra=extra,
+        )
+        print(
+            f"[J-wannier-tensor] done elapsed_s={elapsed:.2f} "
+            f"n_chunks={exe_info.get('n_chunks', 1)} "
+            f"nproc={exe_info.get('nproc', 1)}",
+            flush=True,
+        )
+        print(f"[J-wannier-tensor] wrote {out_txt}", flush=True)
+        print(f"[J-wannier-tensor] wrote {out_h5}", flush=True)
+        return out_h5
+
+    collective_root_call(comm, finalize_root, phase="Wannier J output write")
 
 
 def main():
@@ -1374,9 +1776,37 @@ def main():
         "--groupby",
         choices=["spin", "orbital"],
         default=None,
-        help="Required for --spinor_hr: TB2J spin-major or orbital-interleaved layout.",
+        help=(
+            "Without the projection bundle, declares spinor_hr row ordering; "
+            "with the bundle, declares AMN trial-column spin ordering."
+        ),
     )
     ap.add_argument("--centres", default=None, help="Wannier90 centres.xyz used for automatic spinor magnetic-subspace matching")
+    ap.add_argument("--amn", default=None, help="Wannier90 AMN atomic projection matrix")
+    ap.add_argument("--eig", default=None, help="Wannier90 eigenvalue file")
+    ap.add_argument("--spn", default=None, help="Wannier90 physical Pauli-matrix file")
+    ap.add_argument("--u_mat", default=None, help="Wannier90 U rotation matrix")
+    ap.add_argument("--u_dis_mat", default=None, help="Wannier90 disentanglement rotation matrix")
+    ap.add_argument(
+        "--spin_operator",
+        choices=["auto", "pauli", "spn"],
+        default="auto",
+        help=(
+            "Use an explicit certified bare-Pauli basis, or an SPN-validated "
+            "AMN-anchored atomic-Pauli projection frame"
+        ),
+    )
+    ap.add_argument(
+        "--u_dis_layout",
+        choices=["global_bands", "compact_outer_window"],
+        default=None,
+        help="Explicit U_dis row layout; required with the SPN bundle",
+    )
+    ap.add_argument("--projection_rank_tolerance", type=float, default=1.0e-4)
+    ap.add_argument("--spin_projection_tolerance", type=float, default=0.4)
+    ap.add_argument("--hamiltonian_tolerance_ev", type=float, default=1.0e-4)
+    ap.add_argument("--noncollinear_tolerance", type=float, default=0.25)
+    ap.add_argument("--intersite_xc_tolerance", type=float, default=0.1)
     ap.add_argument(
         "--centre_tolerance_ang",
         "--centre-tolerance-ang",

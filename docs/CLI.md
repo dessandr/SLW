@@ -99,6 +99,18 @@ choices such as meshes, magnetic atoms, orbital slices, spin direction, and
 reciprocal-space paths remain explicit inputs. Unless overridden, exchange
 outputs are written to `${savedir}/${prefix}.<mode>.{h5,txt}`.
 
+For a spinor Wannier Hamiltonian whose MLWF rows are not a known
+orbital-spin-product basis, tensor J accepts one projection-anchored bundle:
+`amn`, `eig`, `spn`, `u_mat`, and `u_dis_mat`. Supply all five with
+`spinor_hr`, `win`, `tensor_kernel='tb2j'`, `spin_operator='auto'|'spn'`, and
+an explicit `u_dis_layout`. The magnetic frame comes from WIN+AMN, so omit
+both `slices` and `centres`. The requested `kmesh` dimensions must match the
+native U/AMN/SPN mesh. Coordinates, ordering, and any Monkhorst-Pack shift are
+read from U; no mesh interpolation is performed.
+See [`exchange_j_tensor_wannier_spn.in`](../examples/exchange_j_tensor_wannier_spn.in).
+Use `collinear_override=.true.` only for a Hamiltonian independently known to
+be no-SOC and collinear, never for SOC data.
+
 ## Discovering calculations
 
 List the calculations in a stage:

@@ -33,6 +33,18 @@ def _common(**updates):
     return values
 
 
+def _projection_anchored_bundle(**updates):
+    values = {
+        "amn": "model.amn",
+        "eig": "model.eig",
+        "spn": "model.spn",
+        "u_mat": "model_u.mat",
+        "u_dis_mat": "model_u_dis.mat",
+    }
+    values.update(updates)
+    return values
+
+
 class ExchangeConfigTests(unittest.TestCase):
     def test_builds_frozen_epr_j_request_with_deterministic_outputs(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -128,6 +140,7 @@ class ExchangeConfigTests(unittest.TestCase):
                 "spinor_hr": "spinor_hr.dat",
                 "win": "model.win",
                 "groupby": "orbital",
+                "spin_operator": "pauli",
             },
             prefix="w",
             savedir="save",
@@ -164,6 +177,7 @@ class ExchangeConfigTests(unittest.TestCase):
             "win": "model.win",
             "centres": "model_centres.xyz",
             "groupby": "orbital",
+            "spin_operator": "pauli",
             "centre_tolerance_ang": 0.35,
         }
         request = build_exchange_request(
@@ -188,6 +202,330 @@ class ExchangeConfigTests(unittest.TestCase):
             savedir="save",
         )
         self.assertEqual(manual.slice_map, {0: slice(0, 5), 1: slice(5, 10)})
+
+    def test_projection_anchored_bundle_can_match_without_centres_or_slices(self):
+        request = build_exchange_request(
+            "j_tensor",
+            {
+                "input_format": "wannier",
+                "efermi": 0.0,
+                "kmesh": (2, 2, 2),
+                "mag_atoms": [0, 1],
+                "spinor_hr": "model_hr.dat",
+                "win": "model.win",
+                "groupby": "orbital",
+                "u_dis_layout": "compact-outer-window",
+                **_projection_anchored_bundle(),
+            },
+            prefix="w",
+            savedir="save",
+        )
+
+        self.assertEqual(request.slices, ())
+        self.assertIsNone(request.files.centres)
+        self.assertEqual(request.files.amn, "model.amn")
+        self.assertEqual(request.files.eig, "model.eig")
+        self.assertEqual(request.files.spn, "model.spn")
+        self.assertEqual(request.files.u_mat, "model_u.mat")
+        self.assertEqual(request.files.u_dis_mat, "model_u_dis.mat")
+        self.assertEqual(request.options["u_dis_layout"], "compact_outer_window")
+
+        _module, _function, namespace = build_namespace(request)
+        self.assertEqual(namespace.slices, "")
+        self.assertEqual(namespace.amn, "model.amn")
+        self.assertEqual(namespace.eig, "model.eig")
+        self.assertEqual(namespace.spn, "model.spn")
+        self.assertEqual(namespace.u_mat, "model_u.mat")
+        self.assertEqual(namespace.u_dis_mat, "model_u_dis.mat")
+        self.assertEqual(namespace.spin_operator, "auto")
+        self.assertEqual(namespace.u_dis_layout, "compact_outer_window")
+
+    def test_projection_anchored_bundle_is_all_or_nothing(self):
+        base = {
+            "input_format": "wannier",
+            "efermi": 0.0,
+            "kmesh": (1, 1, 1),
+            "mag_atoms": [0],
+            "spinor_hr": "model_hr.dat",
+            "win": "model.win",
+            "groupby": "orbital",
+            "u_dis_layout": "global_bands",
+            **_projection_anchored_bundle(),
+        }
+        for missing in _projection_anchored_bundle():
+            partial = dict(base)
+            partial.pop(missing)
+            with (
+                self.subTest(missing=missing),
+                self.assertRaisesRegex(
+                    ExchangeInputError,
+                    rf"projection-anchored spin bundle.*missing.*{missing}",
+                ),
+            ):
+                build_exchange_request(
+                    "j_tensor",
+                    partial,
+                    prefix="w",
+                    savedir="save",
+                )
+
+    def test_projection_anchored_bundle_has_a_narrow_mode_contract(self):
+        bundle = _projection_anchored_bundle()
+        common = {
+            "efermi": 0.0,
+            "kmesh": (1, 1, 1),
+            "mag_atoms": [0],
+            "slices": "0:0:2",
+            "u_dis_layout": "global_bands",
+            **bundle,
+        }
+        invalid_cases = (
+            (
+                "j",
+                {
+                    **common,
+                    "input_format": "wannier",
+                    "up_hr": "up_hr.dat",
+                    "dn_hr": "dn_hr.dat",
+                    "win": "model.win",
+                },
+            ),
+            (
+                "j_tensor",
+                {
+                    **common,
+                    "input_format": "epr",
+                    "epr_up": "up.h5",
+                    "epr_dn": "dn.h5",
+                    "spinor_hr": "model_hr.dat",
+                    "win": "model.win",
+                    "groupby": "orbital",
+                },
+            ),
+            (
+                "j_tensor",
+                {
+                    **common,
+                    "input_format": "wannier",
+                    "spinor_hr": "model_hr.dat",
+                    "groupby": "orbital",
+                },
+            ),
+            (
+                "j_tensor",
+                {
+                    **common,
+                    "input_format": "wannier",
+                    "up_hr": "up_hr.dat",
+                    "dn_hr": "dn_hr.dat",
+                    "win": "model.win",
+                },
+            ),
+        )
+        for calculation, parameters in invalid_cases:
+            with (
+                self.subTest(calculation=calculation, parameters=parameters),
+                self.assertRaisesRegex(
+                    ExchangeInputError,
+                    "valid only for Wannier tensor J with spinor_hr and an explicit win",
+                ),
+            ):
+                build_exchange_request(
+                    calculation,
+                    parameters,
+                    prefix="w",
+                    savedir="save",
+                )
+
+    def test_projection_anchored_operator_and_layout_dependencies(self):
+        spinor = {
+            "input_format": "wannier",
+            "efermi": 0.0,
+            "kmesh": (1, 1, 1),
+            "mag_atoms": [0],
+            "slices": "0:0:2",
+            "spinor_hr": "model_hr.dat",
+            "win": "model.win",
+            "groupby": "orbital",
+        }
+        complete = {
+            **{key: value for key, value in spinor.items() if key != "slices"},
+            **_projection_anchored_bundle(),
+        }
+
+        with self.assertRaisesRegex(
+            ExchangeInputError, "auto.*cannot certify.*orbital-partner gauge"
+        ):
+            build_exchange_request(
+                "j_tensor", spinor, prefix="w", savedir="save"
+            )
+
+        with self.assertRaisesRegex(ExchangeInputError, "u_dis_layout is required"):
+            build_exchange_request(
+                "j_tensor", complete, prefix="w", savedir="save"
+            )
+        with self.assertRaisesRegex(ExchangeInputError, "spin_operator='pauli'"):
+            build_exchange_request(
+                "j_tensor",
+                {
+                    **complete,
+                    "spin_operator": "pauli",
+                    "u_dis_layout": "global_bands",
+                },
+                prefix="w",
+                savedir="save",
+            )
+        with self.assertRaisesRegex(ExchangeInputError, "requires the complete"):
+            build_exchange_request(
+                "j_tensor",
+                {**spinor, "spin_operator": "spn"},
+                prefix="w",
+                savedir="save",
+            )
+        with self.assertRaisesRegex(ExchangeInputError, "valid only with the complete"):
+            build_exchange_request(
+                "j_tensor",
+                {
+                    **spinor,
+                    "spin_operator": "pauli",
+                    "u_dis_layout": "global_bands",
+                },
+                prefix="w",
+                savedir="save",
+            )
+
+        explicit_spn = build_exchange_request(
+            "j_tensor",
+            {
+                **complete,
+                "spin_operator": "spn",
+                "u_dis_layout": "global-bands",
+            },
+            prefix="w",
+            savedir="save",
+        )
+        self.assertEqual(explicit_spn.options["spin_operator"], "spn")
+        self.assertEqual(explicit_spn.options["u_dis_layout"], "global_bands")
+
+        with self.assertRaisesRegex(ExchangeInputError, "tensor_kernel='tb2j'"):
+            build_exchange_request(
+                "j_tensor",
+                {
+                    **complete,
+                    "spin_operator": "spn",
+                    "u_dis_layout": "global_bands",
+                    "tensor_kernel": "direct",
+                },
+                prefix="w",
+                savedir="save",
+            )
+
+        with self.assertRaisesRegex(ExchangeInputError, "omit slices"):
+            build_exchange_request(
+                "j_tensor",
+                {
+                    **explicit_spn.files.__dict__,
+                    "input_format": "wannier",
+                    "efermi": 0.0,
+                    "kmesh": (1, 1, 1),
+                    "mag_atoms": [0],
+                    "groupby": "orbital",
+                    "spin_operator": "spn",
+                    "u_dis_layout": "global_bands",
+                    "slices": "0:0:2",
+                },
+                prefix="w",
+                savedir="save",
+            )
+
+        with self.assertRaisesRegex(ExchangeInputError, "omit centres"):
+            build_exchange_request(
+                "j_tensor",
+                {
+                    **complete,
+                    "u_dis_layout": "global_bands",
+                    "centres": "model_centres.xyz",
+                },
+                prefix="w",
+                savedir="save",
+            )
+        for ignored_name, ignored_value in (
+            ("centre_tolerance_ang", 0.2),
+            ("spin_direction", (0.0, 1.0, 0.0)),
+        ):
+            with (
+                self.subTest(ignored_name=ignored_name),
+                self.assertRaisesRegex(
+                    ExchangeInputError, "infers its frame.*omit"
+                ),
+            ):
+                build_exchange_request(
+                    "j_tensor",
+                    {
+                        **complete,
+                        "u_dis_layout": "global_bands",
+                        ignored_name: ignored_value,
+                    },
+                    prefix="w",
+                    savedir="save",
+                )
+
+    def test_projection_anchored_tolerances_are_finite_and_positive(self):
+        base = {
+            "input_format": "wannier",
+            "efermi": 0.0,
+            "kmesh": (1, 1, 1),
+            "mag_atoms": [0],
+            "slices": "0:0:2",
+            "spinor_hr": "model_hr.dat",
+            "win": "model.win",
+            "groupby": "orbital",
+        }
+        anchored = {
+            **{key: value for key, value in base.items() if key != "slices"},
+            **_projection_anchored_bundle(),
+            "u_dis_layout": "global_bands",
+        }
+        names = (
+            "projection_rank_tolerance",
+            "spin_projection_tolerance",
+            "hamiltonian_tolerance_ev",
+            "noncollinear_tolerance",
+            "intersite_xc_tolerance",
+        )
+        for name in names:
+            request = build_exchange_request(
+                "j_tensor",
+                {**anchored, name: "0.125"},
+                prefix="w",
+                savedir="save",
+            )
+            self.assertEqual(request.options[name], 0.125)
+            for invalid in (0.0, -0.1, float("inf"), float("nan")):
+                with (
+                    self.subTest(name=name, invalid=invalid),
+                    self.assertRaisesRegex(ExchangeInputError, name),
+                ):
+                    build_exchange_request(
+                        "j_tensor",
+                        {**anchored, name: invalid},
+                        prefix="w",
+                        savedir="save",
+                    )
+
+        with self.assertRaisesRegex(
+            ExchangeInputError, "tolerance.*complete projection-anchored"
+        ):
+            build_exchange_request(
+                "j_tensor",
+                {
+                    **base,
+                    "spin_operator": "pauli",
+                    "projection_rank_tolerance": 1.0e-3,
+                },
+                prefix="w",
+                savedir="save",
+            )
 
     def test_automatic_centre_matching_has_a_narrow_input_contract(self):
         automatic = {
@@ -254,6 +592,7 @@ class ExchangeConfigTests(unittest.TestCase):
             "win": "model.win",
             "centres": "model_centres.xyz",
             "groupby": "orbital",
+            "spin_operator": "pauli",
         }
         request = build_exchange_request(
             "j_tensor",

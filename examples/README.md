@@ -14,14 +14,30 @@ integration setting with values for the calculation at hand.
 | `exchange_dj_epr.in` | scalar dJ/du from EPR EPC | `sample.dj.h5`, `.txt`, `.all_bonds.tsv` |
 | `exchange_dj_tensor_epr.in` | tensor dJ/du from EPR EPC | `sample.dj_tensor.h5` |
 | `exchange_j_tensor_wannier_soc.in` | tensor J from spinor HR plus an optional atomic-SOC card | `sample_soc.j_tensor.h5`, `.txt` |
+| `exchange_j_tensor_wannier_spn.in` | projection-anchored tensor J from spinor HR and physical SPN | `sample_spn.j_tensor.h5`, `.txt` |
 
 The four EPR templates intentionally share `prefix='sample'`, so their
 distinct mode-derived filenames can coexist in one `sample.save` directory.
 The listed `kmesh`, `qmesh`, `empoints`, atoms, explicit EPR slices, and SOC
-strengths are only parseable examples. The spinor Wannier template instead
-demonstrates automatic `win` + `centres` assignment. In particular, dJ requires EPR files containing
-electron-phonon data, and its explicit `qmesh` must agree with EPR `qc_dim` and
-divide the electronic `kmesh`.
+strengths are only parseable examples. The SOC spinor Wannier template
+demonstrates automatic `win` + `centres` assignment. The SPN template uses the
+all-or-nothing AMN/EIG/SPN/U/U_dis bundle instead: `win` + AMN selects the
+magnetic projection frame, so both `slices` and `centres` are omitted. Its
+`kmesh` must be replaced by the native U/AMN/SPN grid dimensions; coordinates,
+ordering, and any uniform shift are read from U. This path does not interpolate
+a denser exchange mesh. In particular,
+dJ requires EPR files containing electron-phonon data, and its explicit
+`qmesh` must agree with EPR `qc_dim` and divide the electronic `kmesh`.
+
+The SPN template sets `spin_operator='spn'` explicitly. `auto` selects the same
+projection-anchored route when the complete bundle is present. A raw
+`spinor_hr` without that bundle must explicitly select `spin_operator='pauli'`,
+and only when its rows are independently known to share one orbital-spin
+product gauge. Choose
+`u_dis_layout='global_bands'` for globally indexed rows or
+`'compact_outer_window'` for an old packed U_dis file. Keep
+`collinear_override=.false.` for SOC data; enable it only for a Hamiltonian
+known independently to be no-SOC and collinear.
 
 All exchange templates use `execution='auto'` and `workers_per_rank=1` in
 `&parallel`, which is the safe portable MPI default. Scalar dJ may instead use

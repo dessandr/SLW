@@ -932,7 +932,13 @@ def _ordered_unique(seq):
     return out
 
 
-def _decompose_tb2j_pair(val, val_m, *, collinear_override=False):
+def _decompose_tb2j_pair(
+    val,
+    val_m,
+    *,
+    collinear_override=False,
+    collinear_direction=None,
+):
     """Decompose TB2J A tensors into scalar J, Gamma, DMI, and debug Aab tensor."""
     val = np.asarray(val, dtype=np.complex128)
     val_m = np.asarray(val_m, dtype=np.complex128)
@@ -941,7 +947,19 @@ def _decompose_tb2j_pair(val, val_m, *, collinear_override=False):
     ms = 0.5 * (m_raw + m_raw.T)
     if collinear_override:
         ms = np.array(ms, dtype=np.float64, copy=True)
-        ms[2, 2] = 0.5 * (ms[0, 0] + ms[1, 1])
+        if collinear_direction is None:
+            direction = np.asarray([0.0, 0.0, 1.0], dtype=np.float64)
+        else:
+            direction = np.asarray(collinear_direction, dtype=np.float64)
+            if direction.shape != (3,) or not np.all(np.isfinite(direction)):
+                raise ValueError("collinear_direction must be a finite 3-vector")
+            norm = float(np.linalg.norm(direction))
+            if norm <= 0.0:
+                raise ValueError("collinear_direction must be nonzero")
+            direction = direction / norm
+        longitudinal = float(direction @ ms @ direction)
+        transverse = 0.5 * (float(np.trace(ms)) - longitudinal)
+        ms += (transverse - longitudinal) * np.outer(direction, direction)
 
     jiso_tb2j = float(np.imag(val[0, 0] - val[1, 1] - val[2, 2] - val[3, 3]))
     gamma = ms - np.eye(3, dtype=np.float64) * (float(np.trace(ms)) / 3.0)
@@ -1339,7 +1357,18 @@ def _write_tensor_h5(path, args, labels, pair_meta, tensor, trace_acc, orbits, e
                 grp.create_dataset(key, data=np.asarray(val))
 
 
-def _write_tensor_text(path, labels, pair_meta, tensor, orbits, axes, kernel, extra=None):
+def _write_tensor_text(
+    path,
+    labels,
+    pair_meta,
+    tensor,
+    orbits,
+    axes,
+    kernel,
+    extra=None,
+    *,
+    source_label="EPR spinor H(k)",
+):
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     orbit_label_by_key = _orbit_label_map(pair_meta, orbits)
 
@@ -1357,7 +1386,7 @@ def _write_tensor_text(path, labels, pair_meta, tensor, orbits, axes, kernel, ex
             f.write("  " + " ".join(f"{float(x):+.10e}" for x in row) + "\n")
 
     with open(path, "w") as f:
-        f.write("# Exchange Tensor J^{ab}(R) Results - EPR spinor H(k)\n")
+        f.write(f"# Exchange Tensor J^{{ab}}(R) Results - {source_label}\n")
         f.write(f"# kernel = {kernel}, unit = meV\n\n")
         f.write("# Tensor decomposition convention\n")
         f.write("#   J_full = J_iso*I + Gamma + J_DMI\n")

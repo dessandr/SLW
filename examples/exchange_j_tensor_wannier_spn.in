@@ -1,0 +1,49 @@
+! Gauge-aware tensor J from a spinor Wannier90 calculation.
+! The five AMN/EIG/SPN/U/U_dis files are one all-or-nothing bundle.  kmesh
+! gives the native Wannier90 grid dimensions; coordinates/order come from U.
+! Magnetic orbitals are selected from win + AMN, so omit slices and centres.
+&control
+  calculation = 'j',
+  prefix = 'sample_spn',
+  outdir = './slw-tmp',
+  verbosity = 'high'
+/
+
+&parallel
+  execution = 'auto',
+  workers_per_rank = 1,
+  threads_per_worker = 1
+/
+
+&exchange
+  input_format = 'wannier',
+  ltensor = .true.,
+  tensor_kernel = 'tb2j',
+  spinor_hr = './input/sample_spinor_hr.dat',
+  groupby = 'orbital',
+  win = './input/sample.win',
+  amn = './input/sample.amn',
+  eig = './input/sample.eig',
+  spn = './input/sample.spn',
+  u_mat = './input/sample_u.mat',
+  u_dis_mat = './input/sample_u_dis.mat',
+  spin_operator = 'spn',
+  u_dis_layout = 'global_bands',
+  hr_unit = 'ev',
+  apply_degeneracy = .true.,
+  efermi = 0.0,
+  kmesh = 4, 4, 4,
+  mag_atoms = 0, 1,
+  mag_atoms_base = 0,
+  axes = 'xyz',
+  n_shells = 1,
+  all_bonds = .true.,
+  integrator = 'contour',
+  empoints = 64,
+  collinear_override = .false.
+/
+
+! Use u_dis_layout='compact_outer_window' only for a compact old-style U_dis;
+! that layout also requires dis_win_min and dis_win_max in sample.win.
+! Keep collinear_override=.false. for SOC calculations.  It may be enabled only
+! when the supplied Hamiltonian is independently known to be no-SOC collinear.

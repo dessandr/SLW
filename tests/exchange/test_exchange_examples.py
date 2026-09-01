@@ -19,6 +19,7 @@ EXAMPLE_ROOT = Path(__file__).resolve().parents[2] / "examples"
         ("exchange_dj_epr.in", "dj", False, "epr"),
         ("exchange_dj_tensor_epr.in", "dj", True, "epr"),
         ("exchange_j_tensor_wannier_soc.in", "j", True, "wannier"),
+        ("exchange_j_tensor_wannier_spn.in", "j", True, "wannier"),
     ),
 )
 def test_exchange_examples_validate_without_scientific_io(
@@ -58,6 +59,19 @@ def test_exchange_examples_validate_without_scientific_io(
             "Ligand-p",
             "Mag1-d",
         )
+    elif filename.endswith("wannier_spn.in"):
+        assert request.groupby is not None
+        assert request.groupby.value == "orbital"
+        assert request.slices == ()
+        assert request.files.win is not None
+        assert request.files.centres is None
+        assert all(
+            getattr(request.files, name) is not None
+            for name in ("amn", "eig", "spn", "u_mat", "u_dis_mat")
+        )
+        assert request.options["spin_operator"] == "spn"
+        assert request.options["u_dis_layout"] == "global_bands"
+        assert request.soc is None
     else:
         assert request.soc is None
 
@@ -69,4 +83,5 @@ def test_exchange_example_inventory_is_explicit() -> None:
         "exchange_dj_epr.in",
         "exchange_dj_tensor_epr.in",
         "exchange_j_tensor_wannier_soc.in",
+        "exchange_j_tensor_wannier_spn.in",
     }

@@ -325,6 +325,7 @@ end atoms_frac
         up_hr=None,
         dn_hr=None,
         spinor_hr=str(hr_path),
+        spin_operator="pauli",
         groupby="spin",
         centres=str(centres),
         centre_tolerance_ang=0.1,

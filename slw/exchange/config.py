@@ -37,7 +37,20 @@ _FILE_KEYS = {
     "spinor_hr",
     "win",
     "centres",
+    "amn",
+    "eig",
+    "spn",
+    "u_mat",
+    "u_dis_mat",
 }
+
+_PROJECTION_ANCHORED_FILE_KEYS = (
+    "amn",
+    "eig",
+    "spn",
+    "u_mat",
+    "u_dis_mat",
+)
 
 _J_SCALAR_EPR_OPTIONS = {
     "atom_labels",
@@ -112,6 +125,13 @@ _J_TENSOR_WANNIER_OPTIONS = {
     "nproc",
     "collinear_override",
     "spin_magnitude",
+    "spin_operator",
+    "u_dis_layout",
+    "projection_rank_tolerance",
+    "spin_projection_tolerance",
+    "hamiltonian_tolerance_ev",
+    "noncollinear_tolerance",
+    "intersite_xc_tolerance",
 }
 _J_SCALAR_WANNIER_OPTIONS = {
     "hr_unit",
@@ -246,6 +266,16 @@ _ADVANCED_OPTION_SPECS: dict[str, _OptionSpec] = {
     "centre_tolerance_ang": _OptionSpec(
         "float", minimum=0.0, strict_minimum=True, allow_none=True
     ),
+    **{
+        name: _OptionSpec("float", minimum=0.0, strict_minimum=True)
+        for name in (
+            "projection_rank_tolerance",
+            "spin_projection_tolerance",
+            "hamiltonian_tolerance_ev",
+            "noncollinear_tolerance",
+            "intersite_xc_tolerance",
+        )
+    },
     "d_max": _OptionSpec("float", minimum=0.0, strict_minimum=True),
     "spin_magnitude": _OptionSpec("float", minimum=0.0, strict_minimum=True),
     "symprec": _OptionSpec("float", minimum=0.0, strict_minimum=True),
@@ -267,6 +297,12 @@ _ADVANCED_OPTION_SPECS: dict[str, _OptionSpec] = {
     "g_transform": _OptionSpec("choice", choices=("kq", "k_only_rp")),
     "g_kernel": _OptionSpec("choice", choices=("direct", "spectral")),
     "rotation_mode": _OptionSpec("choice", choices=("none",)),
+    "spin_operator": _OptionSpec(
+        "choice", choices=("auto", "pauli", "spn")
+    ),
+    "u_dis_layout": _OptionSpec(
+        "choice", choices=("global_bands", "compact_outer_window")
+    ),
     "orbit_symmetry": _OptionSpec("choice", choices=("report", "project", "fail")),
     "covariant_symmetry": _OptionSpec(
         "choice", choices=("none", "report", "project", "fail")
@@ -749,6 +785,41 @@ def _input_files(
     source: ExchangeSource,
 ) -> ExchangeFiles:
     files = ExchangeFiles(**{name: _optional_path(values, name) for name in _FILE_KEYS})
+    anchored_provided = tuple(
+        name
+        for name in _PROJECTION_ANCHORED_FILE_KEYS
+        if getattr(files, name) is not None
+    )
+    if anchored_provided and len(anchored_provided) != len(
+        _PROJECTION_ANCHORED_FILE_KEYS
+    ):
+        missing = tuple(
+            name
+            for name in _PROJECTION_ANCHORED_FILE_KEYS
+            if getattr(files, name) is None
+        )
+        raise ExchangeInputError(
+            "projection-anchored spin bundle must provide all of "
+            + ", ".join(_PROJECTION_ANCHORED_FILE_KEYS)
+            + "; missing "
+            + ", ".join(missing)
+        )
+    anchored_complete = bool(anchored_provided)
+    if anchored_complete and not (
+        calculation is ExchangeCalculation.J
+        and ltensor
+        and source is ExchangeSource.WANNIER
+        and files.spinor_hr is not None
+        and files.win is not None
+    ):
+        raise ExchangeInputError(
+            "projection-anchored spin bundle is valid only for Wannier "
+            "tensor J with spinor_hr and an explicit win file"
+        )
+    if anchored_complete and files.centres is not None:
+        raise ExchangeInputError(
+            "projection-anchored magnetic orbitals come from WIN+AMN; omit centres"
+        )
     epr_any = files.epr_up is not None or files.epr_dn is not None
     collinear_any = files.up_hr is not None or files.dn_hr is not None
     collinear_complete = files.up_hr is not None and files.dn_hr is not None
@@ -880,6 +951,75 @@ def _validate_advanced_combinations(
         if ref_up != ref_dn:
             raise ExchangeInputError("ref_epr_up and ref_epr_dn must be provided together")
 
+    anchored_complete = all(
+        getattr(files, name) is not None
+        for name in _PROJECTION_ANCHORED_FILE_KEYS
+    )
+    spin_operator = values.get("spin_operator", "auto")
+    u_dis_layout = values.get("u_dis_layout")
+    if anchored_complete and spin_operator == "pauli":
+        raise ExchangeInputError(
+            "spin_operator='pauli' cannot be used with the "
+            "projection-anchored spin bundle"
+        )
+    if spin_operator == "spn" and not anchored_complete:
+        raise ExchangeInputError(
+            "spin_operator='spn' requires the complete projection-anchored "
+            "spin bundle"
+        )
+    if (
+        calculation is ExchangeCalculation.J
+        and ltensor
+        and source is ExchangeSource.WANNIER
+        and files.spinor_hr is not None
+        and not anchored_complete
+        and spin_operator == "auto"
+    ):
+        raise ExchangeInputError(
+            "spin_operator='auto' cannot certify the orbital-partner gauge of "
+            "a bare spinor_hr; provide the complete projection-anchored bundle "
+            "or explicitly select spin_operator='pauli' for an independently "
+            "verified orbital-spin product basis"
+        )
+    if anchored_complete and u_dis_layout is None:
+        raise ExchangeInputError(
+            "u_dis_layout is required with the projection-anchored spin bundle"
+        )
+    if not anchored_complete and u_dis_layout is not None:
+        raise ExchangeInputError(
+            "u_dis_layout is valid only with the complete projection-anchored "
+            "spin bundle"
+        )
+    projected_only_tolerances = (
+        "projection_rank_tolerance",
+        "spin_projection_tolerance",
+        "hamiltonian_tolerance_ev",
+        "noncollinear_tolerance",
+        "intersite_xc_tolerance",
+    )
+    unused_projected_options = tuple(
+        name
+        for name in projected_only_tolerances
+        if name in values and not anchored_complete
+    )
+    if unused_projected_options:
+        raise ExchangeInputError(
+            "projection-frame tolerance(s) require the complete "
+            "projection-anchored spin bundle: "
+            + ", ".join(unused_projected_options)
+        )
+    ignored_projection_options = tuple(
+        name
+        for name in ("centre_tolerance_ang", "spin_direction")
+        if name in values and anchored_complete
+    )
+    if ignored_projection_options:
+        raise ExchangeInputError(
+            "projection-anchored spin exchange infers its frame without "
+            + ", ".join(ignored_projection_options)
+            + "; omit these option(s)"
+        )
+
     # Spinor layout and SOC-card dependencies are normalized before the
     # advanced numerical options reach this compatibility bridge.
 
@@ -998,17 +1138,23 @@ def build_exchange_request(
         ltensor=ltensor,
         source=source,
     )
-    automatic_centre_matching = (
+    automatic_subspace_matching = (
         mode is ExchangeCalculation.J
         and ltensor
         and source is ExchangeSource.WANNIER
         and files.spinor_hr is not None
         and files.win is not None
-        and files.centres is not None
+        and (
+            files.centres is not None
+            or all(
+                getattr(files, name) is not None
+                for name in _PROJECTION_ANCHORED_FILE_KEYS
+            )
+        )
     )
     slices = _orbital_slices(
         values,
-        allow_automatic=automatic_centre_matching,
+        allow_automatic=automatic_subspace_matching,
     )
     _validate_site_contract(
         mag_atoms,
@@ -1019,6 +1165,23 @@ def build_exchange_request(
     )
     groupby = _spinor_groupby(values, files)
     soc = _atomic_soc(values, files, ltensor=ltensor)
+    anchored_complete = all(
+        getattr(files, name) is not None
+        for name in _PROJECTION_ANCHORED_FILE_KEYS
+    )
+    if anchored_complete and tensor_kernel is not TensorKernel.TB2J:
+        raise ExchangeInputError(
+            "projection-anchored spin exchange currently requires "
+            "tensor_kernel='tb2j'"
+        )
+    if anchored_complete and soc is not None:
+        raise ExchangeInputError(
+            "projection-anchored spin input does not accept an additional SOC card"
+        )
+    if anchored_complete and slices:
+        raise ExchangeInputError(
+            "projection-anchored magnetic orbitals come from WIN+AMN; omit slices"
+        )
     mode_name = f"{mode.value}{'_tensor' if ltensor else ''}"
     output = _output(prefix, savedir, values, mode_name)
 

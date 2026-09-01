@@ -258,6 +258,7 @@ class ExchangeEngineTests(unittest.TestCase):
             "ltensor": True,
             "spinor_hr": "spinor_hr.dat",
             "groupby": "orbital",
+            "spin_operator": "pauli",
             "win": "model.win",
             "efermi": 0.0,
             "kmesh": [1, 1, 1],
@@ -278,6 +279,13 @@ class ExchangeEngineTests(unittest.TestCase):
             namespace.soc_manifolds,
             ({"selector": "Te-p", "lambda_ev": 0.5},),
         )
+        self.assertEqual(namespace.spin_operator, "pauli")
+        self.assertIsNone(namespace.u_dis_layout)
+        self.assertEqual(namespace.projection_rank_tolerance, 1.0e-4)
+        self.assertEqual(namespace.spin_projection_tolerance, 0.4)
+        self.assertEqual(namespace.hamiltonian_tolerance_ev, 1.0e-4)
+        self.assertEqual(namespace.noncollinear_tolerance, 0.25)
+        self.assertEqual(namespace.intersite_xc_tolerance, 0.1)
         self.assertNotIn("groupby", request.options)
 
     def test_exchange_dry_run_uses_ltensor_and_touches_no_inputs(self):

@@ -100,6 +100,7 @@ def _run_groupby(root: Path, win: Path, groupby: str) -> dict[str, np.ndarray]:
             "win": str(win),
             "centres": str(centres_path),
             "groupby": groupby,
+            "spin_operator": "pauli",
             "centre_tolerance_ang": 0.2,
             "efermi": 0.0,
             "kmesh": (1, 1, 1),
