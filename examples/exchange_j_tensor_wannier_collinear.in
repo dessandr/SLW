@@ -22,6 +22,7 @@
 
   up_hr = './input/sample_up_hr.dat',
   dn_hr = './input/sample_dn_hr.dat',
+  ! Standard sample_up/dn_wsvec.dat siblings are used automatically.
   win = './input/sample.win',
 
   hr_unit = 'ev',
@@ -36,6 +37,7 @@
   spin_direction = 0.0, 0.0, 1.0,
   n_shells = 1,
   all_bonds = .true.,
+  orbit_grouping = 'spglib',
   integrator = 'contour',
   ! Small syntax-test value; converge this for production.
   empoints = 64

@@ -35,6 +35,9 @@ _FILE_KEYS = {
     "up_hr",
     "dn_hr",
     "spinor_hr",
+    "wsvec",
+    "wsvec_up",
+    "wsvec_dn",
     "win",
     "centres",
     "amn",
@@ -110,6 +113,7 @@ _J_TENSOR_WANNIER_OPTIONS = {
     "ref_epr_dn",
     "ref_hr_unit",
     "apply_degeneracy",
+    "use_wsvec",
     "axes",
     "spin_direction",
     "n_shells",
@@ -118,6 +122,8 @@ _J_TENSOR_WANNIER_OPTIONS = {
     "canonical_bonds",
     "nn_only",
     "orbit_grouping",
+    "symprec",
+    "angle_tolerance",
     "integrator",
     "emin",
     "empoints",
@@ -136,6 +142,7 @@ _J_TENSOR_WANNIER_OPTIONS = {
 _J_SCALAR_WANNIER_OPTIONS = {
     "hr_unit",
     "apply_degeneracy",
+    "use_wsvec",
     "axes",
     "spin_direction",
     "n_shells",
@@ -144,6 +151,8 @@ _J_SCALAR_WANNIER_OPTIONS = {
     "canonical_bonds",
     "nn_only",
     "orbit_grouping",
+    "symprec",
+    "angle_tolerance",
     "integrator",
     "emin",
     "empoints",
@@ -241,6 +250,7 @@ _ADVANCED_OPTION_SPECS: dict[str, _OptionSpec] = {
             "no_symmetry",
             "no_symmetry_orbits",
             "onsite_deriv_projector",
+            "use_wsvec",
         )
     },
     **{name: _OptionSpec("str") for name in ("atom_labels",)},
@@ -356,7 +366,7 @@ def _mode_option_specs(
 
     orbit_groupings: tuple[str, ...]
     if source is ExchangeSource.WANNIER:
-        orbit_groupings = ("none", "distance", "shell")
+        orbit_groupings = ("spglib", "none", "distance", "shell")
     else:
         orbit_groupings = ("spglib", "shell")
     specs["orbit_grouping"] = _OptionSpec("choice", choices=orbit_groupings)
@@ -823,12 +833,17 @@ def _input_files(
     epr_any = files.epr_up is not None or files.epr_dn is not None
     collinear_any = files.up_hr is not None or files.dn_hr is not None
     collinear_complete = files.up_hr is not None and files.dn_hr is not None
+    wsvec_any = any(
+        value is not None for value in (files.wsvec, files.wsvec_up, files.wsvec_dn)
+    )
 
     if source is ExchangeSource.EPR:
         if files.epr_up is None or files.epr_dn is None:
             raise ExchangeInputError("input_format='epr' requires both epr_up and epr_dn")
         if collinear_any:
             raise ExchangeInputError("EPR input cannot also define up_hr or dn_hr")
+        if wsvec_any:
+            raise ExchangeInputError("EPR input does not accept Wannier wsvec files")
         if calculation is ExchangeCalculation.J and files.spinor_hr is not None:
             raise ExchangeInputError("EPR J calculations do not accept spinor_hr")
         if calculation is ExchangeCalculation.J:
@@ -859,6 +874,22 @@ def _input_files(
                 raise ExchangeInputError("scalar Wannier J requires both up_hr and dn_hr")
         if files.centres is not None and files.spinor_hr is None:
             raise ExchangeInputError("Wannier centres requires spinor_hr")
+        if files.wsvec is not None and files.spinor_hr is None:
+            raise ExchangeInputError("wsvec requires spinor_hr")
+        if files.spinor_hr is not None and (
+            files.wsvec_up is not None or files.wsvec_dn is not None
+        ):
+            raise ExchangeInputError(
+                "spinor_hr accepts wsvec, not wsvec_up/wsvec_dn"
+            )
+        if collinear_complete and files.wsvec is not None:
+            raise ExchangeInputError(
+                "up_hr/dn_hr input accepts wsvec_up/wsvec_dn, not wsvec"
+            )
+        if (files.wsvec_up is None) != (files.wsvec_dn is None):
+            raise ExchangeInputError(
+                "explicit collinear MDRS input requires both wsvec_up and wsvec_dn"
+            )
     return files
 
 
@@ -950,6 +981,13 @@ def _validate_advanced_combinations(
         ref_dn = _has_value(values.get("ref_epr_dn"))
         if ref_up != ref_dn:
             raise ExchangeInputError("ref_epr_up and ref_epr_dn must be provided together")
+        if values.get("use_wsvec") is False and any(
+            getattr(files, name) is not None
+            for name in ("wsvec", "wsvec_up", "wsvec_dn")
+        ):
+            raise ExchangeInputError(
+                "explicit wsvec files conflict with use_wsvec=false"
+            )
 
     anchored_complete = all(
         getattr(files, name) is not None

@@ -167,6 +167,72 @@ class ExchangeConfigTests(unittest.TestCase):
                 savedir="save",
             )
 
+    def test_wannier_wsvec_contract_and_crystal_orbit_defaults(self):
+        base = {
+            "input_format": "wannier",
+            "efermi": 0.0,
+            "kmesh": (2, 2, 2),
+            "mag_atoms": [0, 1],
+            "slices": "0:0:2,1:2:4",
+            "win": "model.win",
+        }
+        spinor = build_exchange_request(
+            "j_tensor",
+            {
+                **base,
+                "spinor_hr": "model_hr.dat",
+                "wsvec": "model_wsvec.dat",
+                "groupby": "orbital",
+            },
+            prefix="w",
+            savedir="save",
+        )
+        self.assertEqual(spinor.files.wsvec, "model_wsvec.dat")
+        _module, _function, namespace = build_namespace(spinor)
+        self.assertTrue(namespace.use_wsvec)
+        self.assertEqual(namespace.orbit_grouping, "spglib")
+
+        collinear = build_exchange_request(
+            "j_tensor",
+            {
+                **base,
+                "up_hr": "up_hr.dat",
+                "dn_hr": "dn_hr.dat",
+                "wsvec_up": "up_wsvec.dat",
+                "wsvec_dn": "dn_wsvec.dat",
+            },
+            prefix="w",
+            savedir="save",
+        )
+        self.assertEqual(collinear.files.wsvec_up, "up_wsvec.dat")
+        self.assertEqual(collinear.files.wsvec_dn, "dn_wsvec.dat")
+
+        with self.assertRaisesRegex(ExchangeInputError, "requires both"):
+            build_exchange_request(
+                "j_tensor",
+                {
+                    **base,
+                    "up_hr": "up_hr.dat",
+                    "dn_hr": "dn_hr.dat",
+                    "wsvec_up": "up_wsvec.dat",
+                },
+                prefix="w",
+                savedir="save",
+            )
+        with self.assertRaisesRegex(ExchangeInputError, "conflict"):
+            build_exchange_request(
+                "j_tensor",
+                {
+                    **base,
+                    "spinor_hr": "model_hr.dat",
+                    "wsvec": "model_wsvec.dat",
+                    "use_wsvec": False,
+                    "groupby": "spin",
+                },
+                prefix="w",
+                savedir="save",
+            )
+
     def test_spinor_wannier_tensor_can_match_centres_without_slices(self):
         automatic = {
             "input_format": "wannier",

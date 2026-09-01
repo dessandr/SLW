@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import os
 import time
+from pathlib import Path
 
 import h5py
 import numpy as np
@@ -18,15 +19,17 @@ import numpy as np
 from slw.core.structure import (
     atom_names_from_structure,
     find_nearest_neighbours,
+    get_symmetry_orbits,
     read_wannier90_structure,
     resolve_wannier_structure,
 )
-from slw.core.wannier_io import read_wannier_hr
+from slw.core.wannier_io import read_wannier_hr, remap_wannier_hr_with_wsvec
 from slw.exchange.kernels.eph_provider import _unit_scale_to_ev
 from slw.exchange.kernels.epr import _build_hk_from_epr, _full_k_mesh, _load_slices
 from slw.exchange.kernels.j_epr import (
     _compute_j_direct,
     _find_nearest_neighbours_from_epr,
+    _orbit_label_map,
 )
 from slw.exchange.kernels.j_tensor_epr import (
     _apply_model_soc,
@@ -82,9 +85,32 @@ def _read_wannier_hr_compat(path):
     raise ValueError(f"Unexpected read_wannier_hr return length={len(parsed)} for {path}")
 
 
-def _build_hk_from_hr_map(hmap, kpts, *, apply_degeneracy=True, degens=None, unit_scale=1.0):
+def _build_hk_from_hr_map(
+    hmap,
+    kpts,
+    *,
+    apply_degeneracy=True,
+    degens=None,
+    unit_scale=1.0,
+    wsvec=None,
+    metadata=None,
+):
+    wsvec_info = None
+    if wsvec:
+        if degens is None:
+            raise ValueError("wsvec interpolation requires HR degeneracies")
+        hmap, wsvec_info = remap_wannier_hr_with_wsvec(
+            wsvec,
+            hmap,
+            degens,
+            apply_degeneracy=bool(apply_degeneracy),
+            unit_scale=float(unit_scale),
+        )
+        apply_degeneracy = False
+        unit_scale = 1.0
     keys = list(hmap.keys())
-    next(iter(hmap.values())).shape[0]
+    if not keys:
+        raise ValueError("Wannier Hamiltonian contains no R points")
     rvec = np.asarray(keys, dtype=np.float64)
     blocks = np.asarray([hmap[r] for r in keys], dtype=np.complex128)
     if apply_degeneracy:
@@ -94,10 +120,35 @@ def _build_hk_from_hr_map(hmap, kpts, *, apply_degeneracy=True, degens=None, uni
     blocks = blocks * float(unit_scale)
     phase = np.exp(2.0j * np.pi * (np.asarray(kpts, dtype=np.float64) @ rvec.T))
     hk = np.einsum("kr,rij->kij", phase, blocks, optimize=True)
+    if metadata is not None:
+        metadata.update(
+            {
+                "wsvec_applied": wsvec_info is not None,
+                "wsvec_path": "" if wsvec_info is None else wsvec_info.path,
+                "wsvec_matrix_elements": (
+                    0 if wsvec_info is None else wsvec_info.matrix_elements
+                ),
+                "wsvec_shifted_r_points": (
+                    0 if wsvec_info is None else wsvec_info.shifted_r_points
+                ),
+                "wsvec_max_multiplicity": (
+                    0 if wsvec_info is None else wsvec_info.max_multiplicity
+                ),
+            }
+        )
     return 0.5 * (hk + np.swapaxes(hk.conj(), 1, 2))
 
 
-def _load_hr_hk(up_hr, dn_hr, kpts, *, apply_degeneracy=True, hr_unit="ev"):
+def _load_hr_hk(
+    up_hr,
+    dn_hr,
+    kpts,
+    *,
+    apply_degeneracy=True,
+    hr_unit="ev",
+    wsvec_up=None,
+    wsvec_dn=None,
+):
     dim_up, deg_up, h_up = _read_wannier_hr_compat(up_hr)
     dim_dn, deg_dn, h_dn = _read_wannier_hr_compat(dn_hr)
     if dim_up != dim_dn:
@@ -107,10 +158,55 @@ def _load_hr_hk(up_hr, dn_hr, kpts, *, apply_degeneracy=True, hr_unit="ev"):
         missing_up = sorted(set(h_dn) - set(h_up))
         raise ValueError(f"R-vector mismatch: missing_dn={missing_dn[:5]} missing_up={missing_up[:5]}")
     scale = _unit_scale_to_ev(hr_unit)
+    meta_up = {}
+    meta_dn = {}
     return (
-        _build_hk_from_hr_map(h_up, kpts, apply_degeneracy=apply_degeneracy, degens=deg_up, unit_scale=scale),
-        _build_hk_from_hr_map(h_dn, kpts, apply_degeneracy=apply_degeneracy, degens=deg_dn, unit_scale=scale),
+        _build_hk_from_hr_map(
+            h_up,
+            kpts,
+            apply_degeneracy=apply_degeneracy,
+            degens=deg_up,
+            unit_scale=scale,
+            wsvec=wsvec_up,
+            metadata=meta_up,
+        ),
+        _build_hk_from_hr_map(
+            h_dn,
+            kpts,
+            apply_degeneracy=apply_degeneracy,
+            degens=deg_dn,
+            unit_scale=scale,
+            wsvec=wsvec_dn,
+            metadata=meta_dn,
+        ),
+        {"up": meta_up, "dn": meta_dn},
     )
+
+
+def _auto_wsvec_candidate(hr_path):
+    path = Path(hr_path)
+    suffix = "_hr.dat"
+    if not path.name.endswith(suffix):
+        return None
+    return path.with_name(path.name[: -len(suffix)] + "_wsvec.dat")
+
+
+def _resolve_wsvec_path(hr_path, explicit_path=None, *, enabled=True):
+    """Resolve an explicit or standard sibling ``*_wsvec.dat`` path."""
+
+    if not enabled:
+        if explicit_path:
+            raise ValueError("Explicit wsvec input conflicts with use_wsvec=false")
+        return None, "disabled"
+    if explicit_path:
+        path = Path(explicit_path)
+        if not path.is_file():
+            raise FileNotFoundError(f"Wannier90 wsvec file not found: {path}")
+        return str(path), "explicit"
+    candidate = _auto_wsvec_candidate(hr_path)
+    if candidate is not None and candidate.is_file():
+        return str(candidate), "auto_sibling"
+    return None, "not_found"
 
 
 
@@ -180,18 +276,22 @@ def _load_spinor_hr_hk(
     groupby=None,
     win=None,
     centres=None,
+    wsvec=None,
 ):
     dim, degens, hmap = _read_wannier_hr_compat(spinor_hr)
     if int(dim) % 2:
         raise ValueError(f"Spinor hr.dat dimension must be even, got {dim}")
     if centres:
         _read_wannier_centre_coords(centres, dim)
+    wsvec_meta = {}
     hk = _build_hk_from_hr_map(
         hmap,
         kpts,
         apply_degeneracy=apply_degeneracy,
         degens=degens,
         unit_scale=_unit_scale_to_ev(hr_unit),
+        wsvec=wsvec,
+        metadata=wsvec_meta,
     )
     # ``groupby`` is the complete numerical ordering contract.  Do not parse
     # WIN projections here merely to produce basis-label diagnostics: those
@@ -205,6 +305,7 @@ def _load_spinor_hr_hk(
         "input_groupby": resolved_order,
         "internal_groupby": CANONICAL_SPINOR_GROUPBY.value,
         "centres": centres or "",
+        **wsvec_meta,
     }
     return hk, meta
 
@@ -658,8 +759,24 @@ def _compare_reference_bonds(args, mag_atoms, pair_meta):
         print(f"[J-wannier-tensor] compare_ref bonds extra_wannier_sample={extra[:5]}", flush=True)
 
 
-def _group_orbits(neighbours, mode):
+def _group_orbits(
+    neighbours,
+    mode,
+    *,
+    structure_path=None,
+    symprec=1.0e-5,
+    angle_tolerance=-1.0,
+):
     mode = str(mode).strip().lower()
+    if mode == "spglib":
+        if not structure_path:
+            raise ValueError("orbit_grouping=spglib requires a Wannier structure")
+        return get_symmetry_orbits(
+            structure_path,
+            neighbours,
+            symprec=float(symprec),
+            angle_tolerance=float(angle_tolerance),
+        )
     if mode == "none":
         return [[n] for n in neighbours]
     groups = {}
@@ -670,12 +787,29 @@ def _group_orbits(neighbours, mode):
             pair = tuple(sorted((int(n["i"]), int(n["j"]))))
             key = (int(n.get("shell_idx", 0)), round(float(n["distance"]), 4), pair)
         else:
-            raise ValueError(f"Unsupported --orbit_grouping={mode}; use none|distance|shell")
+            raise ValueError(
+                f"Unsupported --orbit_grouping={mode}; "
+                "use spglib|none|distance|shell"
+            )
         groups.setdefault(key, []).append(n)
     return list(groups.values())
 
 
-def _write_tensor_h5_simple(path, args, labels, pair_meta, tensor, trace_acc, elapsed, nk, nE, axes, extra=None):
+def _write_tensor_h5_simple(
+    path,
+    args,
+    labels,
+    pair_meta,
+    tensor,
+    trace_acc,
+    elapsed,
+    nk,
+    nE,
+    axes,
+    extra=None,
+    *,
+    orbits=None,
+):
     os.makedirs(os.path.dirname(os.path.abspath(path)) or ".", exist_ok=True)
     str_dt = h5py.string_dtype(encoding="utf-8")
     projected_context = getattr(args, "_projected_wannier_context", None)
@@ -690,6 +824,9 @@ def _write_tensor_h5_simple(path, args, labels, pair_meta, tensor, trace_acc, el
         basic.create_dataset("kmesh", data=np.asarray(args.kmesh, dtype=np.int64))
         basic.create_dataset("efermi_ev", data=np.asarray(float(args.efermi)))
         basic.create_dataset("apply_degeneracy", data=np.asarray(bool(args.apply_degeneracy)))
+        basic.create_dataset(
+            "use_wsvec", data=np.asarray(bool(getattr(args, "use_wsvec", True)))
+        )
         basic.create_dataset("spin_direction", data=reported_spin_direction)
         basic.create_dataset(
             "input_spin_direction",
@@ -722,6 +859,9 @@ def _write_tensor_h5_simple(path, args, labels, pair_meta, tensor, trace_acc, el
             "up_hr": args.up_hr or "",
             "dn_hr": args.dn_hr or "",
             "spinor_hr": args.spinor_hr or "",
+            "wsvec": getattr(args, "wsvec", None) or "",
+            "wsvec_up": getattr(args, "wsvec_up", None) or "",
+            "wsvec_dn": getattr(args, "wsvec_dn", None) or "",
             "amn": getattr(args, "amn", None) or "",
             "eig": getattr(args, "eig", None) or "",
             "spn": getattr(args, "spn", None) or "",
@@ -754,8 +894,34 @@ def _write_tensor_h5_simple(path, args, labels, pair_meta, tensor, trace_acc, el
             "base_hamiltonian": "spinor_hr" if args.spinor_hr else "collinear_up_down",
             "ref_epr_up": args.ref_epr_up or "",
             "ref_epr_dn": args.ref_epr_dn or "",
+            "orbit_grouping": getattr(args, "orbit_grouping", ""),
         }.items():
             basic.create_dataset(key, data=np.array(str(val), dtype=object), dtype=str_dt)
+        wsvec_meta = getattr(args, "_wsvec_metadata", {}) or {}
+        if "up" in wsvec_meta or "dn" in wsvec_meta:
+            for channel in ("up", "dn"):
+                channel_meta = wsvec_meta.get(channel, {}) or {}
+                for key in ("wsvec_path", "wsvec_source"):
+                    basic.create_dataset(
+                        f"resolved_{key}_{channel}",
+                        data=np.array(str(channel_meta.get(key, "")), dtype=object),
+                        dtype=str_dt,
+                    )
+                basic.create_dataset(
+                    f"wsvec_applied_{channel}",
+                    data=np.asarray(bool(channel_meta.get("wsvec_applied", False))),
+                )
+        else:
+            for key in ("wsvec_path", "wsvec_source"):
+                basic.create_dataset(
+                    f"resolved_{key}",
+                    data=np.array(str(wsvec_meta.get(key, "")), dtype=object),
+                    dtype=str_dt,
+                )
+            basic.create_dataset(
+                "wsvec_applied",
+                data=np.asarray(bool(wsvec_meta.get("wsvec_applied", False))),
+            )
         magnetic_meta = getattr(args, "_magnetic_subspace_meta", {}) or {}
         for key in ("source", "structure_source", "win_path", "centres_path", "groupby"):
             basic.create_dataset(
@@ -921,6 +1087,36 @@ def _write_tensor_h5_simple(path, args, labels, pair_meta, tensor, trace_acc, el
         bonds.create_dataset("R", data=np.asarray([m["R"] for m in pair_meta], dtype=np.int64))
         bonds.create_dataset("distance_ang", data=np.asarray([m["dist"] for m in pair_meta], dtype=np.float64))
         bonds.create_dataset("shell", data=np.asarray([m["shell"] for m in pair_meta], dtype=np.int64))
+        orbit_label_by_key = _orbit_label_map(pair_meta, orbits or [])
+        orbit_labels = [
+            orbit_label_by_key.get(
+                (int(m["gi"]), int(m["gj"]), tuple(int(x) for x in m["R"])),
+                "NA",
+            )
+            for m in pair_meta
+        ]
+        bonds.create_dataset(
+            "orbit_label",
+            data=np.asarray(orbit_labels, dtype=object),
+            dtype=str_dt,
+        )
+        symmetry = h5.create_group("symmetry")
+        symmetry.create_dataset(
+            "orbit_grouping",
+            data=np.array(str(getattr(args, "orbit_grouping", "")), dtype=object),
+            dtype=str_dt,
+        )
+        symmetry.create_dataset(
+            "symprec_ang",
+            data=np.asarray(float(getattr(args, "symprec", 1.0e-5))),
+        )
+        symmetry.create_dataset(
+            "angle_tolerance_deg",
+            data=np.asarray(float(getattr(args, "angle_tolerance", -1.0))),
+        )
+        symmetry.create_dataset(
+            "n_orbits", data=np.asarray(len(orbits or []), dtype=np.int64)
+        )
         ds = h5.create_dataset("J_tensor_r", data=np.asarray(tensor, dtype=np.float64))
         ds.attrs["shape"] = "(nBond,tensor_axis_a,tensor_axis_b)"
         ds.attrs["tensor_axis_order"] = ",".join(axes)
@@ -1008,6 +1204,7 @@ def _projection_anchored_mode(args):
 def run(args, comm=None):
     axes = _parse_axes(args.axes)
     kpts = _full_k_mesh(args.kmesh)
+    rank, _mpi_size = rank_size(comm)
     spinor_input = bool(args.spinor_hr)
     projected_mode, spin_operator_policy = _projection_anchored_mode(args)
     args._resolved_spin_operator = (
@@ -1067,24 +1264,47 @@ def run(args, comm=None):
     if spinor_input and not projected_mode:
         if args.kernel == "scalar":
             raise ValueError("--kernel scalar requires collinear --up_hr/--dn_hr; use direct/tb2j for --spinor_hr")
-        h_spin, spinor_meta = _load_spinor_hr_hk(
-            args.spinor_hr,
-            kpts,
-            apply_degeneracy=bool(args.apply_degeneracy),
-            hr_unit=args.hr_unit,
-            groupby=args.groupby,
-            win=args.win,
-            centres=args.centres,
+
+        def load_spinor_hamiltonian():
+            wsvec_path, wsvec_source = _resolve_wsvec_path(
+                args.spinor_hr,
+                getattr(args, "wsvec", None),
+                enabled=bool(getattr(args, "use_wsvec", True)),
+            )
+            loaded_h, loaded_meta = _load_spinor_hr_hk(
+                args.spinor_hr,
+                kpts,
+                apply_degeneracy=bool(args.apply_degeneracy),
+                hr_unit=args.hr_unit,
+                groupby=args.groupby,
+                win=args.win,
+                centres=args.centres,
+                wsvec=wsvec_path,
+            )
+            loaded_meta["wsvec_source"] = wsvec_source
+            return loaded_h, loaded_meta
+
+        root_payload = collective_root_call(
+            comm,
+            load_spinor_hamiltonian,
+            phase="spinor Wannier Hamiltonian setup",
         )
+        h_spin, spinor_meta = (
+            root_payload if comm is None else comm.bcast(root_payload, root=0)
+        )
+        args._wsvec_metadata = dict(spinor_meta)
         dim = int(spinor_meta["nwan"])
         intersite_soc_meta = dict(spinor_meta)
         spin_evals0 = np.linalg.eigvalsh(h_spin)
-        print(
-            f"[J-wannier-tensor] loaded spinor H(k) dim={h_spin.shape[1]} "
-            f"canonical_half_dim={dim} input_groupby={spinor_meta['input_groupby']} "
-            f"band=({float(spin_evals0.min()):.6g},{float(spin_evals0.max()):.6g}) eV",
-            flush=True,
-        )
+        if rank == 0:
+            print(
+                f"[J-wannier-tensor] loaded spinor H(k) dim={h_spin.shape[1]} "
+                f"canonical_half_dim={dim} input_groupby={spinor_meta['input_groupby']} "
+                f"wsvec={spinor_meta['wsvec_source']} "
+                f"shifted_R={spinor_meta['wsvec_shifted_r_points']} "
+                f"band=({float(spin_evals0.min()):.6g},{float(spin_evals0.max()):.6g}) eV",
+                flush=True,
+            )
         if spin_operator_policy == "auto":
             print(
                 "[J-wannier-tensor] spin_operator=auto resolved to the "
@@ -1093,13 +1313,41 @@ def run(args, comm=None):
             )
         h_spin, soc_entries, soc_win_path = _apply_model_soc(h_spin, args, dim)
     elif not spinor_input:
-        hk_up, hk_dn = _load_hr_hk(
-            args.up_hr,
-            args.dn_hr,
-            kpts,
-            apply_degeneracy=bool(args.apply_degeneracy),
-            hr_unit=args.hr_unit,
+
+        def load_collinear_hamiltonians():
+            use_wsvec = bool(getattr(args, "use_wsvec", True))
+            wsvec_up, source_up = _resolve_wsvec_path(
+                args.up_hr,
+                getattr(args, "wsvec_up", None),
+                enabled=use_wsvec,
+            )
+            wsvec_dn, source_dn = _resolve_wsvec_path(
+                args.dn_hr,
+                getattr(args, "wsvec_dn", None),
+                enabled=use_wsvec,
+            )
+            loaded_up, loaded_dn, loaded_meta = _load_hr_hk(
+                args.up_hr,
+                args.dn_hr,
+                kpts,
+                apply_degeneracy=bool(args.apply_degeneracy),
+                hr_unit=args.hr_unit,
+                wsvec_up=wsvec_up,
+                wsvec_dn=wsvec_dn,
+            )
+            loaded_meta["up"]["wsvec_source"] = source_up
+            loaded_meta["dn"]["wsvec_source"] = source_dn
+            return loaded_up, loaded_dn, loaded_meta
+
+        root_payload = collective_root_call(
+            comm,
+            load_collinear_hamiltonians,
+            phase="collinear Wannier Hamiltonian setup",
         )
+        hk_up, hk_dn, collinear_wsvec_meta = (
+            root_payload if comm is None else comm.bcast(root_payload, root=0)
+        )
+        args._wsvec_metadata = collinear_wsvec_meta
         _print_hk_diagnostics("H(k)", hk_up, hk_dn)
         _compare_reference_hk(args, kpts, hk_up, hk_dn)
         if hk_up.shape != hk_dn.shape:
@@ -1162,7 +1410,12 @@ def run(args, comm=None):
             )
 
         def load_physical_context():
-            return load_projected_wannier_context(
+            wsvec_path, wsvec_source = _resolve_wsvec_path(
+                args.spinor_hr,
+                getattr(args, "wsvec", None),
+                enabled=bool(getattr(args, "use_wsvec", True)),
+            )
+            context = load_projected_wannier_context(
                 spinor_hr=args.spinor_hr,
                 win=args.win,
                 amn=args.amn,
@@ -1178,23 +1431,31 @@ def run(args, comm=None):
                 efermi=float(args.efermi),
                 apply_degeneracy=bool(args.apply_degeneracy),
                 hr_unit=args.hr_unit,
+                wsvec=wsvec_path,
                 projection_rank_tolerance=float(args.projection_rank_tolerance),
                 spin_projection_tolerance=float(args.spin_projection_tolerance),
                 hamiltonian_tolerance_ev=float(args.hamiltonian_tolerance_ev),
                 noncollinear_tolerance=float(args.noncollinear_tolerance),
                 intersite_xc_tolerance=float(args.intersite_xc_tolerance),
             )
+            return context, {
+                "wsvec_applied": wsvec_path is not None,
+                "wsvec_path": wsvec_path or "",
+                "wsvec_source": wsvec_source,
+            }
 
         root_context = collective_root_call(
             comm,
             load_physical_context,
             phase="projection-anchored Wannier setup",
         )
-        projected_context = (
+        projected_payload = (
             root_context if comm is None else comm.bcast(root_context, root=0)
         )
+        projected_context, projected_wsvec_meta = projected_payload
         if projected_context is None:  # pragma: no cover - communicator guard
             raise RuntimeError("MPI root did not broadcast projected Wannier setup")
+        args._wsvec_metadata = projected_wsvec_meta
         args._projected_wannier_context = projected_context
         dim = int(projected_context.coefficients.shape[-1] // 2)
         orbital_offsets = np.concatenate(
@@ -1370,7 +1631,15 @@ def run(args, comm=None):
         return (
             neighbours_value,
             pair_meta_value,
-            _group_orbits(neighbours_value, args.orbit_grouping),
+            _group_orbits(
+                neighbours_value,
+                args.orbit_grouping,
+                structure_path=structure_path,
+                symprec=float(getattr(args, "symprec", 1.0e-5)),
+                angle_tolerance=float(
+                    getattr(args, "angle_tolerance", -1.0)
+                ),
+            ),
         )
 
     _neighbours, pair_meta, orbits = collective_call(
@@ -1518,6 +1787,7 @@ def run(args, comm=None):
             len(energy_mesh),
             axes,
             extra=extra,
+            orbits=orbits,
         )
         return out_h5
 
@@ -1529,6 +1799,9 @@ def main():
     ap.add_argument("--up_hr", default=None, help="Spin-up Wannier90 hr.dat; required unless --spinor_hr is used")
     ap.add_argument("--dn_hr", default=None, help="Spin-down Wannier90 hr.dat; required unless --spinor_hr is used")
     ap.add_argument("--spinor_hr", default=None, help="Full spinor Wannier90 hr.dat from SOC/noncollinear Wannier90")
+    ap.add_argument("--wsvec", default=None, help="Optional wsvec.dat paired with --spinor_hr; standard sibling is auto-detected")
+    ap.add_argument("--wsvec_up", default=None, help="Optional spin-up wsvec.dat; standard sibling is auto-detected")
+    ap.add_argument("--wsvec_dn", default=None, help="Optional spin-down wsvec.dat; standard sibling is auto-detected")
     ap.add_argument(
         "--groupby",
         choices=["spin", "orbital"],
@@ -1582,6 +1855,12 @@ def main():
     ap.add_argument("--slices", default="", help="Manual local orbital slices, e.g. '0:0:5,1:5:10'")
     ap.add_argument("--apply_degeneracy", action=argparse.BooleanOptionalAction, default=True, help="Divide HR blocks by Wannier90 degeneracy before H(k) construction; standard Wannier90 needs this")
     ap.add_argument(
+        "--use_wsvec",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Apply explicit or automatically detected Wannier90 MDRS wsvec phases",
+    )
+    ap.add_argument(
         "--kernel",
         choices=["scalar", "direct", "tb2j"],
         default="tb2j",
@@ -1611,7 +1890,13 @@ def main():
     ap.add_argument("--all_bonds", action="store_true", default=True, help="Keep directed bonds; default matches compute_J_epr_tensor")
     ap.add_argument("--canonical_bonds", dest="all_bonds", action="store_false", help="Fold equivalent directed bonds")
     ap.add_argument("--nn_only", action="store_true")
-    ap.add_argument("--orbit_grouping", choices=["none", "distance", "shell"], default="distance")
+    ap.add_argument(
+        "--orbit_grouping",
+        choices=["spglib", "none", "distance", "shell"],
+        default="spglib",
+    )
+    ap.add_argument("--symprec", type=float, default=1.0e-5)
+    ap.add_argument("--angle_tolerance", type=float, default=-1.0)
     ap.add_argument("--integrator", choices=["contour", "cfr_ozaki", "cfr_pole"], default="contour")
     ap.add_argument("--emin", type=float, default=-25.0)
     ap.add_argument("--empoints", type=int, default=500)

@@ -32,6 +32,17 @@ There are two normal input paths:
   calculations must have the same Wannier orbital order and gauge. SLW combines
   the two channels into one internal spinor Hamiltonian.
 
+Wannier90 v3 uses minimum-distance replica selection by default. If a standard
+`*_wsvec.dat` file is beside its `*_hr.dat`, SLW detects it automatically and
+uses its matrix-element-specific phases. `wsvec` (spinor) or
+`wsvec_up`/`wsvec_dn` (collinear pair) are only needed for nonstandard paths;
+`use_wsvec=.false.` explicitly restores plain-HR interpolation.
+
+Bond labels use crystallographic `spglib` orbits from `win` by default. Thus
+one orbit may contain bonds involving different site indices when a space-group
+operation maps those sites onto each other. `distance` and `shell` remain
+diagnostic fallback groupings only.
+
 The native-spinor `groupby` value describes the order in the input HR:
 
 - `groupby='orbital'`: `orb1-up, orb1-down, orb2-up, orb2-down, ...`

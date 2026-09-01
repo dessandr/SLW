@@ -324,12 +324,20 @@ def find_nearest_neighbours(
     ]
 
 
-def get_symmetry_orbits(structure_path: str | Path, neighbours):
+def get_symmetry_orbits(
+    structure_path: str | Path,
+    neighbours,
+    *,
+    symprec: float = 1.0e-5,
+    angle_tolerance: float = -1.0,
+):
     """Group bonds into crystallographic symmetry orbits."""
     lattice = compute_lattice(structure_path)
     positions = lattice["positions"]
     symmetry = spglib.get_symmetry(
-        (lattice["R_vec_ang"], positions, lattice["atomic_numbers"])
+        (lattice["R_vec_ang"], positions, lattice["atomic_numbers"]),
+        symprec=float(symprec),
+        angle_tolerance=float(angle_tolerance),
     )
     if symmetry is None:
         return [[neighbour] for neighbour in neighbours]
@@ -338,9 +346,9 @@ def get_symmetry_orbits(structure_path: str | Path, neighbours):
         transformed = rotation @ positions[atom_index] + translation
         differences = transformed[None, :] - positions
         differences -= np.rint(differences)
-        norms = np.linalg.norm(differences, axis=1)
+        norms = np.linalg.norm(differences @ lattice["R_vec_ang"], axis=1)
         target = int(np.argmin(norms))
-        return target if norms[target] < 1.0e-4 else None
+        return target if norms[target] < float(symprec) else None
 
     unused = set(range(len(neighbours)))
     orbits = []

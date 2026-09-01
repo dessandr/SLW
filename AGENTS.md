@@ -1,7 +1,6 @@
 # Project rules
 
 0. MPI parallelization should be implemented
-
 1. Material, lattice, orbital, mesh, and path choices must come from inputs or
    parsed files; do not hardcode a specific calculation.
 2. Use vectorized, threaded, multiprocessing, MPI, or JIT paths where they are

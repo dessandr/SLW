@@ -32,6 +32,16 @@ class WannierEigenvalueData:
     eigenvalues: np.ndarray
 
 
+@dataclass(frozen=True)
+class WannierWSVecInfo:
+    """Summary of an MDRS ``*_wsvec.dat`` Hamiltonian remapping."""
+
+    path: str
+    matrix_elements: int
+    shifted_r_points: int
+    max_multiplicity: int
+
+
 def read_wannier_hr(
     path: str | Path,
 ) -> tuple[int, list[int], dict[RVector, np.ndarray]]:
@@ -90,6 +100,174 @@ def read_wannier_hr(
             f"R-point count mismatch in {input_path}: header={nrpts}, parsed={len(hamiltonian)}"
         )
     return dim, degeneracies, hamiltonian
+
+
+def remap_wannier_hr_with_wsvec(
+    path: str | Path,
+    hamiltonian: Mapping[RVector, np.ndarray],
+    degeneracies: Sequence[int],
+    *,
+    apply_degeneracy: bool = True,
+    unit_scale: float = 1.0,
+) -> tuple[dict[RVector, np.ndarray], WannierWSVecInfo]:
+    """Return matrix-element-specific MDRS hoppings on shifted R vectors.
+
+    Wannier90's ``use_ws_distance`` interpolation associates each
+    ``H_ij(R)`` with one or more Born-von Karman supercell shifts stored in
+    ``*_wsvec.dat``.  Distributing ``H_ij(R)`` over the corresponding
+    ``R + T`` vectors once converts the MDRS expression into an ordinary
+    vectorized Fourier sum.  This avoids constructing an
+    ``(nk,nR,nwann,nwann)`` phase tensor.
+    """
+
+    input_path = Path(path)
+    if not input_path.is_file():
+        raise FileNotFoundError(f"Wannier90 wsvec file not found: {input_path}")
+    r_vectors = tuple(hamiltonian)
+    if not r_vectors:
+        raise ValueError("Cannot apply wsvec to an empty Hamiltonian")
+    first_block = np.asarray(hamiltonian[r_vectors[0]], dtype=np.complex128)
+    if first_block.ndim != 2 or first_block.shape[0] != first_block.shape[1]:
+        raise ValueError(
+            f"Wannier Hamiltonian blocks must be square, got {first_block.shape}"
+        )
+    dimension = int(first_block.shape[0])
+    for r_vector in r_vectors:
+        shape = np.asarray(hamiltonian[r_vector]).shape
+        if shape != (dimension, dimension):
+            raise ValueError(
+                f"Hamiltonian block {r_vector} has shape {shape}; "
+                f"expected {(dimension, dimension)}"
+            )
+    if len(degeneracies) != len(r_vectors):
+        raise ValueError(
+            "A degeneracy is required for every Hamiltonian R point: "
+            f"degeneracies={len(degeneracies)}, R points={len(r_vectors)}"
+        )
+    divisor = np.asarray(degeneracies, dtype=np.float64)
+    if apply_degeneracy and np.any(divisor <= 0.0):
+        raise ValueError("Wannier HR degeneracies must be positive")
+    if not np.isfinite(float(unit_scale)):
+        raise ValueError(f"unit_scale must be finite, got {unit_scale!r}")
+
+    r_index = {r_vector: index for index, r_vector in enumerate(r_vectors)}
+    seen = np.zeros((len(r_vectors), dimension, dimension), dtype=bool)
+    shifted: dict[RVector, np.ndarray] = {}
+    matrix_elements = 0
+    max_multiplicity = 0
+
+    with input_path.open("r", encoding="utf-8") as stream:
+        line_number = 0
+        while True:
+            raw = stream.readline()
+            if not raw:
+                break
+            line_number += 1
+            fields = raw.split()
+            if not fields or fields[0].startswith("#"):
+                continue
+            if len(fields) != 5:
+                raise ValueError(
+                    f"Malformed wsvec header at {input_path}:{line_number}: "
+                    f"{raw.rstrip()}"
+                )
+            try:
+                r_vector = tuple(int(value) for value in fields[:3])
+                row = int(fields[3]) - 1
+                column = int(fields[4]) - 1
+            except ValueError as exc:
+                raise ValueError(
+                    f"Non-integer wsvec header at {input_path}:{line_number}: "
+                    f"{raw.rstrip()}"
+                ) from exc
+            ir = r_index.get(r_vector)
+            if ir is None:
+                raise ValueError(
+                    f"wsvec R vector {r_vector} at {input_path}:{line_number} "
+                    "is absent from hr.dat"
+                )
+            if not (0 <= row < dimension and 0 <= column < dimension):
+                raise ValueError(
+                    f"wsvec orbital index ({row + 1},{column + 1}) is outside "
+                    f"dimension={dimension} at {input_path}:{line_number}"
+                )
+            if seen[ir, row, column]:
+                raise ValueError(
+                    f"Duplicate wsvec entry for {(r_vector, row + 1, column + 1)}"
+                )
+
+            count_raw = stream.readline()
+            line_number += 1
+            if not count_raw:
+                raise ValueError(
+                    f"Unexpected EOF after wsvec header at {input_path}:{line_number - 1}"
+                )
+            try:
+                multiplicity = int(count_raw.strip())
+            except ValueError as exc:
+                raise ValueError(
+                    f"Invalid wsvec multiplicity at {input_path}:{line_number}: "
+                    f"{count_raw.rstrip()}"
+                ) from exc
+            if multiplicity <= 0:
+                raise ValueError(
+                    f"wsvec multiplicity must be positive at "
+                    f"{input_path}:{line_number}, got {multiplicity}"
+                )
+
+            value = complex(hamiltonian[r_vector][row, column]) * float(unit_scale)
+            if apply_degeneracy:
+                value /= divisor[ir]
+            value /= float(multiplicity)
+            for _ in range(multiplicity):
+                shift_raw = stream.readline()
+                line_number += 1
+                if not shift_raw:
+                    raise ValueError(
+                        f"Unexpected EOF in wsvec shifts at {input_path}:{line_number}"
+                    )
+                shift_fields = shift_raw.split()
+                if len(shift_fields) != 3:
+                    raise ValueError(
+                        f"Malformed wsvec shift at {input_path}:{line_number}: "
+                        f"{shift_raw.rstrip()}"
+                    )
+                try:
+                    shift = tuple(int(component) for component in shift_fields)
+                except ValueError as exc:
+                    raise ValueError(
+                        f"Non-integer wsvec shift at {input_path}:{line_number}: "
+                        f"{shift_raw.rstrip()}"
+                    ) from exc
+                shifted_r = tuple(
+                    int(r_vector[axis] + shift[axis]) for axis in range(3)
+                )
+                block = shifted.get(shifted_r)
+                if block is None:
+                    block = np.zeros((dimension, dimension), dtype=np.complex128)
+                    shifted[shifted_r] = block
+                block[row, column] += value
+
+            seen[ir, row, column] = True
+            matrix_elements += 1
+            max_multiplicity = max(max_multiplicity, multiplicity)
+
+    missing = np.argwhere(~seen)
+    if missing.size:
+        samples = [
+            (r_vectors[int(ir)], int(row) + 1, int(column) + 1)
+            for ir, row, column in missing[:5]
+        ]
+        raise ValueError(
+            f"wsvec file covers {matrix_elements} of {seen.size} Hamiltonian "
+            f"matrix elements; missing samples={samples}"
+        )
+    return shifted, WannierWSVecInfo(
+        path=str(input_path),
+        matrix_elements=matrix_elements,
+        shifted_r_points=len(shifted),
+        max_multiplicity=max_multiplicity,
+    )
 
 
 def write_wannier_hr(

@@ -105,6 +105,12 @@ SLW's internal spin-major order. Native spinor input declares its file layout
 with `groupby='spin'|'orbital'`; the standard TB2J-compatible Pauli basis is the
 default and needs no AMN/U/SPN files.
 
+Standard sibling `*_wsvec.dat` files are auto-detected and used for Wannier90
+minimum-distance-replica interpolation. Use `wsvec` for an explicitly located
+spinor file, or `wsvec_up` plus `wsvec_dn` for a collinear pair. Bond orbit
+labels default to `orbit_grouping='spglib'` and are generated from the crystal
+symmetry in `win`, not from atom-index pairs or numerical J values.
+
 For optional SPN validation of a spinor Wannier Hamiltonian, tensor J also
 accepts one projection-anchored bundle:
 `amn`, `eig`, `spn`, `u_mat`, and `u_dis_mat`. Supply all five with

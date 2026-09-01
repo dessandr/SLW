@@ -30,6 +30,7 @@ from slw.core.wannier_io import (
     read_wannier_eig,
     read_wannier_hr,
     read_wannier_u_matrix_data,
+    remap_wannier_hr_with_wsvec,
 )
 from slw.core.wannier_spin_io import (
     iter_wannier_amn_chunks,
@@ -171,8 +172,19 @@ def _hamiltonian_from_hr(
     *,
     apply_degeneracy: bool,
     unit: str,
+    wsvec: str | Path | None = None,
 ) -> NDArray[np.complex128]:
     dimension, degeneracies, mapping = read_wannier_hr(path)
+    if wsvec is not None:
+        mapping, _wsvec_info = remap_wannier_hr_with_wsvec(
+            wsvec,
+            mapping,
+            degeneracies,
+            apply_degeneracy=apply_degeneracy,
+            unit_scale=float(_unit_scale_to_ev(unit)),
+        )
+        apply_degeneracy = False
+        unit = "ev"
     r_vectors = np.asarray(list(mapping), dtype=np.float64)
     blocks = np.stack(
         [np.asarray(value, dtype=np.complex128) for value in mapping.values()],
@@ -425,6 +437,7 @@ def load_projected_wannier_context(
     efermi: float,
     apply_degeneracy: bool = True,
     hr_unit: str = "ev",
+    wsvec: str | Path | None = None,
     projection_rank_tolerance: float = 1.0e-4,
     spin_projection_tolerance: float = 0.4,
     hamiltonian_tolerance_ev: float = 1.0e-4,
@@ -552,6 +565,7 @@ def load_projected_wannier_context(
         native_kpoints,
         apply_degeneracy=bool(apply_degeneracy),
         unit=hr_unit,
+        wsvec=wsvec,
     )
     if hamiltonian_hr.shape[1:] != (nwann, nwann):
         raise ValueError(

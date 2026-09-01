@@ -21,6 +21,7 @@
   tensor_kernel = 'tb2j',
 
   spinor_hr = './input/sample_spinor_hr.dat',
+  ! sample_spinor_wsvec.dat is used automatically when it is beside the HR.
   win = './input/sample.win',
   centres = './input/sample_centres.xyz',
   ! 'orbital': orb1-up,orb1-down,orb2-up,orb2-down,...
@@ -36,6 +37,7 @@
   axes = 'xyz',
   n_shells = 1,
   all_bonds = .true.,
+  orbit_grouping = 'spglib',
   integrator = 'contour',
   ! Small syntax-test value; converge this for production.
   empoints = 64

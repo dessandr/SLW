@@ -21,6 +21,7 @@
   ltensor = .true.,
   tensor_kernel = 'tb2j',
   spinor_hr = './input/sample_spinor_hr.dat',
+  ! sample_spinor_wsvec.dat is used automatically when it is beside the HR.
   groupby = 'orbital',
   win = './input/sample.win',
   amn = './input/sample.amn',
@@ -39,6 +40,7 @@
   axes = 'xyz',
   n_shells = 1,
   all_bonds = .true.,
+  orbit_grouping = 'spglib',
   integrator = 'contour',
   empoints = 64,
   collinear_override = .false.

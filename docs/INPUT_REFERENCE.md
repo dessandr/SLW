@@ -298,6 +298,12 @@ declare exactly one HR-row TB2J layout:
 | `groupby` | `spin` | `[all up orbitals | all down orbitals]` |
 | `groupby` | `orbital` | `[orb1 up, orb1 down, orb2 up, orb2 down, ...]` |
 
+With `use_wsvec=.true.` (default), the standard sibling `*_wsvec.dat` of every
+HR input is auto-detected and supplies Wannier90 minimum-distance-replica
+phases. Nonstandard locations may be given as `wsvec` for `spinor_hr`, or as
+the complete `wsvec_up`/`wsvec_dn` pair for collinear HR files. Set
+`use_wsvec=.false.` only to request the legacy plain-HR Fourier interpolation.
+
 SLW never infers `groupby` from `wannier_centres.xyz`. On this raw-HR path both
 layouts are converted internally to `groupby='spin'`. The projection-bundle
 path is different: there `groupby` describes AMN trial columns and HR rows are
@@ -501,6 +507,8 @@ Frontend-fixed values: `kernel='scalar'`. Supplying a conflicting value is an er
 |---|---|---:|---|---|
 | `up_hr` | string | yes | — | Spin-up collinear Wannier90 hr.dat.<br>CLI aliases: `--up_hr` |
 | `dn_hr` | string | yes | — | Spin-down collinear Wannier90 hr.dat.<br>CLI aliases: `--dn_hr` |
+| `wsvec_up` | string | no | auto sibling | Explicit spin-up Wannier90 wsvec.dat; must be supplied together with `wsvec_dn`.<br>CLI aliases: `--wsvec_up` |
+| `wsvec_dn` | string | no | auto sibling | Explicit spin-down Wannier90 wsvec.dat; must be supplied together with `wsvec_up`.<br>CLI aliases: `--wsvec_dn` |
 | `efermi` | float | yes | — | Fermi energy in eV<br>CLI aliases: `--efermi` |
 | `hr_unit` | enum {ev, ry, ha} | no | `ev` | Unit of input hr.dat matrix elements; Wannier90 default is eV<br>CLI aliases: `--hr_unit` |
 | `ref_epr_up` | string | no | none / runtime | Optional reference EPR up HDF5 for H(k) scale/gauge diagnostics<br>CLI aliases: `--ref_epr_up` |
@@ -511,6 +519,7 @@ Frontend-fixed values: `kernel='scalar'`. Supplying a conflicting value is an er
 | `mag_atoms_base` | enum {0, 1} | no | `0` | Advanced native-kernel option.<br>CLI aliases: `--mag_atoms_base` |
 | `slices` | string | yes | — | Manual local orbital slices, e.g. `0:0:5,1:5:10`. |
 | `apply_degeneracy` | boolean | no | .true. | Divide HR blocks by Wannier90 degeneracy before H(k) construction; standard Wannier90 needs this<br>CLI aliases: `--apply_degeneracy`, `--no-apply_degeneracy` |
+| `use_wsvec` | boolean | no | .true. | Auto-detect and apply Wannier90 minimum-distance-replica wsvec phases.<br>CLI aliases: `--use_wsvec`, `--no-use_wsvec` |
 | `axes` | string | no | `xyz` | Isotropic tensor-envelope axes used by the current scalar writer.<br>CLI aliases: `--axes` |
 | `spin_direction` | float[3] | no | `[0.0, 0.0, 1.0]` | Collinear/model input direction. The projection-anchored path instead infers every site's direction from its time-reversal-odd field.<br>CLI aliases: `--spin_direction` |
 | `win` | string | no | none | Optional explicit Wannier90 structure source; scalar J does not accept an SOC card. |
@@ -518,7 +527,9 @@ Frontend-fixed values: `kernel='scalar'`. Supplying a conflicting value is an er
 | `d_max` | float | no | `20.0` | Advanced native-kernel option.<br>CLI aliases: `--d_max` |
 | `all_bonds` | boolean | no | .true. | Keep directed bonds; default matches compute_J_epr_tensor<br>CLI aliases: `--all_bonds`, `--canonical_bonds` |
 | `nn_only` | boolean | no | .false. | Advanced native-kernel option.<br>CLI aliases: `--nn_only` |
-| `orbit_grouping` | enum {none, distance, shell} | no | `distance` | Advanced native-kernel option.<br>CLI aliases: `--orbit_grouping` |
+| `orbit_grouping` | enum {spglib, none, distance, shell} | no | `spglib` | Group bond labels by crystal symmetry from `win`; distance/shell are diagnostic fallbacks.<br>CLI aliases: `--orbit_grouping` |
+| `symprec` | float | no | `1.0e-5` | Cartesian spglib symmetry tolerance in angstrom.<br>CLI aliases: `--symprec` |
+| `angle_tolerance` | float | no | `-1.0` | spglib angular tolerance in degrees; negative selects its internal default.<br>CLI aliases: `--angle_tolerance` |
 | `integrator` | enum {contour, cfr_ozaki, cfr_pole} | no | `contour` | Advanced native-kernel option.<br>CLI aliases: `--integrator` |
 | `emin` | float | no | `-25.0` | Advanced native-kernel option.<br>CLI aliases: `--emin` |
 | `empoints` | int | no | `500` | Advanced native-kernel option.<br>CLI aliases: `--empoints` |
@@ -608,6 +619,9 @@ Native engine: `slw.exchange.engine`; numerical kernel:
 | `up_hr` | string | conditional | — | Spin-up collinear Wannier90 hr.dat; supply together with `dn_hr`, or supply `spinor_hr` instead.<br>CLI aliases: `--up_hr` |
 | `dn_hr` | string | conditional | — | Spin-down collinear Wannier90 hr.dat; supply together with `up_hr`, or supply `spinor_hr` instead.<br>CLI aliases: `--dn_hr` |
 | `spinor_hr` | string | conditional | — | Full spinor Wannier90 hr.dat; mutually exclusive with the collinear pair.<br>CLI aliases: `--spinor_hr` |
+| `wsvec` | string | no | auto sibling | Explicit Wannier90 wsvec.dat paired with `spinor_hr`.<br>CLI aliases: `--wsvec` |
+| `wsvec_up` | string | no | auto sibling | Explicit wsvec.dat paired with `up_hr`; requires `wsvec_dn`.<br>CLI aliases: `--wsvec_up` |
+| `wsvec_dn` | string | no | auto sibling | Explicit wsvec.dat paired with `dn_hr`; requires `wsvec_up`.<br>CLI aliases: `--wsvec_dn` |
 | `groupby` | enum {spin, orbital} | with `spinor_hr` | — | Without the projection bundle, declares HR row ordering and is normalized to spin-major. With the bundle, declares AMN trial-column spin ordering; HR rows remain in their Wannier gauge. |
 | `centres` | string | with automatic matching | none / runtime | Wannier90 centres.xyz. Together with `win`, enables TB2J-style periodic nearest-atom assignment for spinor input.<br>CLI aliases: `--centres` |
 | `amn` | string | projection bundle | none / runtime | Wannier90 AMN atomic-projection matrix. Must be supplied with `eig`, `spn`, `u_mat`, and `u_dis_mat`.<br>CLI aliases: `--amn` |
@@ -626,6 +640,7 @@ Native engine: `slw.exchange.engine`; numerical kernel:
 | `mag_atoms_base` | enum {0, 1} | no | `0` | Advanced native-kernel option.<br>CLI aliases: `--mag_atoms_base` |
 | `slices` | string | conditional | `''` | Manual local orbital slices, e.g. '0:0:5,1:5:10'. Required unless spinor input uses `win` + `centres` or the complete projection bundle. A projection-anchored run rejects this key because WIN+AMN defines its magnetic frame.<br>CLI aliases: `--slices` |
 | `apply_degeneracy` | boolean | no | .true. | Divide HR blocks by Wannier90 degeneracy before H(k) construction; standard Wannier90 needs this<br>CLI aliases: `--apply_degeneracy`, `--no-apply_degeneracy` |
+| `use_wsvec` | boolean | no | .true. | Auto-detect and apply Wannier90 minimum-distance-replica wsvec phases.<br>CLI aliases: `--use_wsvec`, `--no-use_wsvec` |
 | `tensor_kernel` | enum {direct, tb2j} | no | `tb2j` | Tensor integration/decomposition convention. The compatibility alias `kernel` accepts the same values.<br>CLI aliases: `--kernel` |
 | `axes` | string | no | `xyz` | Tensor axes to compute, subset of xyz<br>CLI aliases: `--axes` |
 | `spin_direction` | float[3] | outside projection bundle | `[0.0, 0.0, 1.0]` | Input/model spin axis. It is rejected with the projection bundle, where every site direction is inferred from the projected time-reversal-odd field.<br>CLI aliases: `--spin_direction` |
@@ -634,7 +649,9 @@ Native engine: `slw.exchange.engine`; numerical kernel:
 | `d_max` | float | no | `20.0` | Advanced native-kernel option.<br>CLI aliases: `--d_max` |
 | `all_bonds` | boolean | no | .true. | Keep directed bonds; default matches compute_J_epr_tensor<br>CLI aliases: `--all_bonds`, `--canonical_bonds` |
 | `nn_only` | boolean | no | .false. | Advanced native-kernel option.<br>CLI aliases: `--nn_only` |
-| `orbit_grouping` | enum {none, distance, shell} | no | `distance` | Advanced native-kernel option.<br>CLI aliases: `--orbit_grouping` |
+| `orbit_grouping` | enum {spglib, none, distance, shell} | no | `spglib` | Group bonds by crystallographic symmetry from `win`; one orbit may mix site-index pairs.<br>CLI aliases: `--orbit_grouping` |
+| `symprec` | float | no | `1.0e-5` | Cartesian spglib symmetry tolerance in angstrom.<br>CLI aliases: `--symprec` |
+| `angle_tolerance` | float | no | `-1.0` | spglib angular tolerance in degrees; negative selects its internal default.<br>CLI aliases: `--angle_tolerance` |
 | `integrator` | enum {contour, cfr_ozaki, cfr_pole} | no | `contour` | Advanced native-kernel option.<br>CLI aliases: `--integrator` |
 | `emin` | float | no | `-25.0` | Advanced native-kernel option.<br>CLI aliases: `--emin` |
 | `empoints` | int | no | `500` | Advanced native-kernel option.<br>CLI aliases: `--empoints` |

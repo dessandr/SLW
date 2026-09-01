@@ -56,6 +56,9 @@ class ExchangeFiles:
     up_hr: str | None = None
     dn_hr: str | None = None
     spinor_hr: str | None = None
+    wsvec: str | None = None
+    wsvec_up: str | None = None
+    wsvec_dn: str | None = None
     win: str | None = None
     centres: str | None = None
     amn: str | None = None
