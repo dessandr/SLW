@@ -186,6 +186,13 @@ _REGISTRY: dict[str, tuple[Action, ...]] = {
             },
         ),
         _action(
+            "phonon_renormalization",
+            "Compute the phonon self-energy from exchange-striction magnons",
+            backends={
+                "default": _backend(handler="slw.magph.engine:prepare_run"),
+            },
+        ),
+        _action(
             "scattering_kbz",
             "Compute fixed-phonon-q scattering over the magnon Brillouin zone",
             "slw.magph.legacy.reference.plot_scattering_kbz",

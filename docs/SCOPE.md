@@ -13,7 +13,7 @@ SLW stands for **Spin-Lattice Wannier**. Its public Python namespace is `slw`.
 | `slw/exchange/legacy` | Archive-only historical LKAG implementations, diagnostics, ASR/symmetry tools, and compatibility wrappers |
 | `slw/soc` | Typed atomic-SOC manifolds, Wannier90 projection resolution, and strict TB2J `groupby=spin|orbital` spinor construction |
 | `slw/soc/legacy` | Archive-only SOC fitting, plotting, inspection, and superseded basis-layout experiments |
-| `slw/magph` | Native exchange/dJ/phonon/SIA screening, FM/bipartite-AFM LSWT and vertex construction, exact-Goldstone dispersion, retarded self-energy/lifetime kernels, MPI k distribution, and dispersion/lifetime output |
+| `slw/magph` | Native exchange/dJ/phonon/SIA screening, FM/bipartite-AFM LSWT and vertex construction, exact-Goldstone dispersion, magnon and phonon retarded self-energies, MPI k/q distribution, and dispersion/lifetime/phonon-renormalization output |
 | `slw/magph/legacy` | Quarantined magnon–phonon helpers, kernels, adapters, analyses, and plotting modules retained by active workflows |
 | `slw/magph/legacy/reference` | Quarantined compatibility drivers retained for non-native EPR/magph calculations and scientific reference |
 | `slw/interactions` | Wannier-gauge reference density and intersite-V correction |

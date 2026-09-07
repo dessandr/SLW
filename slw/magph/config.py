@@ -179,7 +179,7 @@ def _boolean(value: Any, *, name: str) -> bool:
 
 def _required(parameters: dict[str, Any], name: str) -> Any:
     if name not in parameters:
-        raise MagphInputError(f"native lifetime input requires {name}")
+        raise MagphInputError(f"native magph input requires {name}")
     return parameters[name]
 
 
@@ -309,6 +309,11 @@ class MagphLifetimeRequest:
 
 
 @dataclass(frozen=True)
+class MagphPhononRenormalizationRequest(MagphLifetimeRequest):
+    """Inputs shared with lifetime, with the phonon as external quasiparticle."""
+
+
+@dataclass(frozen=True)
 class MagphDispersionRequest:
     exchange_h5: Path
     kpath_file: Path
@@ -342,11 +347,13 @@ def build_lifetime_request(
     unknown = sorted(set(values) - _LIFETIME_KEYS)
     if unknown:
         raise MagphInputError(
-            "unknown native lifetime parameter(s): " + ", ".join(unknown)
+            "unknown native dynamic magph parameter(s): " + ", ".join(unknown)
         )
     input_format = str(values.pop("input_format", "default")).strip().lower()
     if input_format not in {"default", "native"}:
-        raise MagphInputError("native lifetime accepts input_format='native' only")
+        raise MagphInputError(
+            "native dynamic magph accepts input_format='native' only"
+        )
 
     exchange_h5 = Path(_required(values, "exchange_h5")).expanduser().resolve()
     derivative_h5 = Path(_required(values, "derivative_h5")).expanduser().resolve()
@@ -368,7 +375,7 @@ def build_lifetime_request(
         ).expanduser().resolve()
     else:
         raise MagphInputError(
-            "native lifetime input requires phonon_cache or phonon_epr"
+            "native magph input requires phonon_cache or phonon_epr"
         )
     if phonon_cache.suffix.lower() != ".npz":
         raise MagphInputError("phonon_cache must use the .npz suffix")
@@ -498,6 +505,28 @@ def build_lifetime_request(
     )
 
 
+def build_phonon_renormalization_request(
+    parameters: dict[str, Any],
+    *,
+    prefix: str,
+    savedir: str | Path,
+) -> MagphPhononRenormalizationRequest:
+    """Validate the native one-loop phonon-renormalization input."""
+
+    values = dict(parameters)
+    values.setdefault(
+        "output",
+        Path(savedir) / f"{prefix}.phonon_renormalization.npz",
+    )
+    base = build_lifetime_request(values, prefix=prefix, savedir=savedir)
+    return MagphPhononRenormalizationRequest(
+        **{
+            name: getattr(base, name)
+            for name in MagphLifetimeRequest.__dataclass_fields__
+        }
+    )
+
+
 def build_dispersion_request(
     parameters: dict[str, Any],
     *,
@@ -590,8 +619,10 @@ __all__ = [
     "MagphDispersionRequest",
     "MagphInputError",
     "MagphLifetimeRequest",
+    "MagphPhononRenormalizationRequest",
     "RestartMode",
     "SingleIonAnisotropyInput",
     "build_dispersion_request",
     "build_lifetime_request",
+    "build_phonon_renormalization_request",
 ]

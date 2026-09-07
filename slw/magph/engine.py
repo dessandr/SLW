@@ -22,9 +22,11 @@ from .config import (
     MagphDispersionRequest,
     MagphInputError,
     MagphLifetimeRequest,
+    MagphPhononRenormalizationRequest,
     RestartMode,
     build_dispersion_request,
     build_lifetime_request,
+    build_phonon_renormalization_request,
 )
 from .coupling import build_mode_resolved_isotropic_derivative_distributed
 from .derivative import (
@@ -43,13 +45,16 @@ from .mesh import build_magnon_mesh_cache
 from .output import (
     DISPERSION_OUTPUT_SCHEMA_VERSION,
     LIFETIME_OUTPUT_SCHEMA_VERSION,
+    PHONON_RENORMALIZATION_OUTPUT_SCHEMA_VERSION,
     write_dispersion_npz,
     write_dispersion_plot,
     write_lifetime_npz,
+    write_phonon_renormalization_npz,
 )
 from .parallel import CollectiveExecutionError, RankFailure
 from .phonon import load_phonon_cache, zero_point_displacements
 from .pipeline import LifetimeGridResult, compute_lifetime_grid
+from .phonon_renormalization import compute_phonon_renormalization_grid
 from .screening import load_exchange_h5, screen_magnetic_configuration
 
 
@@ -84,7 +89,11 @@ def _anisotropy_signature(value: Any) -> dict[str, Any] | None:
 
 
 def _request_signature(
-    request: MagphLifetimeRequest | MagphDispersionRequest,
+    request: (
+        MagphLifetimeRequest
+        | MagphPhononRenormalizationRequest
+        | MagphDispersionRequest
+    ),
 ) -> str:
     """Hash scientific inputs and source-file identities for safe restart reuse."""
 
@@ -99,9 +108,14 @@ def _request_signature(
         "single_ion_anisotropy": _anisotropy_signature(request.anisotropy),
     }
     if isinstance(request, MagphLifetimeRequest):
+        calculation = (
+            "phonon_renormalization"
+            if isinstance(request, MagphPhononRenormalizationRequest)
+            else "lifetime"
+        )
         payload = {
             **common,
-            "calculation": "lifetime",
+            "calculation": calculation,
             "derivative_h5": _source_stamp(request.derivative_h5),
             "phonon_cache": _source_stamp(request.phonon_cache),
             "phonon_epr": (
@@ -218,7 +232,11 @@ def _restart_dispersion_result(
 
 
 def _existing_output_policy(
-    request: MagphLifetimeRequest | MagphDispersionRequest,
+    request: (
+        MagphLifetimeRequest
+        | MagphPhononRenormalizationRequest
+        | MagphDispersionRequest
+    ),
     context: MPIContext,
 ) -> MagphRunResult | None:
     """Apply one root-decided output policy and broadcast the result or error."""
@@ -248,16 +266,15 @@ def _existing_output_policy(
                         )
                 else:
                     signature = _request_signature(request)
-                    calculation = (
-                        "dispersion"
-                        if isinstance(request, MagphDispersionRequest)
-                        else "lifetime"
-                    )
-                    schema = (
-                        DISPERSION_OUTPUT_SCHEMA_VERSION
-                        if calculation == "dispersion"
-                        else LIFETIME_OUTPUT_SCHEMA_VERSION
-                    )
+                    if isinstance(request, MagphDispersionRequest):
+                        calculation = "dispersion"
+                        schema = DISPERSION_OUTPUT_SCHEMA_VERSION
+                    elif isinstance(request, MagphPhononRenormalizationRequest):
+                        calculation = "phonon_renormalization"
+                        schema = PHONON_RENORMALIZATION_OUTPUT_SCHEMA_VERSION
+                    else:
+                        calculation = "lifetime"
+                        schema = LIFETIME_OUTPUT_SCHEMA_VERSION
                     metadata, arrays = _completed_payload(
                         request.output,
                         calculation=calculation,
@@ -278,10 +295,46 @@ def _existing_output_policy(
                                 overwrite=False,
                             )
                         k_count = result.path.n_points
+                    elif isinstance(request, MagphPhononRenormalizationRequest):
+                        required = {
+                            "q_points_frac",
+                            "renormalized_frequency_mev",
+                        }
+                        missing = sorted(required.difference(arrays))
+                        if missing:
+                            raise ValueError(
+                                "completed phonon-renormalization output is missing "
+                                + ", ".join(missing)
+                            )
+                        q_points = np.asarray(arrays["q_points_frac"])
+                        frequency = np.asarray(
+                            arrays["renormalized_frequency_mev"]
+                        )
+                        if q_points.ndim != 2 or q_points.shape[1:] != (3,):
+                            raise ValueError(
+                                "completed phonon-renormalization q_points_frac "
+                                "is invalid"
+                            )
+                        if (
+                            frequency.ndim != 2
+                            or frequency.shape[0] != q_points.shape[0]
+                        ):
+                            raise ValueError(
+                                "completed phonon-renormalization frequency grid "
+                                "is invalid"
+                            )
+                        kmesh = metadata.get("kmesh")
+                        if not isinstance(kmesh, list) or len(kmesh) != 3:
+                            raise ValueError(
+                                "completed phonon-renormalization output lacks "
+                                "kmesh provenance"
+                            )
+                        k_count = int(np.prod(np.asarray(kmesh, dtype=np.int64)))
                     else:
                         if "k_points_frac" not in arrays or "energy_mev" not in arrays:
                             raise ValueError(
-                                "completed lifetime output is missing k_points_frac or energy_mev"
+                                "completed lifetime output is missing k_points_frac "
+                                "or energy_mev"
                             )
                         k_points = np.asarray(arrays["k_points_frac"])
                         energy = np.asarray(arrays["energy_mev"])
@@ -318,9 +371,14 @@ def _existing_output_policy(
 
 def _validate_parallel(parallel: ParallelConfig, *, calculation: str) -> None:
     if parallel.workers_per_rank != 1:
+        work_axis = (
+            "external phonon q"
+            if calculation == "phonon_renormalization"
+            else "external magnon k"
+        )
         raise MagphInputError(
             f"native {calculation} currently requires &parallel workers_per_rank=1; "
-            "use MPI ranks over external k and threads_per_worker within each rank"
+            f"use MPI ranks over {work_axis} and threads_per_worker within each rank"
         )
     if parallel.precache_workers is not None:
         raise MagphInputError(
@@ -997,6 +1055,231 @@ def run_lifetime(
     )
 
 
+def run_phonon_renormalization(
+    request: MagphPhononRenormalizationRequest,
+    *,
+    context: MPIContext | None = None,
+    parallel: ParallelConfig | None = None,
+    program: str = "slw_magph.x",
+    verbosity: str = "normal",
+) -> MagphRunResult:
+    """Run the exchange-striction magnon bubble for every phonon q/mode."""
+
+    mpi = MPIContext.discover() if context is None else context
+    runtime = ParallelConfig() if parallel is None else parallel
+    _validate_parallel(runtime, calculation="phonon_renormalization")
+    if mpi.size > 1:
+        request = mpi.bcast(request if mpi.is_root else None, root=0)
+        if request is None:  # pragma: no cover - communicator contract guard
+            raise RuntimeError(
+                "rank zero did not broadcast the phonon-renormalization request"
+            )
+    timers = TimerBook()
+    logger = RunLogger(
+        sys.stdout,
+        rank=mpi.rank,
+        verbosity=verbosity,
+        timers=timers,
+    )
+    with logger.phase("phonon_cache", label="Preparing phonon cache"):
+        _ensure_phonon_cache(request, mpi, runtime, logger)
+    reused = _existing_output_policy(request, mpi)
+    if reused is not None:
+        logger.info(f"restart      = reused completed {request.output}")
+        return reused
+
+    with timers.phase("total"):
+        with logger.phase("input_screening", label="Screening native inputs"):
+            (
+                exchange,
+                exchange_report,
+                derivative,
+                derivative_report,
+                phonons,
+                zero_point,
+                configuration,
+                anisotropy,
+                k_points,
+            ) = _load_collectively(request, mpi)
+        logger.info("external mode  = phonon")
+        logger.info("self-energy    = one-loop exchange-striction magnon bubble")
+        logger.info("static J''     = not included")
+        logger.info(f"magnetic order = {configuration.order.value}")
+        logger.info(f"magnon k count = {k_points.shape[0]}")
+        logger.info(f"phonon q count = {phonons.nq}")
+
+        with logger.phase(
+            "coupling_cache",
+            label="Building MPI-distributed mode coupling cache",
+        ):
+            coupling = build_mode_resolved_isotropic_derivative_distributed(
+                exchange,
+                derivative,
+                phonons,
+                zero_point,
+                require_complete_targets=request.require_complete_targets,
+                q_chunk_size=runtime.q_chunk_size,
+                bond_chunk_size=runtime.bond_chunk_size,
+                context=mpi,
+            )
+
+        union_mesh = tuple(
+            int(np.lcm(k_value, q_value))
+            for k_value, q_value in zip(
+                request.kmesh,
+                phonons.q_mesh_shape,
+                strict=True,
+            )
+        )
+        logger.info(
+            "unique k+q mesh = "
+            + " x ".join(map(str, union_mesh))
+            + f" ({int(np.prod(union_mesh))} LSWT points)"
+        )
+        with logger.phase("lswt_cache", label="Precomputing k+q magnons"):
+            magnon_cache = build_magnon_mesh_cache(
+                exchange,
+                configuration,
+                coupling,
+                k_points,
+                k_mesh_shape=request.kmesh,
+                kshift_grid=request.kshift,
+                anisotropy=anisotropy,
+                context=mpi,
+            )
+
+        q_blocks = [
+            value
+            for value in (
+                runtime.vertex_q_chunk_size,
+                runtime.self_energy_q_chunk_size,
+            )
+            if value is not None
+        ]
+        renormalization_q_chunk = 1 if not q_blocks else min(q_blocks)
+        logger.info(
+            "q distribution = balanced contiguous MPI blocks; "
+            f"rank-local materialization chunk={renormalization_q_chunk}"
+        )
+
+        def report_progress(completed: int, total: int) -> None:
+            if total < 1:
+                return
+            label = (
+                "phonon q (balanced-rank estimate)"
+                if mpi.size > 1
+                else "phonon q"
+            )
+            logger.progress(
+                label,
+                completed,
+                total,
+                every=max(1, total // 20),
+                min_interval=1.0,
+                force=completed == total,
+            )
+
+        with logger.phase(
+            "phonon_self_energy",
+            label="Computing on-shell phonon self-energy",
+        ):
+            distributed = compute_phonon_renormalization_grid(
+                exchange,
+                configuration,
+                coupling,
+                magnon_cache,
+                phonons.frequencies_mev,
+                temperature_k=request.temperature_k,
+                broadening_mev=request.broadening_mev,
+                metric_energy_tolerance_mev=(
+                    request.metric_energy_tolerance_mev
+                ),
+                negative_tolerance_mev=request.negative_tolerance_mev,
+                q_chunk_size=renormalization_q_chunk,
+                channel_chunk_size=runtime.channel_chunk_size,
+                context=mpi,
+                progress=report_progress,
+            )
+
+        output_failure: RankFailure | None = None
+        if mpi.is_root:
+            try:
+                if distributed.global_result is None:
+                    raise RuntimeError(
+                        "rank zero did not receive the phonon-renormalization grid"
+                    )
+                metadata = _output_metadata(
+                    request,
+                    parallel=runtime,
+                    exchange=exchange,
+                    exchange_report=exchange_report,
+                    derivative=derivative,
+                    derivative_report=derivative_report,
+                    phonons=phonons,
+                    configuration=configuration,
+                    anisotropy=anisotropy,
+                    coupling=coupling,
+                    magnon_cache=magnon_cache,
+                    mpi_size=mpi.size,
+                )
+                metadata["calculation"] = "phonon_renormalization"
+                metadata["external_quasiparticle"] = "phonon"
+                metadata["static_exchange_second_derivative_included"] = False
+                metadata.pop("q_weight_policy", None)
+                metadata["k_weight_policy"] = "uniform_normalized"
+                metadata["phonon_mode_self_energy"] = "diagonal"
+                metadata["nambu_prefactor"] = (
+                    0.5
+                    if configuration.order.value == "collinear_afm"
+                    else 1.0
+                )
+                metadata["algorithm"] = {
+                    **metadata["algorithm"],
+                    "self_energy": "one_loop_exchange_striction_magnon_bubble",
+                    "mpi_distribution": "phonon_q",
+                    "dyson": "onshell_frequency_squared",
+                }
+                metadata["restart_signature"] = _request_signature(request)
+                metadata["restart_mode"] = request.restart_mode.value
+                with logger.phase(
+                    "output",
+                    label="Writing phonon-renormalization output",
+                ):
+                    write_phonon_renormalization_npz(
+                        request.output,
+                        distributed.global_result,
+                        metadata=metadata,
+                        overwrite=request.overwrite,
+                    )
+            except Exception as exc:  # noqa: BLE001 - release non-root ranks
+                output_failure = _rank_failure(
+                    mpi.rank,
+                    "phonon_renormalization_output",
+                    exc,
+                )
+        output_failure = mpi.bcast(output_failure, root=0)
+        if output_failure is not None:
+            raise CollectiveExecutionError((output_failure,))
+        logger.info(f"written       = {request.output}")
+
+    total = timers.get("total")
+    if total is not None and mpi.size > 1:
+        timers.record(
+            "mpi_total",
+            cpu_seconds=mpi.allreduce_sum_float(total.cpu_seconds),
+            wall_seconds=mpi.allreduce_max_float(total.wall_seconds),
+        )
+        logger.timing_summary(program, phase="mpi_total")
+    else:
+        logger.timing_summary(program, phase="total")
+    return MagphRunResult(
+        output=request.output,
+        mpi_size=mpi.size,
+        k_point_count=int(np.prod(np.asarray(request.kmesh, dtype=np.int64))),
+        magnetic_site_count=configuration.n_magnetic_sites,
+    )
+
+
 def _load_dispersion_problem(request: MagphDispersionRequest) -> tuple[Any, ...]:
     exchange, exchange_report = load_exchange_h5(request.exchange_h5)
     if exchange.lattice_ang is None:
@@ -1222,14 +1505,57 @@ def prepare_run(
 ) -> NativeExecutionPlan:
     """Prepare a native magph calculation for the common CLI runner."""
 
-    if calculation not in {"dispersion", "lifetime"} or requested_name != calculation:
+    if calculation not in {
+        "dispersion",
+        "lifetime",
+        "phonon_renormalization",
+    } or requested_name != calculation:
         raise MagphInputError(
             f"native magph engine does not implement {requested_name!r}"
         )
     _validate_parallel(config.parallel, calculation=calculation)
     all_ranks, warning = _parallel_policy(config, context)
     execution_context = context if all_ranks else MPIContext()
-    if calculation == "lifetime":
+    if calculation in {"lifetime", "phonon_renormalization"}:
+        if calculation == "phonon_renormalization":
+            dynamic_request = build_phonon_renormalization_request(
+                parameters,
+                prefix=config.control.prefix,
+                savedir=config.control.savedir,
+            )
+
+            def run_dynamic_plan() -> int:
+                run_phonon_renormalization(
+                    dynamic_request,
+                    context=execution_context,
+                    parallel=config.parallel,
+                    program=program,
+                    verbosity=config.control.verbosity,
+                )
+                return 0
+
+            return NativeExecutionPlan(
+                backend_label=(
+                    "slw.magph.engine (native phonon renormalization)"
+                ),
+                run=run_dynamic_plan,
+                all_ranks=all_ranks,
+                warning=warning,
+                summary=(
+                    ("magnetic order", dynamic_request.magnetic_order.value),
+                    ("magnon k mesh", " x ".join(map(str, dynamic_request.kmesh))),
+                    ("k-grid shift", ", ".join(map(str, dynamic_request.kshift))),
+                    (
+                        "phonon q mesh",
+                        "cache / dJ mesh default"
+                        if dynamic_request.phonon_qmesh is None
+                        else " x ".join(map(str, dynamic_request.phonon_qmesh)),
+                    ),
+                    ("temperature", f"{dynamic_request.temperature_k} K"),
+                    ("output", dynamic_request.output),
+                ),
+            )
+
         lifetime_request = build_lifetime_request(
             parameters,
             prefix=config.control.prefix,
@@ -1321,6 +1647,26 @@ def format_help(
             "set anisotropy_model/mev/axis/normalization. MPI distributes path\n"
             "points.\n"
         )
+    if calculation == "phonon_renormalization":
+        return (
+            "slw_magph.x calculation='phonon_renormalization' (native)\n\n"
+            "Required &magph keys:\n"
+            "  exchange_h5       = canonical static J HDF5\n"
+            "  derivative_h5     = scalar dJ/du HDF5\n"
+            "  phonon_cache/epr  = schema-v3 NPZ or EPR IFC source\n"
+            "  magnetic_order    = 'fm' or 'collinear_afm'\n"
+            "  spin_magnitudes   = scalar or one value per magnetic site\n"
+            "  quantization_axis = three Cartesian components\n"
+            "  kmesh, kshift     = magnon integration mesh and grid shift\n"
+            "  temperature_k     = non-negative temperature\n"
+            "  broadening_mev    = positive retarded broadening\n\n"
+            "This computes the on-shell one-loop phonon self-energy from the\n"
+            "linear exchange-striction vertex dJ/du. It does not include the\n"
+            "static mean-field J'' correction used by Lee and Rabe. MPI\n"
+            "distributes external phonon q points. Optional controls match the\n"
+            "native lifetime input, including phonon_qmesh, frequency_floor_mev,\n"
+            "ASR/tolerance settings, anisotropy, output, and restart_mode.\n"
+        )
     return (
         "slw_magph.x calculation='lifetime' (native)\n\n"
         "Required &magph keys:\n"
@@ -1345,4 +1691,10 @@ def format_help(
     )
 
 
-__all__ = ["MagphRunResult", "prepare_run", "run_dispersion", "run_lifetime"]
+__all__ = [
+    "MagphRunResult",
+    "prepare_run",
+    "run_dispersion",
+    "run_lifetime",
+    "run_phonon_renormalization",
+]

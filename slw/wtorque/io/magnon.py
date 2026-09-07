@@ -32,6 +32,8 @@ class HDF5MagnonProvider:
         tolerance: float = 1.0e-9,
     ) -> None:
         self.path = Path(path)
+        if not np.isfinite(tolerance) or tolerance < 0:
+            raise ValueError("tolerance must be finite and non-negative")
         self.handle = h5py.File(self.path, "r")
         if "magnon" not in self.handle:
             self.close()
@@ -58,6 +60,25 @@ class HDF5MagnonProvider:
         if self.transforms.shape != (self.qpoints.shape[0], 2 * nmag, 2 * nmag):
             self.close()
             raise ValueError("/magnon/T_para must have shape [nq,2*nmag,2*nmag]")
+        if self.qpoints.shape[0] == 0 or not np.all(np.isfinite(self.qpoints)):
+            self.close()
+            raise ValueError("/magnon/qpoints must be nonempty and finite")
+        if not np.all(np.isfinite(self.energies)) or np.any(self.energies <= 0):
+            self.close()
+            raise ValueError(
+                "/magnon/energy must be finite and strictly positive; "
+                "zero modes need a separate treatment"
+            )
+        if not np.all(np.isfinite(self.transforms)):
+            self.close()
+            raise ParaunitarityError("/magnon/T_para must contain only finite values")
+        if (
+            self.spin_lengths.shape != (nmag,)
+            or not np.all(np.isfinite(self.spin_lengths))
+            or np.any(self.spin_lengths <= 0)
+        ):
+            self.close()
+            raise ValueError("/magnon/spin_length must be finite and positive with shape (nmag,)")
         expected_metric = np.r_[np.ones(nmag), -np.ones(nmag)]
         if self.metric.shape != expected_metric.shape or not np.array_equal(self.metric, expected_metric):
             self.close()
@@ -74,7 +95,11 @@ class HDF5MagnonProvider:
         ):
             self.close()
             raise GaugeMismatchError("magnon spin lengths differ from the electronic input")
-        residuals = np.array([paraunitarity_residual(value) for value in self.transforms])
+        try:
+            residuals = np.array([paraunitarity_residual(value) for value in self.transforms])
+        except ParaunitarityError:
+            self.close()
+            raise
         if np.any(residuals > tolerance):
             self.close()
             raise ParaunitarityError(

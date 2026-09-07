@@ -131,6 +131,7 @@ def _retarded_loop_for_q(
         orbital_centers=model.orbital_centers,
         magnetic_site_positions=inputs.magnetic.site_positions,
         coordinate_type=config.magnetic_subspace.spin_coordinate.value,
+        site_projection=config.magnetic_subspace.site_projection,
     )
     vertices = vertices.reshape(
         model.kpoints.shape[0],

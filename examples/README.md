@@ -88,10 +88,12 @@ calculations distribute their numerical work over those MPI ranks. The
 backend, not an MPI rank count.
 
 Scalar dJ is the only exchange mode that may additionally use
-`workers_per_rank>1`: each MPI rank publishes its assigned EPC cache in local
-shared memory for those workers. Reserve and bind at least
-`workers_per_rank*threads_per_worker` cores per rank and verify node-local
-shared-memory capacity. Keep `workers_per_rank=1` for the other exchange modes.
+`workers_per_rank>1`: it processes x/y/z as separate cache batches, and each
+MPI rank publishes only its assigned targets for the current axis in local
+shared memory. The batch is released before the next axis. Reserve and bind at
+least `workers_per_rank*threads_per_worker` cores per rank and verify
+node-local shared-memory capacity. Keep `workers_per_rank=1` for the other
+exchange modes.
 
 ## Validation
 
@@ -111,20 +113,26 @@ slw_epr.x -in examples/epr.in --dry-run
 slw_magph.x -in examples/dispersion.in --dry-run
 slw_magph.x -in examples/magph.in --dry-run
 slw_magph.x -in examples/lifetime.in --dry-run
+slw_magph.x -in examples/phonon_renormalization.in --dry-run
 slw_post.x -in examples/post.in --dry-run
 slw_post.x -in examples/lifetime_plot.in --dry-run
 ```
 
-## Magnon and lifetime templates
+## Magnon, lifetime, and phonon-renormalization templates
 
 `dispersion.in` reads the explicit Wannier90 `kpoint_path` block in
 `kpath.win`. Its single-ion anisotropy is illustrative: positive `K` follows
 `H_SIA=-K(s.n)^2`, and the normalization must match the supplied exchange data.
 
-Native dispersion and lifetime use `restart_mode='error'` by default. Select
-`restart` to validate and reuse a completed NPZ, or `from_scratch` to replace
-an existing result atomically. Native lifetime does not resume a partial
-self-energy grid.
+Native dispersion, lifetime, and phonon renormalization use
+`restart_mode='error'` by default. Select `restart` to validate and reuse a
+completed NPZ, or `from_scratch` to replace an existing result atomically.
+Native dynamic calculations do not resume a partial self-energy grid.
+
+`phonon_renormalization.in` computes the on-shell phonon self-energy from the
+AFM `J`, `dJ/du`, and phonons. It neither reads nor requires an FM phonon
+calculation. The result is the dynamic one-loop magnon-bubble correction; it
+does not include the static mean-field `d2J/du2` correction.
 
 `lifetime_plot.in` reads the native lifetime NPZ and produces mode-resolved
 energy, HWHM, rate, lifetime, and mode-splitting maps. Native AFM schema-v2

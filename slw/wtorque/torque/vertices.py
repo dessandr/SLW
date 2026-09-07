@@ -7,6 +7,7 @@ from numpy.typing import NDArray
 from scipy.linalg import expm
 
 from slw.wtorque.basis import require_complex128
+from slw.wtorque.config import SiteProjection
 
 PAULI = np.array(
     [
@@ -107,6 +108,7 @@ def finite_q_vertices(
     orbital_centers: object,
     magnetic_site_positions: object,
     coordinate_type: str = "transverse_direction",
+    site_projection: SiteProjection | str = SiteProjection.LOCAL_PARTITION,
 ) -> NDArray[np.complex128]:
     """Build batched finite-q site vertices mapping source k to final k+q.
 
@@ -115,6 +117,12 @@ def finite_q_vertices(
     commutators; SOC remains solely in the full Hamiltonian Green functions.
     """
 
+    policy = SiteProjection(site_projection)
+    if policy not in {SiteProjection.LOCAL_PARTITION, SiteProjection.FULL_ATOM}:
+        raise NotImplementedError(
+            f"production finite-q vertices do not support site_projection={policy.value}; "
+            "onsite_only is a local diagnostic, and user_supplied needs explicit local fields"
+        )
     source = require_complex128("H_XC(source)", hxc_source)
     final = require_complex128("H_XC(final)", hxc_final)
     masks = np.asarray(orbital_masks, dtype=bool)

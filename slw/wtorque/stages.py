@@ -177,6 +177,7 @@ def run_project_magnons(
                 v_pi_ph[index],
                 qdata.transform,
                 magnetic.spin_lengths,
+                spin_coordinate=config.magnetic_subspace.spin_coordinate.value,
             )
             return {
                 "coupling/g_mp_normal": projected.normal,

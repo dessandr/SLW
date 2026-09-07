@@ -65,6 +65,8 @@ NATIVE_MODULES = {
     "output.py",
     "parallel.py",
     "phonon.py",
+    "phonon_renormalization.py",
+    "phonon_self_energy.py",
     "pipeline.py",
     "screening.py",
     "self_energy.py",

@@ -1,0 +1,47 @@
+! Dynamic phonon renormalization from the one-loop exchange-striction magnon
+! bubble. This uses one AFM phonon calculation; no separate FM phonon is read.
+&control
+  calculation = 'phonon_renormalization',
+  prefix = 'sample',
+  outdir = './slw-tmp',
+  verbosity = 'normal'
+/
+
+&parallel
+  execution = 'auto',
+  ! MPI ranks own contiguous blocks of external phonon q points.
+  workers_per_rank = 1,
+  threads_per_worker = 1,
+  q_chunk_size = 64,
+  bond_chunk_size = 64,
+  vertex_q_chunk_size = 1,
+  self_energy_q_chunk_size = 1
+/
+
+&magph
+  exchange_h5 = '${savedir}/sample.j.h5',
+  derivative_h5 = '${savedir}/sample.dj.h5',
+  phonon_cache = '${savedir}/phonon_cache.npz',
+  phonon_epr = './sample_epr.h5',
+  phonon_qmesh = 8, 8, 8,
+  phonon_loto = 'auto',
+  phonon_imaginary_tolerance_mev = 1.0d-6,
+  phonon_cache_compressed = .false.,
+  magnetic_order = 'collinear_afm',
+  spin_magnitudes = 1.0, 1.0,
+  spin_pattern = 1.0, -1.0,
+  quantization_axis = 0.0, 0.0, 1.0,
+  ! With the matching q mesh, this half shift keeps both k and k+q away from
+  ! an exact gapless magnon at finite T. Check this again if the meshes differ,
+  ! or provide a physically justified anisotropy gap.
+  kmesh = 8, 8, 8,
+  kshift = 0.5, 0.5, 0.5,
+  temperature_k = 300.0,
+  broadening_mev = 0.2,
+  ! Exact acoustic zeros cannot define a zero-point displacement. A supplied
+  ! floor is recorded, and those modes are marked invalid for interpretation.
+  frequency_floor_mev = 1.0d-3,
+  asr_policy = 'fail',
+  output = '${savedir}/sample.phonon_renormalization.npz',
+  restart_mode = 'error'
+/

@@ -125,6 +125,52 @@ class RunnerTests(unittest.TestCase):
         self.assertIn("workers/rank    = 1", stdout.getvalue())
         self.assertIn("threads/worker  = 2", stdout.getvalue())
 
+    def test_native_phonon_renormalization_dry_run_uses_afm_input(self):
+        input_text = """
+        &control
+          calculation = 'phonon_renormalization',
+          prefix = 'sample',
+          outdir = './scratch'
+        /
+        &parallel
+          workers_per_rank = 1,
+          vertex_q_chunk_size = 1,
+          self_energy_q_chunk_size = 1
+        /
+        &magph
+          exchange_h5 = 'J.h5',
+          derivative_h5 = 'dJ.h5',
+          phonon_cache = 'phonon.npz',
+          magnetic_order = 'collinear_afm',
+          spin_magnitudes = 1.5, 1.5,
+          spin_pattern = 1.0, -1.0,
+          quantization_axis = 0.0, 0.0, 1.0,
+          kmesh = 4, 4, 4,
+          kshift = 0.5, 0.5, 0.5,
+          temperature_k = 100.0,
+          broadening_mev = 0.2,
+          frequency_floor_mev = 0.001
+        /
+        """
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            working_directory(directory),
+            contextlib.redirect_stdout(stdout),
+            contextlib.redirect_stderr(stderr),
+        ):
+            previous = sys.stdin
+            sys.stdin = io.StringIO(input_text)
+            try:
+                code = run_stage("magph", ["--dry-run"])
+            finally:
+                sys.stdin = previous
+            self.assertFalse(os.path.exists(os.path.join(directory, "scratch")))
+        self.assertEqual(code, 0, stderr.getvalue())
+        self.assertIn("native phonon renormalization", stdout.getvalue())
+        self.assertIn("phonon_renormalization.npz", stdout.getvalue())
+
     def test_legacy_hybrid_maps_common_worker_controls(self):
         input_text = """
         &control

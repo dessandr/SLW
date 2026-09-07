@@ -8,7 +8,7 @@ standard output.
 |---|---|---|
 | `slw_epr.x` | QE/qe2pert EPR preparation and validation | none yet |
 | `slw_exchange.x` | scalar/tensor `J` and analytic `dJ/du` | all calculations |
-| `slw_magph.x` | magnon dispersion, lifetime, hybrid, spectral, and scattering calculations | `dispersion`, `lifetime`, `spectral`, `chirality_plane` |
+| `slw_magph.x` | magnon dispersion, lifetime, phonon renormalization, hybrid, spectral, and scattering calculations | `dispersion`, `lifetime`, `phonon_renormalization`, `spectral`, `chirality_plane` |
 | `slw_post.x` | ASR/symmetry checks, analysis, dumps, and plotting | none yet |
 
 Serial use follows the QE convention:
@@ -157,9 +157,9 @@ For compatibility-backed stages, `high` prints the translated command.
 
 - EPR: `gkq`, `dispersion`, `phonon_cache`, `kpath`
 - Exchange: `j`, `dj`; tensor form is selected by `ltensor=.true.`
-- Magph: `hybrid`, `berry`, `spectral`, `lifetime`, `scattering_kbz`,
-  `scattering_qbz`, `rotational_coupling`, `chirality_plane`,
-  `prepare_lifetime`
+- Magph: `hybrid`, `berry`, `spectral`, `lifetime`,
+  `phonon_renormalization`, `scattering_kbz`, `scattering_qbz`,
+  `rotational_coupling`, `chirality_plane`, `prepare_lifetime`
 - Post: `check_gkq`, `check_spin_mz`, `compare_u_rotation`, `dj_asr`,
   `dj_kq_symmetry`, `dump_dj`, `spin_group`, `j_diagnostic`,
   `rpa_lkag_audit`, spin-flip/SOC diagnostics, lifetime/phonon analysis,
@@ -175,13 +175,13 @@ intentionally remain separate because their LKAG/TB2J conventions differ.
 The current HDF5 schemas are preserved so magph screening and existing data
 remain compatible while the numerical implementation is replaced internally.
 
-Magph lifetime now runs through `slw.magph.engine` and has no dependency on
-the archive. It distributes external k points over every discovered MPI rank,
-keeps q/mode work vectorized within each rank, and writes one root-owned NPZ.
-Other magph drivers remain under `slw.magph.legacy.reference` while numerical
-contracts are replaced. Helper and post-processing modules live under
-`slw.magph.legacy`; old `python -m slw.magph.<module>` paths are intentionally
-not preserved.
+Magph lifetime and phonon renormalization now run through `slw.magph.engine`
+and have no dependency on the archive. Lifetime distributes external magnon k;
+phonon renormalization distributes external phonon q. Both keep inner work
+vectorized and write one root-owned NPZ. Other magph drivers remain under
+`slw.magph.legacy.reference` while numerical contracts are replaced. Helper
+and post-processing modules live under `slw.magph.legacy`; old
+`python -m slw.magph.<module>` paths are intentionally not preserved.
 
 The EPR and post stages also translate validated namelist values into retained
 drivers. Their backend location is an implementation detail rather than a

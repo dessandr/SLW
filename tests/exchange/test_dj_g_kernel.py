@@ -5,6 +5,7 @@ import unittest
 import numpy as np
 
 from slw.exchange.kernels.dj_epr import (
+    _cartesian_axis_batches,
     _partition_derivative_work,
     _rotate_g_to_eigenbasis,
     _spectral_projected_blocks,
@@ -23,6 +24,15 @@ def _random_unitaries(rng: np.random.Generator, nk: int, nw: int) -> np.ndarray:
 
 
 class ScalarDjGKernelTests(unittest.TestCase):
+    def test_cartesian_axis_batches_keep_all_targets_in_axis_order(self) -> None:
+        self.assertEqual(
+            _cartesian_axis_batches((3, 7), ("z", "x")),
+            (
+                ("z", ((3, "z"), (7, "z"))),
+                ("x", ((3, "x"), (7, "x"))),
+            ),
+        )
+
     def test_mpi_partition_distributes_cache_before_excess_rank_energy(self) -> None:
         work_items = tuple((target, axis) for target in range(4) for axis in "xyz")
         energies = tuple(range(23))

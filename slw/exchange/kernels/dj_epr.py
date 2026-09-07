@@ -1,14 +1,16 @@
 """Native scalar exchange-derivative kernel in qe2pert EPR k,q space.
 
 This path intentionally avoids materializing legacy g_real payloads.  It
-pre-caches H(k), eigensystems, bond phases, k+q maps, and EPR g(k,q), then
+pre-caches H(k), eigensystems, bond phases, and k+q maps once, then streams the
+large EPR g(k,q) cache one Cartesian displacement axis at a time.  Each batch
 assembles the dG terms in momentum space with either a direct full-matrix or
-an exact complete-eigenbasis projected kernel.
+an exact complete-eigenbasis projected kernel before releasing g(k,q).
 """
 
 from __future__ import annotations
 
 import argparse
+import gc
 import multiprocessing as mp
 import os
 import sys
@@ -187,6 +189,15 @@ def _axis_list(text):
     if len(set(normalized)) != len(normalized):
         raise ValueError(f"Duplicate axes in '{text}'")
     return list(normalized)
+
+
+def _cartesian_axis_batches(target_ids, axes):
+    """Return deterministic one-axis batches for all selected targets."""
+
+    targets = tuple(int(target) for target in target_ids)
+    return tuple(
+        (axis, tuple((target, axis) for target in targets)) for axis in tuple(axes)
+    )
 
 
 def _labels_from_species_labels(species_labels, nat):
@@ -791,7 +802,9 @@ def _build_g_cache_entry(task):
     return (spin, ia0, ax, bool(onsite_only)), arr
 
 
-def _precache(args, labels, work_items, slices, pair_meta):
+def _precache_static(args, slices, pair_meta):
+    """Build the axis-independent electronic and Fourier cache once per rank."""
+
     kpts = _full_k_mesh(args.kmesh)
     with h5py.File(args.epr_up, "r") as h5:
         epr_qmesh = tuple(int(x) for x in h5["basic_data/qc_dim"][()])
@@ -827,9 +840,33 @@ def _precache(args, labels, work_items, slices, pair_meta):
         kq = _kq_map(tuple(args.kmesh), qmesh)
     else:
         kq = np.arange(len(kpts), dtype=np.int64)[None, :]
+    g_kernel = str(getattr(args, "g_kernel", "direct")).lower()
+    if g_kernel not in {"direct", "spectral"}:
+        raise ValueError(f"Unsupported scalar dJ GgG kernel {g_kernel!r}")
+    return {
+        "kpts": kpts,
+        "qpts": qpts,
+        "qmesh": qmesh,
+        "rp_grid": _rp_grid(qmesh)
+        if args.g_transform == "kq"
+        else np.asarray([args.rp_idx], dtype=np.int64),
+        "eig": eig,
+        "phase_R": phase_R,
+        "bond_target_q_phase": bond_target_q_phase,
+        "kq_map": kq,
+        "ddelta_mode": str(getattr(args, "ddelta_mode", "off")).lower(),
+        "g_kernel": g_kernel,
+    }
+
+
+def _precache_derivatives(args, labels, work_items, static_cache):
+    """Build only the large target/axis-dependent g cache for one batch."""
+
+    kpts = static_cache["kpts"]
+    qpts = static_cache["qpts"]
     g_cache = {}
     tasks = []
-    onsite_mode = str(getattr(args, "ddelta_mode", "off")).lower()
+    onsite_mode = str(static_cache["ddelta_mode"]).lower()
     need_ddelta_onsite = onsite_mode == "onsite"
     for ia0, ax in work_items:
         tasks.append(
@@ -928,9 +965,7 @@ def _precache(args, labels, work_items, slices, pair_meta):
     # Onsite-only entries have served their sole purpose in dDelta.  Do not
     # retain them in the integration payload.
     g_cache = {key: value for key, value in g_cache.items() if not key[3]}
-    g_kernel = str(getattr(args, "g_kernel", "direct")).lower()
-    if g_kernel not in {"direct", "spectral"}:
-        raise ValueError(f"Unsupported scalar dJ GgG kernel {g_kernel!r}")
+    g_kernel = str(static_cache["g_kernel"]).lower()
     if g_kernel == "spectral":
         print(
             "[dJ-epr-kspace] rotate complete g(k,q) cache to the electronic eigenbasis",
@@ -939,28 +974,27 @@ def _precache(args, labels, work_items, slices, pair_meta):
         for key in tuple(g_cache):
             spin = key[0]
             g_cache[key] = _rotate_g_to_eigenbasis(
-                g_cache[key], eig["coeffs"][spin], kq
+                g_cache[key],
+                static_cache["eig"]["coeffs"][spin],
+                static_cache["kq_map"],
             )
     return {
-        "kpts": kpts,
-        "qpts": qpts,
-        "qmesh": qmesh,
-        "rp_grid": _rp_grid(qmesh)
-        if args.g_transform == "kq"
-        else np.asarray([args.rp_idx], dtype=np.int64),
-        "eig": eig,
-        "phase_R": phase_R,
-        "bond_target_q_phase": bond_target_q_phase,
-        "kq_map": kq,
         "g": g_cache,
         "ddelta": ddelta_cache,
-        "ddelta_mode": onsite_mode,
-        "g_kernel": g_kernel,
     }
 
 
-def _compute_chunk(energy_chunk):
-    st = _WORKER_STATIC
+def _precache(args, labels, work_items, slices, pair_meta):
+    """Compatibility wrapper returning one complete scalar-dJ cache."""
+
+    static_cache = _precache_static(args, slices, pair_meta)
+    complete = dict(static_cache)
+    complete.update(_precache_derivatives(args, labels, work_items, static_cache))
+    return complete
+
+
+def _compute_chunk(energy_chunk, static_payload=None):
+    st = _WORKER_STATIC if static_payload is None else static_payload
     eig = st["eig"]
     pair_meta = st["pair_meta"]
     slices = st["slices"]
@@ -1100,8 +1134,13 @@ def _compute_chunk(energy_chunk):
     return out
 
 
-def _share_static_arrays(value, owners):
-    """Replace NumPy arrays by descriptors backed by POSIX shared memory."""
+def _share_static_arrays(value, owners, *, consume=False):
+    """Replace NumPy arrays by descriptors backed by POSIX shared memory.
+
+    ``consume`` destructively drains mutable containers after each child is
+    published.  It is used only for batch-local g/ddelta mappings so the
+    original large cache and its shared-memory copy do not coexist in full.
+    """
     if isinstance(value, np.ndarray):
         contiguous = np.ascontiguousarray(value)
         if contiguous.nbytes == 0:
@@ -1120,11 +1159,28 @@ def _share_static_arrays(value, owners):
             dtype=contiguous.dtype.str,
         )
     if isinstance(value, dict):
-        return {key: _share_static_arrays(item, owners) for key, item in value.items()}
+        if consume:
+            shared = {}
+            for key in tuple(value):
+                item = value.pop(key)
+                shared[key] = _share_static_arrays(item, owners, consume=True)
+            return shared
+        return {
+            key: _share_static_arrays(item, owners, consume=False)
+            for key, item in value.items()
+        }
     if isinstance(value, list):
-        return [_share_static_arrays(item, owners) for item in value]
+        if consume:
+            shared = []
+            while value:
+                item = value.pop(0)
+                shared.append(_share_static_arrays(item, owners, consume=True))
+            return shared
+        return [_share_static_arrays(item, owners, consume=False) for item in value]
     if isinstance(value, tuple):
-        return tuple(_share_static_arrays(item, owners) for item in value)
+        return tuple(
+            _share_static_arrays(item, owners, consume=False) for item in value
+        )
     return value
 
 
@@ -1242,11 +1298,9 @@ def _compute_dj(
             progress(completed, n_energy)
 
     if local_workers <= 1 or len(chunks) <= 1:
-        global _WORKER_STATIC
         _configure_threads(omp_threads)
-        _WORKER_STATIC = static
         for chunk in chunks:
-            accumulate(_compute_chunk(chunk), len(chunk))
+            accumulate(_compute_chunk(chunk, static), len(chunk))
     else:
         owners = []
         if shared_workers:
@@ -1269,7 +1323,11 @@ def _compute_dj(
                         "ddelta",
                     }:
                         pre.pop(key, None)
-                    worker_payload[key] = _share_static_arrays(value, owners)
+                    worker_payload[key] = _share_static_arrays(
+                        value,
+                        owners,
+                        consume=key in {"g", "ddelta"},
+                    )
                     del value
             except OSError as exc:
                 _release_shared_arrays(owners)
@@ -1429,7 +1487,11 @@ def _write_outputs(
                 f"{symmetry_result.max_abs_residual_mev_per_ang:.12e}\n"
             )
         f.write(
-            f"# kmesh={tuple(args.kmesh)} nE={args.empoints} nproc={args.nproc} n_chunks={exe_info['n_chunks']} elapsed_s={elapsed:.2f}\n\n"
+            f"# kmesh={tuple(args.kmesh)} nE={args.empoints} "
+            f"nproc={args.nproc} n_chunks={exe_info['n_chunks']} "
+            "cache_batching=cartesian_axis "
+            f"cache_batches={exe_info.get('cache_batch_count', 1)} "
+            f"elapsed_s={elapsed:.2f}\n\n"
         )
         for m in sorted(
             pair_meta,
@@ -1573,6 +1635,12 @@ def _write_h5(
             basic,
             "cache_distribution",
             exe_info.get("cache_distribution", "rank_local_complete"),
+        )
+        basic.create_dataset(
+            "cache_batch_count",
+            data=np.asarray(
+                int(exe_info.get("cache_batch_count", 1)), dtype=np.int64
+            ),
         )
         basic.create_dataset(
             "cache_bytes_per_rank_max",
@@ -1794,11 +1862,8 @@ def run(args, comm=None):
                 npoles=args.empoints,
                 beta_eV_inv=args.cfr_beta,
             )
-        work_items = tuple((ia, ax) for ia in target_ids for ax in axes)
-        local_work_items, local_energy_mesh, energy_replicas = (
-            _partition_derivative_work(work_items, energy_mesh, rank, size)
-        )
-        pre = _precache(args, labels, local_work_items, slices, pair_meta)
+        axis_batches = _cartesian_axis_batches(target_ids, axes)
+        static_cache = _precache_static(args, slices, pair_meta)
         return (
             species_labels,
             labels,
@@ -1808,11 +1873,8 @@ def run(args, comm=None):
             neighbours,
             pair_meta,
             energy_mesh,
-            work_items,
-            local_work_items,
-            local_energy_mesh,
-            energy_replicas,
-            pre,
+            axis_batches,
+            static_cache,
             available_cpus,
         )
 
@@ -1825,26 +1887,10 @@ def run(args, comm=None):
         neighbours,
         pair_meta,
         energy_mesh,
-        work_items,
-        local_work_items,
-        local_energy_mesh,
-        energy_replicas,
-        pre,
+        axis_batches,
+        static_cache,
         available_cpus,
     ) = collective_call(comm, setup_local, phase="scalar dJ setup")
-    local_cache_bytes = _array_storage_bytes(pre)
-    local_layout = (
-        gethostname(),
-        int(local_cache_bytes),
-        len(local_work_items),
-        int(energy_replicas),
-    )
-    cache_layout = [local_layout] if comm is None else list(comm.allgather(local_layout))
-    node_cache_bytes = {}
-    for hostname, cache_bytes, _item_count, _replicas in cache_layout:
-        node_cache_bytes[hostname] = node_cache_bytes.get(hostname, 0) + cache_bytes
-    maximum_rank_cache_bytes = max(item[1] for item in cache_layout)
-    maximum_node_cache_bytes = max(node_cache_bytes.values())
     if rank == 0:
         print(
             "[dJ-epr-kspace] local parallel layout: "
@@ -1856,81 +1902,161 @@ def run(args, comm=None):
             flush=True,
         )
         print(
-            "[dJ-epr-kspace] distributed cache layout: "
-            "owner=target-axis then excess-rank energy split; "
-            f"max_rank={_format_storage(maximum_rank_cache_bytes)} "
-            f"max_node={_format_storage(maximum_node_cache_bytes)}",
+            "[dJ-epr-kspace] cache batching: one Cartesian axis at a time "
+            f"({', '.join(axis for axis, _items in axis_batches)})",
             flush=True,
         )
-    print(
-        f"[dJ-epr-kspace] assemble dJ: bonds={len(pair_meta)} "
-        f"targets={len(target_ids)} axes={axes} nE={len(energy_mesh)} "
-        f"local_nE={len(local_energy_mesh)} mpi={size} "
-        f"local_target_axes={len(local_work_items)} "
-        f"energy_replicas={energy_replicas} "
-        f"local_workers={int(args.nproc)} omp_threads={int(args.omp_threads)} "
-        f"g_kernel={args.g_kernel!s}",
-        flush=True,
-    )
+
+    reduced = {} if rank == 0 else None
     local_info = {}
-    integration_start = time.monotonic()
-    last_progress_bucket = 0
+    global_chunks = 0
+    maximum_rank_cache_bytes = 0
+    maximum_node_cache_bytes = 0
 
-    def report_progress(completed, local_total):
-        nonlocal last_progress_bucket
-        if rank != 0 or local_total <= 0:
-            return
-        fraction = min(1.0, float(completed) / float(local_total))
-        percent = 100.0 * fraction
-        bucket = int(percent // 5.0)
-        if completed < local_total and bucket <= last_progress_bucket:
-            return
-        last_progress_bucket = bucket
-        elapsed = time.monotonic() - integration_start
-        eta = elapsed * (1.0 - fraction) / fraction if fraction > 0.0 else 0.0
-        estimated_global = min(
-            len(energy_mesh),
-            round(fraction * len(energy_mesh)),
+    for batch_index, (batch_axis, batch_work_items) in enumerate(
+        axis_batches, start=1
+    ):
+        local_work_items, local_energy_mesh, energy_replicas = (
+            _partition_derivative_work(batch_work_items, energy_mesh, rank, size)
         )
-        qualifier = "" if size == 1 else " balanced-rank estimate"
+
+        def setup_batch():
+            batch_cache = dict(static_cache)
+            batch_cache.update(
+                _precache_derivatives(
+                    args,
+                    labels,
+                    local_work_items,
+                    static_cache,
+                )
+            )
+            return batch_cache
+
+        pre = collective_call(
+            comm,
+            setup_batch,
+            phase=f"scalar dJ axis {batch_axis} cache",
+        )
+        local_cache_bytes = _array_storage_bytes(pre)
+        local_layout = (
+            gethostname(),
+            int(local_cache_bytes),
+            len(local_work_items),
+            int(energy_replicas),
+        )
+        cache_layout = (
+            [local_layout] if comm is None else list(comm.allgather(local_layout))
+        )
+        node_cache_bytes = {}
+        for hostname, cache_bytes, _item_count, _replicas in cache_layout:
+            node_cache_bytes[hostname] = node_cache_bytes.get(hostname, 0) + cache_bytes
+        batch_rank_cache_bytes = max(item[1] for item in cache_layout)
+        batch_node_cache_bytes = max(node_cache_bytes.values())
+        maximum_rank_cache_bytes = max(
+            maximum_rank_cache_bytes, batch_rank_cache_bytes
+        )
+        maximum_node_cache_bytes = max(
+            maximum_node_cache_bytes, batch_node_cache_bytes
+        )
+        if rank == 0:
+            print(
+                "[dJ-epr-kspace] distributed cache batch "
+                f"{batch_index}/{len(axis_batches)} axis={batch_axis}: "
+                "owner=target then excess-rank energy split; "
+                f"max_rank={_format_storage(batch_rank_cache_bytes)} "
+                f"max_node={_format_storage(batch_node_cache_bytes)}",
+                flush=True,
+            )
         print(
-            "[dJ-epr-kspace] integration completed "
-            f"{estimated_global}/{len(energy_mesh)} ({percent:.1f}%{qualifier}) "
-            f"elapsed={_format_elapsed(elapsed)} ETA={_format_elapsed(eta)}",
+            f"[dJ-epr-kspace] assemble dJ axis={batch_axis}: "
+            f"bonds={len(pair_meta)} targets={len(target_ids)} "
+            f"nE={len(energy_mesh)} local_nE={len(local_energy_mesh)} "
+            f"mpi={size} local_targets={len(local_work_items)} "
+            f"energy_replicas={energy_replicas} "
+            f"local_workers={int(args.nproc)} "
+            f"omp_threads={int(args.omp_threads)} "
+            f"g_kernel={args.g_kernel!s}",
             flush=True,
         )
 
-    def integrate_local():
-        dj_local, info = _compute_dj(
-            pre,
-            slices,
-            pair_meta,
-            local_work_items,
-            work_items,
-            local_energy_mesh,
-            int(args.nproc),
-            args.omp_threads,
-            progress=report_progress,
-            shared_workers=comm is not None and int(args.nproc) > 1,
-        )
-        local_info.update(info)
-        return dj_local
+        integration_start = time.monotonic()
+        last_progress_bucket = 0
 
-    reduced = collective_sum(comm, integrate_local)
-    global_chunks = sum(
-        _energy_task_count(
-            len(
-                _partition_derivative_work(
-                    work_items,
-                    energy_mesh,
-                    irank,
-                    size,
-                )[1]
-            ),
-            int(args.nproc),
-        )[1]
-        for irank in range(size)
-    )
+        def report_progress(completed, local_total):
+            nonlocal last_progress_bucket
+            if rank != 0 or local_total <= 0:
+                return
+            fraction = min(1.0, float(completed) / float(local_total))
+            percent = 100.0 * fraction
+            bucket = int(percent // 5.0)
+            if completed < local_total and bucket <= last_progress_bucket:
+                return
+            last_progress_bucket = bucket
+            elapsed = time.monotonic() - integration_start
+            eta = elapsed * (1.0 - fraction) / fraction if fraction > 0.0 else 0.0
+            estimated_global = min(
+                len(energy_mesh),
+                round(fraction * len(energy_mesh)),
+            )
+            qualifier = "" if size == 1 else " balanced-rank estimate"
+            print(
+                f"[dJ-epr-kspace] axis={batch_axis} integration completed "
+                f"{estimated_global}/{len(energy_mesh)} "
+                f"({percent:.1f}%{qualifier}) "
+                f"elapsed={_format_elapsed(elapsed)} ETA={_format_elapsed(eta)}",
+                flush=True,
+            )
+
+        batch_info = {}
+
+        def integrate_local():
+            dj_local, info = _compute_dj(
+                pre,
+                slices,
+                pair_meta,
+                local_work_items,
+                batch_work_items,
+                local_energy_mesh,
+                int(args.nproc),
+                args.omp_threads,
+                progress=report_progress,
+                shared_workers=comm is not None and int(args.nproc) > 1,
+            )
+            batch_info.update(info)
+            return dj_local
+
+        batch_reduced = collective_sum(comm, integrate_local)
+        local_info.update(batch_info)
+        global_chunks += sum(
+            _energy_task_count(
+                len(
+                    _partition_derivative_work(
+                        batch_work_items,
+                        energy_mesh,
+                        irank,
+                        size,
+                    )[1]
+                ),
+                int(args.nproc),
+            )[1]
+            for irank in range(size)
+        )
+        if rank == 0:
+            if batch_reduced is None:  # pragma: no cover - communicator guard
+                raise RuntimeError(
+                    f"MPI root did not receive scalar dJ axis {batch_axis} reduction"
+                )
+            overlap = set(reduced).intersection(batch_reduced)
+            if overlap:  # pragma: no cover - axis batches must be disjoint
+                raise RuntimeError(f"duplicate scalar dJ batch keys: {sorted(overlap)}")
+            reduced.update(batch_reduced)
+        del pre
+        gc.collect()
+        if rank == 0:
+            print(
+                f"[dJ-epr-kspace] released axis={batch_axis} EPC cache",
+                flush=True,
+            )
 
     def finalize_root():
         if reduced is None:  # pragma: no cover - defensive communicator guard
@@ -1940,7 +2066,8 @@ def run(args, comm=None):
             "n_chunks": global_chunks,
             "mpi_size": size,
             "affinity_cpus_per_rank": available_cpus,
-            "cache_distribution": "target_axis_then_energy",
+            "cache_distribution": "cartesian_axis_then_target_then_energy",
+            "cache_batch_count": len(axis_batches),
             "cache_bytes_per_rank_max": maximum_rank_cache_bytes,
             "cache_bytes_per_node_max": maximum_node_cache_bytes,
             "local_worker_backend": (

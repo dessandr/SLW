@@ -2,19 +2,22 @@
 
 The array kernels and strict data contracts here are independent of the
 quarantined compatibility drivers under :mod:`slw.magph.legacy`.  Native
-``calculation='dispersion'`` and ``calculation='lifetime'`` have completed
-their initial FM/AFM gate; unrelated registry calculations remain
-compatibility-backed until replaced explicitly.
+``calculation='dispersion'``, ``calculation='lifetime'``, and
+``calculation='phonon_renormalization'`` have completed their initial FM/AFM
+gate; unrelated registry calculations remain compatibility-backed until
+replaced explicitly.
 """
 
 from .config import (
     MagphDispersionRequest,
     MagphInputError,
     MagphLifetimeRequest,
+    MagphPhononRenormalizationRequest,
     RestartMode,
     SingleIonAnisotropyInput,
     build_dispersion_request,
     build_lifetime_request,
+    build_phonon_renormalization_request,
 )
 from .coupling import (
     ModeResolvedExchangeDerivative,
@@ -34,7 +37,12 @@ from .dispersion import (
     build_wannier90_kpath,
     compute_magnon_dispersion,
 )
-from .engine import MagphRunResult, run_dispersion, run_lifetime
+from .engine import (
+    MagphRunResult,
+    run_dispersion,
+    run_lifetime,
+    run_phonon_renormalization,
+)
 from .lifetime import (
     LifetimeResult,
     compute_lifetime,
@@ -65,9 +73,11 @@ from .model import (
 from .output import (
     DISPERSION_OUTPUT_SCHEMA_VERSION,
     LIFETIME_OUTPUT_SCHEMA_VERSION,
+    PHONON_RENORMALIZATION_OUTPUT_SCHEMA_VERSION,
     write_dispersion_npz,
     write_dispersion_plot,
     write_lifetime_npz,
+    write_phonon_renormalization_npz,
 )
 from .parallel import (
     CollectiveExecutionError,
@@ -91,6 +101,15 @@ from .pipeline import (
     LifetimeGridResult,
     compute_lifetime_grid,
     evaluate_scattering_problem,
+)
+from .phonon_renormalization import (
+    DistributedPhononRenormalizationResult,
+    PhononRenormalizationResult,
+    compute_phonon_renormalization_grid,
+)
+from .phonon_self_energy import (
+    PhononSelfEnergyResult,
+    compute_phonon_self_energy_onshell,
 )
 from .screening import load_exchange_h5, screen_magnetic_configuration
 from .self_energy import (
@@ -117,11 +136,13 @@ from .vertex import (
 __all__ = (
     "DISPERSION_OUTPUT_SCHEMA_VERSION",
     "LIFETIME_OUTPUT_SCHEMA_VERSION",
+    "PHONON_RENORMALIZATION_OUTPUT_SCHEMA_VERSION",
     "CollectiveExecutionError",
     "DerivativeASRPolicy",
     "DistributedArrayResult",
     "DistributedLifetimeGridResult",
     "DistributedMagnonDispersion",
+    "DistributedPhononRenormalizationResult",
     "ExchangeCapability",
     "ExchangeConvention",
     "ExchangeDerivativeModel",
@@ -146,12 +167,15 @@ __all__ = (
     "MagphDispersionRequest",
     "MagphInputError",
     "MagphLifetimeRequest",
+    "MagphPhononRenormalizationRequest",
     "MagphRunResult",
     "ModeResolvedExchangeDerivative",
     "OnShellSelfEnergyResult",
     "PhononCache",
     "PhononInputError",
     "PhononMassUnit",
+    "PhononRenormalizationResult",
+    "PhononSelfEnergyResult",
     "ProjectedScalarTB2JReport",
     "RestartMode",
     "SelfEnergyResult",
@@ -165,6 +189,7 @@ __all__ = (
     "build_bare_isotropic_vertex_block",
     "build_dispersion_request",
     "build_lifetime_request",
+    "build_phonon_renormalization_request",
     "build_magnon_mesh_cache",
     "build_mode_resolved_isotropic_derivative",
     "build_mode_resolved_isotropic_derivative_distributed",
@@ -174,6 +199,8 @@ __all__ = (
     "compute_lifetime_grid",
     "compute_magnon_dispersion",
     "compute_onshell_self_energy_diagonal",
+    "compute_phonon_renormalization_grid",
+    "compute_phonon_self_energy_onshell",
     "compute_retarded_self_energy",
     "distributed_array_map",
     "evaluate_scattering_problem",
@@ -189,6 +216,7 @@ __all__ = (
     "normalize_q_weights",
     "run_dispersion",
     "run_lifetime",
+    "run_phonon_renormalization",
     "screen_magnetic_configuration",
     "solve_isotropic_lswt",
     "solve_isotropic_lswt_energies",
@@ -196,5 +224,6 @@ __all__ = (
     "write_dispersion_npz",
     "write_dispersion_plot",
     "write_lifetime_npz",
+    "write_phonon_renormalization_npz",
     "zero_point_displacements",
 )

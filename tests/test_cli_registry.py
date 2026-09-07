@@ -36,6 +36,11 @@ class RegistryTests(unittest.TestCase):
         self.assertEqual(resolved.backend.handler, "slw.magph.engine:prepare_run")
         self.assertTrue(resolved.backend.is_native)
 
+    def test_phonon_renormalization_uses_native_magph_handler(self):
+        resolved = resolve_action("magph", "phonon_renormalization", {})
+        self.assertEqual(resolved.backend.handler, "slw.magph.engine:prepare_run")
+        self.assertTrue(resolved.backend.is_native)
+
     def test_magnon_dispersion_uses_native_magph_handler(self):
         resolved = resolve_action("magph", "dispersion", {})
         self.assertEqual(resolved.backend.handler, "slw.magph.engine:prepare_run")

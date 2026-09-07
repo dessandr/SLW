@@ -1,9 +1,9 @@
 # Native magnon--phonon redesign contract
 
 This document defines the numerical and data-contract boundary for the new
-native magnon--phonon implementation. `calculation='dispersion'` and
-`calculation='lifetime'` are registered native commands; other
-`slw_magph.x` calculations still use
+native magnon--phonon implementation. `calculation='dispersion'`,
+`calculation='lifetime'`, and `calculation='phonon_renormalization'` are
+registered native commands; other `slw_magph.x` calculations still use
 the quarantined compatibility drivers documented in
 [INPUT_REFERENCE.md](INPUT_REFERENCE.md).
 
@@ -26,9 +26,12 @@ The first numerical foundation is now implemented as Python APIs:
   paraunitary eigenvectors;
 - `slw.magph.self_energy` evaluates the common retarded self-energy with
   vectorized, chunked contractions;
+- `slw.magph.phonon_self_energy` evaluates the reciprocal phonon self-energy
+  from the same exchange-striction vertex;
 - `slw.magph.lifetime` applies one HWHM/FWHM/rate/lifetime convention;
-- `slw.magph.parallel`, `pipeline`, `engine`, and `output` distribute external
-  k points, assemble results on rank zero, and write one atomic NPZ product.
+- `slw.magph.parallel`, `pipeline`, `phonon_renormalization`, `engine`, and
+  `output` distribute external k or q points, assemble results on rank zero,
+  and write one atomic NPZ product.
 
 ## Scope and staged pipeline
 
@@ -326,6 +329,44 @@ $$
 \mathbf D=-\frac{\boldsymbol\Sigma-\boldsymbol\Sigma^\dagger}{2i}.
 $$
 
+### Dynamic phonon self-energy
+
+For a phonon at external momentum $\mathbf q$, the native band vertex is
+ordered as `(phonon mode, final magnon at k+q, initial magnon at k)`. The
+diagonal retarded magnon bubble is
+
+$$
+\Pi^R_\nu(\mathbf q,\omega)=c_N\sum_{\mathbf k ab}w_{\mathbf k}
+\eta_a\eta_b|g^\nu_{ab}(\mathbf k,\mathbf q)|^2
+\frac{n_B(E_{b\mathbf k})-n_B(E_{a,\mathbf k+\mathbf q})}
+{\omega+i\delta+E_{b\mathbf k}-E_{a,\mathbf k+\mathbf q}}.
+$$
+
+Here $c_N=1$ for a normal FM basis and $c_N=1/2$ when negative-metric Nambu
+partners are present, removing BdG double counting. Consequently the AFM pair
+channels remain active at zero temperature. The current implementation uses
+the on-shell diagonal approximation and reports
+
+$$
+\Omega_{\mathbf q\nu}^2=\omega_{0,\mathbf q\nu}^2
++2\omega_{0,\mathbf q\nu}\operatorname{Re}
+\Pi^R_\nu(\mathbf q,\omega_{0,\mathbf q\nu}),
+\qquad
+\gamma^{\mathrm{HWHM}}_{\mathbf q\nu}=-\operatorname{Im}\Pi^R_\nu.
+$$
+
+A negative $\Omega^2$ is retained as a signed imaginary-frequency diagnostic,
+not clipped. Modes whose bare frequency needed an explicit zero-point floor
+are stored but marked invalid for physical interpretation. Off-diagonal phonon
+mode mixing and a self-consistent frequency-dependent Dyson root are not yet
+included.
+
+This dynamic correction requires only the AFM `J`, `dJ/du`, and one phonon
+reference calculation. It does not require an FM phonon calculation. It is
+also distinct from the static mean-field spin-phonon shift often extracted
+from several magnetic-order phonon calculations: that term depends on
+`d2J/du2` and spin correlations and is not present in this calculation.
+
 The production lifetime path distributes the `dJ/du` to phonon-mode coupling
 contraction over q points, assembles it deterministically, and broadcasts the
 completed `Lambda(q,mode,bond)` cache. It then forms the exact uniform
@@ -340,6 +381,12 @@ weights are normalized globally before slicing, and only rank zero coordinates
 final metadata/output. The two broadcast caches are currently replicated once
 per MPI rank; their actual rank and maximum-node footprints are printed at run
 time and recorded in output metadata.
+
+The phonon-renormalization path reuses the distributed coupling and union-LSWT
+caches, then distributes external phonon q points in balanced contiguous MPI
+blocks. Each rank materializes only its configured q block over the magnon k
+mesh, contracts it into the on-shell bubble, and discards the vertex block.
+Rank zero assembles the q grid and writes the final product.
 
 The derivative HDF5 mesh labels the finite real-space `Rp` representation; it
 does not restrict the evaluation q grid. For every phonon q point the native
@@ -403,13 +450,13 @@ paraunitary transform is claimed.
 Remove all four `anisotropy_*` keys for a zero-SIA model. Supplying only part
 of the SIA contract is an input error.
 
-Both native calculations use `restart_mode='error'|'restart'|'from_scratch'`.
+All native calculations use `restart_mode='error'|'restart'|'from_scratch'`.
 `error` preserves no-clobber behavior. `restart` checks the output schema and
 a SHA-256 signature over the scientific parameters plus source-file path,
 size, and modification time before reusing a completed NPZ; dispersion also
 regenerates a missing plot from that NPZ. `from_scratch` recomputes and
-atomically replaces completed products. Partial lifetime checkpoints are not
-yet part of the native output contract.
+atomically replaces completed products. Partial dynamic-self-energy
+checkpoints are not yet part of the native output contract.
 
 ## Native lifetime output v2
 
@@ -466,11 +513,21 @@ rerun the vertex or self-energy integration. The signed AFM splitting is
 reported as `E_chi+ - E_chi-`, rather than the difference between independently
 energy-sorted mode indices.
 
-## Registered QE-style lifetime input
+## Native phonon-renormalization output v1
 
-The native lifetime calculation consumes the three screened scientific
-products directly; it does not use a compatibility manifest or nested flat
-input file:
+`calculation='phonon_renormalization'` writes the q points, original bare and
+effective (possibly floored) phonon frequencies, complex on-shell $\Pi^R$,
+$\Omega^2$, signed renormalized frequencies, shifts relative to the effective
+bare frequency, HWHM/FWHM/rate/lifetime, stability and validity flags, and
+complete input/MPI provenance. It intentionally stores
+`static_exchange_second_derivative_included=false` so that the dynamic bubble
+cannot be mistaken for a static `d2J/du2` result.
+
+## Registered QE-style dynamic input
+
+The native lifetime and phonon-renormalization calculations consume the same
+three screened scientific products directly; neither uses a compatibility
+manifest or nested flat input file. The following is the lifetime form:
 
 ```fortran
 &control
@@ -512,13 +569,17 @@ two opposite spin-pattern entries. `kshift` is deliberately explicit because
 an exact AFM Goldstone point requires a separate regularization policy. Set at
 least one of `vertex_q_chunk_size` or `self_energy_q_chunk_size` to bound the
 largest streamed q block; when both are present the smaller value is used.
+For the reciprocal calculation, change `calculation` to
+`'phonon_renormalization'` and the output suffix accordingly. MPI then
+distributes phonon q rather than magnon k; no FM phonon input is added.
 
 ## Migration roadmap and legacy boundary
 
 1. Completed: typed static/dynamic exchange and phonon screening, isotropic
    LSWT/vertex construction with optional uniaxial SIA, exact-Goldstone magnon
-   dispersion, self-energy/lifetime, MPI k distribution, and registered
-   native dispersion/lifetime outputs for arbitrary-N FM and bipartite AFM.
+   dispersion, magnon/phonon self-energies, MPI k/q distribution, and
+   registered native dispersion/lifetime/phonon-renormalization outputs for
+   arbitrary-N FM and bipartite AFM.
 2. Add generated HDF5 end-to-end fixtures and real-material opt-in parity
    artifacts without using the dimensionally inconsistent legacy absolute
    linewidth as an oracle.

@@ -23,7 +23,10 @@ def magnon_coordinate_map(spin_lengths: object) -> NDArray[np.complex128]:
     """Build ``C_m`` for ``pi^T(-q)=Psi_m^dagger C_m`` (WT-M02)."""
 
     spins = np.asarray(spin_lengths, dtype=np.float64)
-    if spins.ndim != 1 or np.any(spins <= 0):
+    if (
+        spins.ndim != 1 or spins.size == 0
+        or not np.all(np.isfinite(spins)) or np.any(spins <= 0)
+    ):
         raise ValueError("spin_lengths must be a positive one-dimensional array")
     nmag = spins.size
     result = np.zeros((2 * nmag, 2 * nmag), dtype=np.complex128)
@@ -38,11 +41,19 @@ def magnon_coordinate_map(spin_lengths: object) -> NDArray[np.complex128]:
 
 def paraunitarity_residual(value: object) -> float:
     transform = require_complex128("magnon T_para", value)
-    if transform.ndim != 2 or transform.shape[0] != transform.shape[1] or transform.shape[0] % 2:
+    if (
+        transform.ndim != 2 or transform.shape[0] == 0
+        or transform.shape[0] != transform.shape[1] or transform.shape[0] % 2
+    ):
         raise ParaunitarityError("magnon T_para must be square with even dimension")
+    if not np.all(np.isfinite(transform)):
+        raise ParaunitarityError("T_para must contain only finite values")
     half = transform.shape[0] // 2
     metric = np.diag(np.r_[np.ones(half), -np.ones(half)]).astype(np.complex128)
-    return float(np.max(np.abs(transform.conj().T @ metric @ transform - metric)))
+    residual = float(np.max(np.abs(transform.conj().T @ metric @ transform - metric)))
+    if not np.isfinite(residual):
+        raise ParaunitarityError("T_para has a non-finite paraunitarity residual")
+    return residual
 
 
 def project_external_magnons(
@@ -52,15 +63,23 @@ def project_external_magnons(
     *,
     t_phonon: object | None = None,
     tolerance: float = 1.0e-9,
+    spin_coordinate: str = "transverse_direction",
 ) -> MagnonProjection:
     """Apply ordinary ``T_m^dagger V T_p`` congruence (WT-M03/WT-M04).
 
     No metric parameter exists here by design. ``Sigma`` is used only for the
     paraunitarity check above, never inserted into the coefficient transform.
+    ``spin_coordinate`` describes the incoming coefficients; rotation-angle
+    coefficients are converted to transverse directions before projection.
     """
 
     values = require_complex128("V_pi_ph", v_pi_ph)
+    if not np.isfinite(tolerance) or tolerance < 0:
+        raise ValueError("tolerance must be finite and non-negative")
+    if not np.all(np.isfinite(values)):
+        raise ValueError("V_pi_ph must contain only finite values")
     spins = np.asarray(spin_lengths, dtype=np.float64)
+    coordinate_m = magnon_coordinate_map(spins)
     nmag = spins.size
     if values.ndim == 3:
         if values.shape[:2] != (nmag, 2):
@@ -70,6 +89,12 @@ def project_external_magnons(
         flattened = values
     else:
         raise ValueError("V_pi_ph must have shape (nmag,2,nphonon) or (2*nmag,nphonon)")
+    if spin_coordinate == "rotation_angle":
+        # pi_1=theta_2, pi_2=-theta_1: transform the coefficient covector.
+        paired = flattened.reshape(nmag, 2, -1)
+        flattened = np.stack((paired[:, 1], -paired[:, 0]), axis=1).reshape(flattened.shape)
+    elif spin_coordinate != "transverse_direction":
+        raise ValueError("spin_coordinate must be transverse_direction or rotation_angle")
     transform_m = require_complex128("magnon T_para", t_magnon)
     if transform_m.shape != (2 * nmag, 2 * nmag):
         raise ParaunitarityError("magnon T_para dimension does not match spin sites")
@@ -79,7 +104,6 @@ def project_external_magnons(
             f"magnon paraunitarity residual {residual:.3e} exceeds {tolerance:.3e}"
         )
     nphonon = flattened.shape[1]
-    coordinate_m = magnon_coordinate_map(spins)
     coordinate_p = np.concatenate(
         (
             np.eye(nphonon, dtype=np.complex128),
@@ -94,6 +118,8 @@ def project_external_magnons(
         transform_p = require_complex128("phonon T_para", t_phonon)
         if transform_p.shape != (2 * nphonon, 2 * nphonon):
             raise ParaunitarityError("phonon T_para dimension mismatch")
+        if paraunitarity_residual(transform_p) > tolerance:
+            raise ParaunitarityError("phonon T_para is not paraunitary")
     transformed = transform_m.conj().T @ bare_nambu @ transform_p
     return MagnonProjection(
         normal=np.asarray(transformed[:nmag, :nphonon], dtype=np.complex128),
@@ -117,4 +143,3 @@ __all__ = [
     "paraunitarity_residual",
     "project_external_magnons",
 ]
-

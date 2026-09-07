@@ -256,17 +256,21 @@ override those paths.
 
 With `execution='auto'`, a launch containing more than one rank uses MPI for
 every mode. Scalar/tensor J partition the contour or pole energy mesh. Scalar
-dJ first distributes target/displacement-axis EPC-cache ownership; when MPI
-ranks outnumber those tasks, the excess ranks share that task's energy mesh.
-Tensor dJ partitions target/displacement-axis tasks. Rank 0 writes the final
-HDF5/text products after the collective reduction. Set
+dJ streams Cartesian displacement axes: it builds and integrates all selected
+targets for one axis, reduces that result, releases the large EPC cache, and
+then advances to the next axis. Within a batch it distributes target cache
+ownership; when MPI ranks outnumber the targets, excess ranks share that
+target's energy mesh. Tensor dJ partitions target/displacement-axis tasks.
+Rank 0 writes the final HDF5/text products after all axis reductions. Set
 `workers_per_rank=1` under MPI for every mode except scalar dJ. Scalar dJ
 supports a hybrid route where
-each rank builds only its assigned EPC cache entries, publishes those arrays in
-POSIX shared memory, and runs `workers_per_rank` clean local worker processes.
-The maximum rank/node cache storage is printed before integration and recorded
-in the HDF5 provenance. The launcher affinity
-assigned to each rank must contain at least
+each rank builds only its assigned entries for the current axis, publishes
+those arrays in POSIX shared memory, and runs `workers_per_rank` clean local
+worker processes. Batch-local arrays are transferred into shared memory one at
+a time so a second complete EPC cache is not retained. The maximum live
+rank/node axis-batch cache storage is printed before each integration and
+recorded in the HDF5 provenance together with the batch count. The launcher
+affinity assigned to each rank must contain at least
 `workers_per_rank*threads_per_worker` CPUs, and the node-local
 POSIX shared-memory filesystem must be large enough for that rank's cache. In
 a serial launch, `workers_per_rank>1` uses the copy-on-write local
@@ -805,10 +809,11 @@ The backend paths shown below are quarantined implementation details. Historical
 `slw.magph.<module>` commands are not preserved or re-exported; use this stage
 executable for all active magph drivers.
 
-> **Current-registry boundary:** `calculation='dispersion'` and
-> `calculation='lifetime'` are native magph commands. They share the strict
+> **Current-registry boundary:** `calculation='dispersion'`,
+> `calculation='lifetime'`, and `calculation='phonon_renormalization'` are
+> native magph commands. They share the strict
 > FM/AFM, SIA, unit, phase, and `J_iso` screening contract in
-> [MAGPH_DESIGN.md](MAGPH_DESIGN.md), with automatic MPI k distribution. The
+> [MAGPH_DESIGN.md](MAGPH_DESIGN.md), with automatic MPI k/q distribution. The
 > other calculations in this section remain quarantined compatibility
 > backends.
 
@@ -823,8 +828,9 @@ quarantine boundary, `workers_per_rank` maps to the hybrid/phonon local pools,
 `numba_threads` maps to scattering and rotational kernels, and the canonical
 q/bond chunk fields map to the corresponding retained driver arguments.
 Unsupported resource requests fail instead of being silently ignored. In
-particular, native lifetime distributes external k points with MPI and requires
-`workers_per_rank=1`; use threads and chunking for its rank-local work.
+particular, native lifetime distributes external k points and native phonon
+renormalization distributes external q points with MPI. Both require
+`workers_per_rank=1`; use threads and chunking for rank-local work.
 
 | `calculation` | Backend source | MPI | Purpose |
 |---|---|---:|---|
@@ -833,6 +839,7 @@ particular, native lifetime distributes external k points with MPI and requires
 | `berry` | default | no | Compute hybrid-band Berry curvature on a reciprocal-space plane |
 | `spectral` | default | yes | Run the MPI-aware magnon-phonon spectral solver |
 | `lifetime` | native | yes | Compute native MPI-distributed magnon lifetimes |
+| `phonon_renormalization` | native | yes | Compute dynamic phonon shifts and linewidths from the one-loop magnon bubble |
 | `scattering_kbz` | default | no | Compute fixed-phonon-q scattering over the magnon Brillouin zone |
 | `scattering_qbz` | default | no | Compute fixed-magnon scattering over the phonon Brillouin zone |
 | `rotational_coupling` | default | no | Analyze rotational and chiral magnon-phonon coupling |
@@ -1117,6 +1124,42 @@ kernels are NumPy-vectorized, so an explicit `numba_threads` is rejected;
 `blas_threads` controls their dense linear algebra. EPR phonon construction is
 performed once on rank zero with batched, vectorized dynamical-matrix assembly
 and diagonalization; `q_chunk_size` bounds that preparation stage as well.
+
+### `calculation='phonon_renormalization'`
+
+**Runtime requirements:** The same canonical static `J`, scalar `dJ/du`,
+phonon cache/EPR source, magnetic configuration, magnon k mesh, temperature,
+and broadening required by native `lifetime`. A separate FM phonon calculation
+is neither consumed nor required. At finite temperature, choose meshes and an
+explicit k shift that keep both k and k+q off exact gapless magnons, or supply a
+physically justified SIA gap. Exact acoustic phonons require
+`frequency_floor_mev`; floored modes remain flagged as invalid for physical
+interpretation.
+
+**Method:** The code evaluates the diagonal on-shell retarded phonon
+self-energy generated by the linear exchange-striction vertex and solves
+`Omega^2 = omega0^2 + 2*omega0*RePi(omega0)`. It reports
+`gamma_HWHM = -ImPi`. This is a dynamic one-loop magnon-bubble correction. It
+does not compute the static mean-field `d2J/du2` correction, off-diagonal
+phonon-mode mixing, or a self-consistent frequency-dependent Dyson root.
+
+**MPI:** Coupling and union-`k+q` LSWT caches use the same distributed build as
+native lifetime. The final calculation distributes external phonon q points
+in balanced contiguous blocks; only rank zero writes the assembled output.
+
+**Outputs:** One atomic schema-v1 NPZ containing q points, original and
+effective bare phonon frequencies, complex on-shell self-energy, renormalized
+frequency squared, signed renormalized frequency, shift,
+HWHM/FWHM/rate/lifetime, stability/validity flags, and full source and
+approximation provenance. The default path is
+`${savedir}/${prefix}.phonon_renormalization.npz`.
+
+Backend: `slw.magph.engine:prepare_run`.
+
+All namelist keys, types, validation rules, and parallel controls are identical
+to the native `lifetime` table above except for the default `output` path and
+the external MPI work axis. `restart_mode` validates and reuses only a complete
+phonon-renormalization schema with a matching scientific-input signature.
 
 ### `calculation='scattering_kbz'`
 

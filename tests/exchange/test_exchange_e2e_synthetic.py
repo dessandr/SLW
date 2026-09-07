@@ -369,8 +369,9 @@ class SyntheticExchangeEndToEndTests(unittest.TestCase):
             basic = handle["basic_data"]
             self.assertEqual(
                 basic["cache_distribution"].asstr()[()],
-                "target_axis_then_energy",
+                "cartesian_axis_then_target_then_energy",
             )
+            self.assertEqual(int(basic["cache_batch_count"][()]), 3)
             self.assertGreater(int(basic["cache_bytes_per_rank_max"][()]), 0)
             self.assertGreater(int(basic["cache_bytes_per_node_max"][()]), 0)
 
@@ -382,7 +383,7 @@ class SyntheticExchangeEndToEndTests(unittest.TestCase):
         options = {
             "eph_unit": "ev",
             "targets": "0",
-            "axes": "x",
+            "axes": "xyz",
             "qmesh": (1, 1, 1),
             "no_symmetry_orbits": True,
         }
@@ -403,10 +404,15 @@ class SyntheticExchangeEndToEndTests(unittest.TestCase):
             )
         self.assertIn("integration completed", stdout.getvalue())
         self.assertIn("100.0%", stdout.getvalue())
+        self.assertIn("released axis=x EPC cache", stdout.getvalue())
+        self.assertIn("released axis=y EPC cache", stdout.getvalue())
+        self.assertIn("released axis=z EPC cache", stdout.getvalue())
+        self.assertEqual(stdout.getvalue().count("precache phase tables + H(k)"), 1)
         with h5py.File(hybrid.output.h5_path) as handle:
             actual = self._numeric_group_payload(handle, "dJ_r")
             self.assertEqual(int(handle["basic_data/nproc"][()]), 2)
             self.assertEqual(int(handle["basic_data/mpi_size"][()]), 1)
+            self.assertEqual(int(handle["basic_data/cache_batch_count"][()]), 3)
             self.assertGreaterEqual(
                 int(handle["basic_data/affinity_cpus_per_rank"][()]), 2
             )

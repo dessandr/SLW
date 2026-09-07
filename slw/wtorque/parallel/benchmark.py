@@ -65,6 +65,7 @@ def benchmark_q(
             orbital_centers=model.orbital_centers,
             magnetic_site_positions=inputs.magnetic.site_positions,
             coordinate_type=config.magnetic_subspace.spin_coordinate.value,
+            site_projection=config.magnetic_subspace.site_projection,
         ).reshape(model.kpoints.shape[0], -1, model.nw, model.nw)
         perturbations = _canonical_perturbations(
             dfpt.g(q_index),
@@ -118,4 +119,3 @@ def benchmark_q(
 
 
 __all__ = ["BenchmarkResult", "benchmark_q"]
-

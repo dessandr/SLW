@@ -1,4 +1,4 @@
-"""Atomic native output for magnon dispersion and lifetime grids."""
+"""Atomic native output for magnon and phonon response grids."""
 
 from __future__ import annotations
 
@@ -12,10 +12,12 @@ from typing import Any
 import numpy as np
 
 from .dispersion import MagnonDispersionResult
+from .phonon_renormalization import PhononRenormalizationResult
 from .pipeline import LifetimeGridResult
 
 LIFETIME_OUTPUT_SCHEMA_VERSION = 2
 DISPERSION_OUTPUT_SCHEMA_VERSION = 1
+PHONON_RENORMALIZATION_OUTPUT_SCHEMA_VERSION = 1
 
 
 def _atomic_target(path: Path, temporary: Path, *, overwrite: bool) -> None:
@@ -163,6 +165,77 @@ def write_dispersion_npz(
     return output
 
 
+def write_phonon_renormalization_npz(
+    path: str | Path,
+    result: PhononRenormalizationResult,
+    *,
+    metadata: Mapping[str, Any],
+    overwrite: bool = False,
+) -> Path:
+    """Write one complete phonon-renormalization product atomically."""
+
+    output = Path(path).expanduser().resolve()
+    if output.suffix.lower() != ".npz":
+        raise ValueError("phonon-renormalization output must use the .npz suffix")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    if output.exists() and not overwrite:
+        raise FileExistsError(
+            f"phonon-renormalization output already exists: {output}"
+        )
+    payload_metadata = dict(metadata)
+    payload_metadata.update(
+        {
+            "approximation": result.approximation,
+            "broadening_mev": result.broadening_mev,
+            "dyson_convention": result.dyson_convention,
+            "negative_tolerance_mev": result.negative_tolerance_mev,
+            "schema_version": PHONON_RENORMALIZATION_OUTPUT_SCHEMA_VERSION,
+            "temperature_k": result.temperature_k,
+        }
+    )
+    metadata_json = json.dumps(
+        payload_metadata,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    descriptor, temporary_name = tempfile.mkstemp(
+        dir=output.parent,
+        prefix=f".{output.name}.",
+        suffix=".tmp.npz",
+    )
+    os.close(descriptor)
+    temporary = Path(temporary_name)
+    try:
+        np.savez_compressed(
+            temporary,
+            schema_version=np.asarray(
+                PHONON_RENORMALIZATION_OUTPUT_SCHEMA_VERSION,
+                dtype=np.int64,
+            ),
+            metadata_json=np.asarray(metadata_json),
+            q_points_frac=result.q_points_frac,
+            bare_frequency_mev=result.bare_frequency_mev,
+            effective_bare_frequency_mev=result.effective_bare_frequency_mev,
+            self_energy_onshell_mev=result.self_energy_onshell_mev,
+            frequency_squared_mev2=result.frequency_squared_mev2,
+            renormalized_frequency_mev=result.renormalized_frequency_mev,
+            frequency_shift_mev=result.frequency_shift_mev,
+            raw_gamma_hwhm_mev=result.raw_gamma_hwhm_mev,
+            gamma_hwhm_mev=result.gamma_hwhm_mev,
+            fwhm_mev=result.fwhm_mev,
+            scattering_rate_ps_inv=result.scattering_rate_ps_inv,
+            lifetime_ps=result.lifetime_ps,
+            dynamically_stable=result.dynamically_stable,
+            valid_damping=result.valid_damping,
+            frequency_regularized=result.frequency_regularized,
+            valid_renormalization=result.valid_renormalization,
+        )
+        _atomic_target(output, temporary, overwrite=overwrite)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return output
+
+
 def write_dispersion_plot(
     path: str | Path,
     result: MagnonDispersionResult,
@@ -238,7 +311,9 @@ def write_dispersion_plot(
 __all__ = [
     "DISPERSION_OUTPUT_SCHEMA_VERSION",
     "LIFETIME_OUTPUT_SCHEMA_VERSION",
+    "PHONON_RENORMALIZATION_OUTPUT_SCHEMA_VERSION",
     "write_dispersion_npz",
     "write_dispersion_plot",
     "write_lifetime_npz",
+    "write_phonon_renormalization_npz",
 ]

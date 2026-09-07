@@ -31,7 +31,7 @@ python -m pip install -e '.[mpi,phonon,kpath]'
 - `slw.soc`: typed atomic-SOC manifold input and the two TB2J spinor layouts;
   abandoned fitting and visualization experiments live under `slw.soc.legacy`.
 - `slw.magph`: native exchange/phonon/SIA screening, MPI magnon dispersion,
-  and dimension-generic self-energy, scattering-rate, and lifetime APIs.
+  magnon lifetime, and one-loop phonon-renormalization APIs.
 - `slw.magph.legacy`: quarantined EPR adapters, numerical kernels, MPI
   runners, analysis tools, and plotting code retained behind that stage.
 - `slw.interactions`: Wannier-gauge reference density and intersite-V tools.
@@ -85,9 +85,9 @@ calculation-by-calculation option reference is in
 [docs/INPUT_REFERENCE.md](docs/INPUT_REFERENCE.md).
 The native magnon–phonon redesign boundary and FM/AFM admission policy are in
 [docs/MAGPH_DESIGN.md](docs/MAGPH_DESIGN.md). Native
-`calculation='lifetime'` and post-processing `calculation='lifetime_plot'` are
-registered; hybrid, Berry, and spectral routes remain behind the compatibility
-boundary.
+`calculation='lifetime'`, `calculation='phonon_renormalization'`, and
+post-processing `calculation='lifetime_plot'` are registered; hybrid, Berry,
+and spectral routes remain behind the compatibility boundary.
 
 Native lifetime accepts an explicit dense `phonon_qmesh`. The phonons are
 evaluated on that mesh while real-space `dJ(R,Rp)` is Fourier interpolated from
@@ -126,26 +126,27 @@ only to `slw.exchange.kernels`; archived wrappers are not entered by
 
 All four exchange modes participate in MPI when `execution='auto'` discovers
 more than one rank. Scalar/tensor J split the energy integration. Scalar dJ
-distributes target/displacement-axis cache ownership first and uses excess
-ranks to split energy; tensor dJ splits target/displacement-axis tasks. Rank 0
-alone writes the final products. Use `workers_per_rank=1` in `&parallel` per
-MPI rank; serial runs may raise it for local multiprocessing. Scalar dJ
-additionally supports hybrid MPI with `workers_per_rank>1`: each rank publishes
-only its assigned EPC cache entries in POSIX shared memory and clean local
-worker processes attach to them. Bind at least
+streams one Cartesian displacement axis at a time, distributes that axis's
+target cache ownership, and uses excess ranks to split energy; tensor dJ splits
+target/displacement-axis tasks. Rank 0 alone writes the final products. Use
+`workers_per_rank=1` in `&parallel` per MPI rank; serial runs may raise it for
+local multiprocessing. Scalar dJ additionally supports hybrid MPI with
+`workers_per_rank>1`: each rank publishes only its current axis-batch EPC cache
+in POSIX shared memory and clean local worker processes attach to it. Completed
+axis results are reduced before that cache is released. Bind at least
 `workers_per_rank*threads_per_worker` cores to each rank. Other exchange modes
 still require `workers_per_rank=1` under MPI. The same canonical `&parallel`
-names control native magph dispersion/lifetime and are translated at retained magph
-backend boundaries; backend-specific `nproc` and chunk spellings are not part
-of the public namelist.
+names control native magph dispersion, lifetime, and phonon renormalization and
+are translated at retained magph backend boundaries; backend-specific `nproc`
+and chunk spellings are not part of the public namelist.
 
 Historical magph modules are likewise quarantined under `slw.magph.legacy`.
 The retained compatibility drivers live in `slw.magph.legacy.reference`;
 helper and post-processing modules remain one level above them. Old
 `slw.magph.<module>` paths have no compatibility shims and are not public
-interfaces. `slw_magph.x` dispersion/lifetime and `slw_post.x` lifetime plots
-now use only native typed modules; the remaining registered magph calculations
-still use the compatibility boundary.
+interfaces. `slw_magph.x` dispersion/lifetime/phonon-renormalization and
+`slw_post.x` lifetime plots now use only native typed modules; the remaining
+registered magph calculations still use the compatibility boundary.
 
 See [docs/SCOPE.md](docs/SCOPE.md) for the extraction boundary and retained
 module inventory.

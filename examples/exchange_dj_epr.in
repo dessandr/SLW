@@ -9,8 +9,8 @@
 
 &parallel
   execution = 'auto',
-  ! MPI distributes target-axis EPC-cache ownership before splitting energy.
-  ! Rank-local worker processes share only that rank's assigned cache entries.
+  ! x/y/z are integrated as separate cache batches. MPI distributes targets
+  ! within the current axis; rank-local workers share only that batch's cache.
   workers_per_rank = 1,
   threads_per_worker = 1,
   precache_workers = 1

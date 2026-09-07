@@ -9,6 +9,7 @@ from slw.magph.config import (
     RestartMode,
     build_dispersion_request,
     build_lifetime_request,
+    build_phonon_renormalization_request,
 )
 
 
@@ -29,6 +30,18 @@ def _parameters() -> dict[str, object]:
 
 
 class NativeMagphConfigTests(unittest.TestCase):
+    def test_phonon_renormalization_reuses_dynamic_inputs_with_own_output(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            request = build_phonon_renormalization_request(
+                _parameters(), prefix="mn", savedir=directory
+            )
+            self.assertEqual(request.kmesh, (4, 3, 2))
+            self.assertEqual(request.temperature_k, 300.0)
+            self.assertEqual(
+                request.output,
+                Path(directory).resolve() / "mn.phonon_renormalization.npz",
+            )
+
     def test_required_input_is_normalized_without_opening_files(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             request = build_lifetime_request(

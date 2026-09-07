@@ -17,6 +17,18 @@ supplied by an external solver.
 
 ## Input boundary
 
+Production finite-q vertices support `site_projection: local_partition` and
+its `full_atom` alias. `onsite_only` remains a local diagnostic;
+`user_supplied` needs explicit local-field input. Both unsupported production
+choices now fail explicitly rather than silently using the local partition.
+Magnon projection converts `rotation_angle` coefficients to transverse-direction
+coordinates before applying the bosonic transform. External magnon energies
+must be finite and strictly positive, and transforms/spin lengths must be finite.
+Zero-energy modes require a separate treatment and are rejected by this provider.
+
+The 0.1.1 workflow version invalidates earlier restart manifests so that outputs
+computed with the old coordinate/projection behavior cannot be silently reused.
+
 The strict HDF5 shapes follow
 `new_feature/wannier_torque_magnon_polaron_impl_plan_v2/docs/09_data_contracts.md`.
 In addition:
