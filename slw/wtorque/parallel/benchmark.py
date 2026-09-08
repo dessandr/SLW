@@ -9,7 +9,7 @@ from slw.wtorque.config import RunConfig
 from slw.wtorque.gauge.kq_map import build_kq_map
 from slw.wtorque.io.dfpt import HDF5DFPTProvider
 from slw.wtorque.io.exchange import exchange_at_k_and_kq
-from slw.wtorque.pipeline import _canonical_perturbations, _load_inputs
+from slw.wtorque.pipeline import _canonical_perturbations, _load_inputs, _vertex_centers
 from slw.wtorque.torque.kernel import (
     retarded_bubble_loop,
     retarded_bubble_loop_reference,
@@ -26,8 +26,9 @@ class BenchmarkResult:
     speedup: float
     max_absolute_difference: float
     agrees: bool
+    kernel_component: str = "bubble"
 
-    def as_dict(self) -> dict[str, float | int | bool]:
+    def as_dict(self) -> dict[str, float | int | bool | str]:
         return asdict(self)
 
 
@@ -38,6 +39,8 @@ def benchmark_q(
     repeats: int = 3,
     tolerance: float = 1.0e-10,
 ) -> BenchmarkResult:
+    """Compare bubble contractions; direct-term construction is not timed."""
+
     if repeats < 1:
         raise ValueError("benchmark repeats must be positive")
     inputs = _load_inputs(config)
@@ -48,6 +51,7 @@ def benchmark_q(
         spinor_lift=config.dfpt.spinor_lift,
         spin_order=config.electrons.spin_order,
         norb=model.norb,
+        g_xc_dataset=config.dfpt.g_xc_dataset,
     ) as dfpt:
         if q_index < 0 or q_index >= dfpt.qpoints.shape[0]:
             raise ValueError(f"q_index {q_index} is outside [0,{dfpt.qpoints.shape[0]})")
@@ -62,7 +66,7 @@ def benchmark_q(
             orbital_masks=inputs.magnetic.subspace.orbital_masks,
             local_frames=inputs.magnetic.local_frames,
             q_red=-q,
-            orbital_centers=model.orbital_centers,
+            orbital_centers=_vertex_centers(model),
             magnetic_site_positions=inputs.magnetic.site_positions,
             coordinate_type=config.magnetic_subspace.spin_coordinate.value,
             site_projection=config.magnetic_subspace.site_projection,

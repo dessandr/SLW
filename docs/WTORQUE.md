@@ -4,16 +4,22 @@
 `wtorque`; it does not register calculations in the existing `slw_epr.x`,
 `slw_exchange.x`, `slw_magph.x`, or `slw_post.x` interfaces.
 
-The implemented MVP evaluates the complex retarded bubble
+The workflow evaluates the complex retarded bubble
 
 ```text
 T(-q) G(k+q) g(k,q) G(k)
 ```
 
-and constructs the physical Fourier coefficient from both members of each
-q pair. Magnons are never diagonalized in this package: positive energies,
-local frames, spin lengths, Nambu order, and paraunitary eigenvectors must be
-supplied by an external solver.
+and, when exchange-resolved `g_XC` is supplied, the fixed-projector direct
+one-Green-function term. Each component uses both members of its q pair.
+The strict workflow takes magnon modes from an external solver; `run-native`
+can call SLW's LSWT engine through the TB2J adapter.
+
+`run-interpolated` evaluates the native EPR real-space model on independently
+chosen electronic k meshes and arbitrary q points, then solves the full
+q-paired bosonic BdG magnon–polaron bands. It reads the band path from the
+Wannier90 input and preserves disconnected segments. See
+[`WTORQUE_NATIVE.md`](WTORQUE_NATIVE.md) for the input and model limitations.
 
 ## Input boundary
 
@@ -26,8 +32,8 @@ coordinates before applying the bosonic transform. External magnon energies
 must be finite and strictly positive, and transforms/spin lengths must be finite.
 Zero-energy modes require a separate treatment and are rejected by this provider.
 
-The 0.1.1 workflow version invalidates earlier restart manifests so that outputs
-computed with the old coordinate/projection behavior cannot be silently reused.
+The 0.1.3 workflow version includes arbitrary-momentum interpolation and the
+explicit shifted-endpoint direct term. Earlier restart manifests are invalid.
 
 The strict HDF5 shapes follow
 `new_feature/wannier_torque_magnon_polaron_impl_plan_v2/docs/09_data_contracts.md`.
@@ -240,9 +246,15 @@ checksum. Canonical stacked datasets are materialized at:
 - `/polaron/H_rwa` and `/polaron/energy`;
 - `/validation/report_json`.
 
-The ordinary production path is bubble-only. The fixed-projector direct
-vertex is available as a gated library interface and requires exchange-field
-resolved `g_XC`; it is not silently constructed from the full DFPT `g`.
+Enable the fixed-projector direct path with `kernel.include_direct_vertex: true`,
+`kernel.projector_policy: fixed`, and `dfpt.g_xc_dataset: g_xc_cart` (or the
+actual per-q dataset name; absolute paths may use `{iq:06d}`). This derivative
+must correspond to the same exchange operator used by the torque. The total
+DFPT g cannot be substituted for it. Moving projectors remain unsupported.
+Outputs preserve `A_retarded_{bubble,direct,total}` and
+`K_pi_u_{bubble,direct,total}` (or `V_pi_ph_*` for mode input); the legacy
+unsuffixed datasets contain the total. Both components use the same real-axis
+temperature and energy quadrature in the strict workflow.
 
 ## Validation commands
 
@@ -255,3 +267,10 @@ python -m pip wheel . --no-deps
 
 The equation registry test cross-checks every implemented `WT-*` identifier
 against the supplied equation index and requires an explicit provenance class.
+
+## Native SOC coarse-grid workflow
+
+The `run-native` command now executes native spinor coarse DFPT through
+finite-q bubble/direct, phonon, and magnon projections. See
+[WTORQUE_NATIVE.md](WTORQUE_NATIVE.md) for inputs, units, MPI execution and
+the explicit fixed-frame approximation and model `g_XC` definition.

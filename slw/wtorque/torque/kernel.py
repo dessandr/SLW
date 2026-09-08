@@ -170,8 +170,16 @@ def _zero_temperature_pair_integral(
     energy_min_eV: float,
     occupied_energy_max_eV: float,
     eta_eV: float,
+    *,
+    eigenvalues_final: NDArray[np.float64] | None = None,
 ) -> NDArray[np.complex128]:
-    """Integrate two retarded poles exactly over a finite occupied interval."""
+    """Integrate retarded pole pairs, with source/final band indices last.
+
+    Individual logarithms use their principal branch: every argument lies in
+    the upper half plane for positive ``eta``, so this is a continuous
+    primitive along the real integration interval.  A midpoint series avoids
+    cancellation of the divided logarithms for (nearly) degenerate poles.
+    """
 
     lower = float(energy_min_eV)
     upper = float(occupied_energy_max_eV)
@@ -183,8 +191,15 @@ def _zero_temperature_pair_integral(
     energies = np.asarray(eigenvalues, dtype=np.float64)
     if energies.ndim != 2 or not np.all(np.isfinite(energies)):
         raise ValueError("eigenvalues must have finite shape (nk,nw)")
+    final = (
+        energies
+        if eigenvalues_final is None
+        else np.asarray(eigenvalues_final, dtype=np.float64)
+    )
+    if final.shape != energies.shape or not np.all(np.isfinite(final)):
+        raise ValueError("final eigenvalues must match finite source eigenvalues")
     first = energies[:, :, None]
-    second = energies[:, None, :]
+    second = final[:, None, :]
     difference = first - second
     numerator = (
         np.log(upper - first + 1j * eta)
@@ -192,24 +207,33 @@ def _zero_temperature_pair_integral(
         - np.log(lower - first + 1j * eta)
         + np.log(lower - second + 1j * eta)
     )
-    scale = np.maximum(
-        1.0,
-        np.maximum(np.abs(first), np.abs(second)),
+    midpoint = 0.5 * (first + second)
+    z_upper = upper - midpoint + 1j * eta
+    z_lower = lower - midpoint + 1j * eta
+    # The endpoint expansion has ratio |(first-second)/(2*z)| <= 0.01;
+    # retaining powers through ratio**6 gives an O(1e-16) remainder.
+    near_degenerate = np.abs(difference) <= 0.02 * np.minimum(
+        np.abs(z_upper), np.abs(z_lower)
     )
-    nondegenerate = np.abs(difference) > 1.0e-11 * scale
     result = np.empty_like(numerator, dtype=np.complex128)
     np.divide(
         numerator,
         difference,
         out=result,
-        where=nondegenerate,
+        where=~near_degenerate,
     )
-    midpoint = 0.5 * (first + second)
-    degenerate_limit = (
-        -1.0 / (upper - midpoint + 1j * eta)
-        + 1.0 / (lower - midpoint + 1j * eta)
+    delta = difference[near_degenerate]
+
+    def primitive(z: NDArray[np.complex128]) -> NDArray[np.complex128]:
+        ratio_squared = (delta / (2.0 * z)) ** 2
+        return -(1.0 + ratio_squared * (
+            1.0 / 3.0 + ratio_squared * (1.0 / 5.0 + ratio_squared / 7.0)
+        )) / z
+
+    result[near_degenerate] = (
+        primitive(z_upper[near_degenerate])
+        - primitive(z_lower[near_degenerate])
     )
-    result[~nondegenerate] = degenerate_limit[~nondegenerate]
     return np.asarray(result, dtype=np.complex128)
 
 
@@ -224,20 +248,66 @@ def retarded_bubble_loop_eigh_zero_temperature(
     eta_eV: float,
     perturbation_chunk: int | None = None,
 ) -> NDArray[np.complex128]:
-    """Exact finite-interval q=0 energy integral in the eigenstate basis.
+    """Backward-compatible q=0 wrapper for the analytic finite-q loop."""
 
-    This evaluates the same retarded ``Gamma G g G`` loop as
-    :func:`retarded_bubble_loop_eigh`, but analytically integrates the two
-    retarded poles at zero temperature.  It is restricted to q=0, where both
-    Green functions use the same Hamiltonian.
+    return retarded_bubble_loop_eigh_zero_temperature_finite_q(
+        hamiltonian_k,
+        hamiltonian_k,
+        torque_vertices,
+        perturbations,
+        k_weights,
+        energy_min_eV=energy_min_eV,
+        occupied_energy_max_eV=occupied_energy_max_eV,
+        eta_eV=eta_eV,
+        perturbation_chunk=perturbation_chunk,
+    )
+
+
+def retarded_bubble_loop_eigh_zero_temperature_finite_q(
+    hamiltonian_k: object,
+    hamiltonian_kq: object,
+    torque_vertices: object,
+    perturbations: object,
+    k_weights: object,
+    *,
+    energy_min_eV: float,
+    occupied_energy_max_eV: float,
+    eta_eV: float,
+    perturbation_chunk: int | None = None,
+    temperature_K: float = 0.0,
+) -> NDArray[np.complex128]:
+    """Analytically integrate the complex retarded bubble at general q.
+
+    Return ``A(q) = sum_k w_k integral Tr[Gamma G_kq g G_k] dE`` over
+    ``[energy_min_eV, occupied_energy_max_eV]``.  The occupied upper limit
+    must be the smaller of the chemical potential and the requested energy
+    cutoff.  This is a zero-temperature integral; finite temperature is
+    rejected.  Neither a ``-1/pi`` factor nor q/-q completion is applied here.
+
+    ``Gamma[nk,nt,nw,nw]`` is the reverse vertex (k <- k+q), whereas
+    ``g[nk,np,nw,nw]`` is forward (k+q <- k).  Source and final Hamiltonians
+    may have independent complex eigenvectors.  Both vertices are transformed
+    with those same two eigengauges, retaining covariance without assuming
+    that either vertex is Hermitian at finite q.  K weights are used once and
+    are not renormalized, so MPI workers can integrate disjoint k subsets.
     """
 
     hamiltonian = require_complex128("H_k", hamiltonian_k)
+    hamiltonian_final = require_complex128("H_kq", hamiltonian_kq)
     vertices = require_complex128("torque_vertices", torque_vertices)
     perturb = require_complex128("DFPT perturbations", perturbations)
     weights = np.asarray(k_weights, dtype=np.float64)
     if hamiltonian.ndim != 3 or hamiltonian.shape[-1] != hamiltonian.shape[-2]:
         raise ValueError("H_k must have shape (nk,nw,nw)")
+    if hamiltonian_final.shape != hamiltonian.shape:
+        raise ValueError("H_k and H_kq must have matching shapes")
+    if not np.isfinite(temperature_K) or temperature_K != 0.0:
+        raise ValueError("analytic integration requires temperature_K=0")
+    for name, matrix in (("H_k", hamiltonian), ("H_kq", hamiltonian_final)):
+        if not np.all(np.isfinite(matrix)) or not np.allclose(
+            matrix, np.swapaxes(matrix.conj(), -1, -2), rtol=1.0e-10, atol=1.0e-10
+        ):
+            raise ValueError(f"{name} must be finite and Hermitian")
     nk, nw, _ = hamiltonian.shape
     if vertices.ndim != 4 or vertices.shape[0] != nk:
         raise ValueError("torque vertices must have shape (nk,nt,nw,nw)")
@@ -245,6 +315,8 @@ def retarded_bubble_loop_eigh_zero_temperature(
         raise ValueError("perturbations must have shape (nk,np,nw,nw)")
     if vertices.shape[-2:] != (nw, nw) or perturb.shape[-2:] != (nw, nw):
         raise ValueError("vertex and perturbation dimensions must match H_k")
+    if not np.all(np.isfinite(vertices)) or not np.all(np.isfinite(perturb)):
+        raise ValueError("vertices and perturbations must be finite")
     if weights.shape != (nk,) or not np.all(np.isfinite(weights)):
         raise ValueError("k_weights must have finite shape (nk,)")
     npert = perturb.shape[1]
@@ -253,23 +325,29 @@ def retarded_bubble_loop_eigh_zero_temperature(
         raise ValueError("perturbation_chunk must be positive")
 
     eigenvalues, eigenvectors = np.linalg.eigh(hamiltonian)
+    if hamiltonian_kq is hamiltonian_k:
+        eigenvalues_final, eigenvectors_final = eigenvalues, eigenvectors
+    else:
+        eigenvalues_final, eigenvectors_final = np.linalg.eigh(hamiltonian_final)
     eigenvectors_dagger = np.swapaxes(eigenvectors.conj(), -1, -2)
+    eigenvectors_final_dagger = np.swapaxes(eigenvectors_final.conj(), -1, -2)
     vertices_eigen = (
         eigenvectors_dagger[:, None]
         @ vertices
-        @ eigenvectors[:, None]
+        @ eigenvectors_final[:, None]
     )
     pole_integral = _zero_temperature_pair_integral(
         np.asarray(eigenvalues, dtype=np.float64),
         energy_min_eV,
         occupied_energy_max_eV,
         eta_eV,
+        eigenvalues_final=np.asarray(eigenvalues_final, dtype=np.float64),
     )
     result = np.zeros((vertices.shape[1], npert), dtype=np.complex128)
     for start in range(0, npert, chunk):
         stop = min(start + chunk, npert)
         perturb_eigen = (
-            eigenvectors_dagger[:, None]
+            eigenvectors_final_dagger[:, None]
             @ perturb[:, start:stop]
             @ eigenvectors[:, None]
         )
@@ -347,6 +425,7 @@ __all__ = [
     "retarded_bubble_loop",
     "retarded_bubble_loop_eigh",
     "retarded_bubble_loop_eigh_zero_temperature",
+    "retarded_bubble_loop_eigh_zero_temperature_finite_q",
     "retarded_bubble_loop_reference",
     "tune_perturbation_chunk",
 ]

@@ -48,12 +48,14 @@ class HDF5DFPTProvider:
         spinor_lift: SpinorLift | str,
         spin_order: SpinOrder | str,
         norb: int,
+        g_xc_dataset: str | None = "g_xc_cart",
     ) -> None:
         self.path = Path(path)
         self.normalization = Normalization(normalization)
         self.spinor_lift = SpinorLift(spinor_lift)
         self.spin_order = SpinOrder(spin_order)
         self.norb = int(norb)
+        self.g_xc_dataset = g_xc_dataset
         self.handle = h5py.File(self.path, "r")
         if "dfpt/qpoints" not in self.handle:
             self.close()
@@ -127,12 +129,41 @@ class HDF5DFPTProvider:
         return np.asarray(values[int(ik), perturbation_slice], dtype=np.complex128)
 
     def g_xc(self, iq: int) -> NDArray[np.complex128] | None:
+        """Read an explicitly selected exchange response, never infer it from g.
+
+        The dataset path is relative to each ``/dfpt/q_NNNNN`` group. An
+        absolute path may use ``{iq:06d}`` to select the corresponding q group.
+        Its units, perturbation order and final-state gauge are those of g.
+        """
+
         group = self._group(iq)
-        if "g_xc_cart" not in group:
+        if self.g_xc_dataset is None:
+            return None
+        name = str(self.g_xc_dataset).format(iq=int(iq))
+        if name not in group:
             return None
         if self.spinor_lift is not SpinorLift.NATIVE_SPINOR:
             raise ValueError("g_XC currently requires native spinor input")
-        return self._read_native(group["g_xc_cart"])
+        dataset = group[name]
+        if not isinstance(dataset, h5py.Dataset):
+            raise TypeError(f"g_XC path {dataset.name} must select a dataset")
+        total_name = "g_mode" if self.normalization is Normalization.PHONON_ZERO_POINT_MODE else "g_cart"
+        if total_name in group and dataset.id == group[total_name].id:
+            raise ValueError("g_XC must be a separate exchange-resolved response, not the total DFPT g")
+        result = self._read_native(dataset)
+        if (
+            result.ndim != 4
+            or min(result.shape) < 1
+            or result.shape[-2:] != (2 * self.norb, 2 * self.norb)
+            or (total_name in group and result.shape != group[total_name].shape)
+            or (self.pert_atom is not None and result.shape[1] != self.pert_atom.size)
+        ):
+            raise ValueError("g_XC must have (nk,npert,nw,nw) shape matching perturbation metadata and any native DFPT g")
+        if "dfpt/kpoints" in self.handle and result.shape[0] != self.handle["dfpt/kpoints"].shape[0]:
+            raise ValueError("g_XC k-point count does not match /dfpt/kpoints")
+        if not np.isfinite(result).all():
+            raise ValueError("g_XC contains non-finite values")
+        return result
 
 
 def expand_cartesian_perturbations(

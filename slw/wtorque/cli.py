@@ -12,7 +12,7 @@ import h5py
 import numpy as np
 
 from slw.wtorque.collinear_q0 import run_collinear_epr_q0_test
-from slw.wtorque.config import RunConfig
+from slw.wtorque.config import ProjectorPolicy, RunConfig
 from slw.wtorque.gauge.kq_map import build_kq_map
 from slw.wtorque.io.dfpt import HDF5DFPTProvider
 from slw.wtorque.io.exchange import exchange_at_k_and_kq, load_exchange_field
@@ -24,7 +24,7 @@ from slw.wtorque.native_q0 import run_native_q0_test
 from slw.wtorque.parallel.benchmark import benchmark_q
 from slw.wtorque.parallel.mpi import MPIContext
 from slw.wtorque.parallel.scheduler import build_q_pair_schedule
-from slw.wtorque.pipeline import run_compute_kernel
+from slw.wtorque.pipeline import _vertex_centers, run_compute_kernel
 from slw.wtorque.provenance import build_run_manifest
 from slw.wtorque.q0_polaron import run_collinear_epr_q0_polaron_test
 from slw.wtorque.stages import (
@@ -65,6 +65,7 @@ def inspect_config(config: RunConfig) -> dict[str, Any]:
         spinor_lift=config.dfpt.spinor_lift,
         spin_order=config.electrons.spin_order,
         norb=model.norb,
+        g_xc_dataset=config.dfpt.g_xc_dataset,
     ) as dfpt:
         q_pairs = len(build_q_pair_schedule(dfpt.qpoints))
         dimensions = {
@@ -76,6 +77,15 @@ def inspect_config(config: RunConfig) -> dict[str, Any]:
             "nmag": int(magnetic.subspace.projectors.shape[0]),
             "npert_q0": int(dfpt.g(0).shape[1]),
         }
+        if config.kernel.include_direct_vertex:
+            if config.kernel.projector_policy is ProjectorPolicy.MOVING:
+                raise NotImplementedError("moving-projector direct terms are not implemented")
+            for iq in range(len(dfpt.qpoints)):
+                g_xc = dfpt.g_xc(iq)
+                if g_xc is None:
+                    raise ValueError(f"configured g_XC dataset is missing at q index {iq}")
+                if g_xc.shape[0] != len(model.kpoints):
+                    raise ValueError(f"g_XC k-point count differs from electronic input at q index {iq}")
     manifest = build_run_manifest(config)
     return {
         "valid": True,
@@ -90,6 +100,9 @@ def inspect_config(config: RunConfig) -> dict[str, Any]:
             "dfpt_final_state": config.dfpt.final_state_representation,
             "fixed_chemical_potential": config.kernel.fixed_chemical_potential,
             "q_pair_completion": config.kernel.q_pair_completion,
+            "direct_term_enabled": config.kernel.include_direct_vertex,
+            "g_xc_dataset": config.dfpt.g_xc_dataset,
+            "projector_policy": config.kernel.projector_policy.value,
         },
         "resolved_magnetic_orbitals": [
             list(labels) for labels in magnetic.subspace.labels
@@ -182,6 +195,7 @@ def _build_vertices(config: RunConfig, output: str | None) -> Path:
             spinor_lift=config.dfpt.spinor_lift,
             spin_order=config.electrons.spin_order,
             norb=model.norb,
+            g_xc_dataset=config.dfpt.g_xc_dataset,
         ) as dfpt,
         h5py.File(target, "w") as handle,
     ):
@@ -197,9 +211,10 @@ def _build_vertices(config: RunConfig, output: str | None) -> Path:
                 orbital_masks=magnetic.subspace.orbital_masks,
                 local_frames=magnetic.local_frames,
                 q_red=q,
-                orbital_centers=model.orbital_centers,
+                orbital_centers=_vertex_centers(model),
                 magnetic_site_positions=magnetic.site_positions,
                 coordinate_type=config.magnetic_subspace.spin_coordinate.value,
+                site_projection=config.magnetic_subspace.site_projection,
             )
             handle.create_dataset(f"q_{index:06d}/vertex", data=vertices)
     return target
@@ -360,6 +375,10 @@ def _add_collinear_q0_arguments(parser: argparse.ArgumentParser) -> None:
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="wtorque")
     sub = parser.add_subparsers(dest="command", required=True)
+    native_run = sub.add_parser("run-native", help="run native spinor coarse DFPT through bubble, phonon and magnon projection")
+    native_run.add_argument("config", help="native workflow JSON input")
+    interpolated_run = sub.add_parser("run-interpolated", help="interpolate native H/g on dense k and q points and build full magnon-polaron bands")
+    interpolated_run.add_argument("config", help="interpolated workflow JSON input")
     for command in (
         "inspect",
         "extract-exchange",
@@ -587,6 +606,14 @@ def _collinear_q0_kwargs(
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     mpi = MPIContext.discover()
+    if args.command == "run-interpolated":
+        from slw.wtorque.interpolated_workflow import run_interpolated_workflow
+        run_interpolated_workflow(args.config, mpi=mpi)
+        return 0
+    if args.command == "run-native":
+        from slw.wtorque.native_workflow import run_native_workflow
+        run_native_workflow(args.config, mpi=mpi)
+        return 0
     if args.command == "merge":
         if mpi.is_root:
             print(merge_outputs(args.output_dir, args.output))

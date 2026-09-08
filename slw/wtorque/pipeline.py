@@ -1,4 +1,4 @@
-"""MPI q-pair production pipeline for the bubble-only electronic kernel."""
+"""MPI q-pair pipeline for bubble and fixed-projector direct kernels."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from pathlib import Path
 import numpy as np
 from numpy.typing import NDArray
 
-from slw.wtorque.config import BlochGauge, Normalization, RunConfig
+from slw.wtorque.config import BlochGauge, Normalization, ProjectorPolicy, RunConfig
 from slw.wtorque.gauge.atomic_gauge import unwrap_final_state_vertex
 from slw.wtorque.gauge.kq_map import build_kq_map
 from slw.wtorque.green.real_axis import RealAxisIntegrator
@@ -29,6 +29,10 @@ from slw.wtorque.parallel.scheduler import (
     partition_pairs,
 )
 from slw.wtorque.provenance import build_run_manifest
+from slw.wtorque.torque.direct_vertex import (
+    finite_q_direct_vertices,
+    retarded_direct_loop,
+)
 from slw.wtorque.torque.kernel import retarded_bubble_loop, tune_perturbation_chunk
 from slw.wtorque.torque.qpair import finalize_q_pair, q_conjugation_residual
 from slw.wtorque.torque.vertices import finite_q_vertices
@@ -107,6 +111,13 @@ def _canonical_perturbations(
     )
 
 
+def _vertex_centers(model: SpinorWannierModel) -> NDArray[np.float64]:
+    # Cell-periodic Bloch vectors do not carry the atomic-position phases.
+    if model.bloch_gauge is BlochGauge.CELL_PERIODIC:
+        return np.zeros_like(model.orbital_centers)
+    return model.orbital_centers
+
+
 def _retarded_loop_for_q(
     iq: int,
     *,
@@ -128,7 +139,7 @@ def _retarded_loop_for_q(
         orbital_masks=inputs.magnetic.subspace.orbital_masks,
         local_frames=inputs.magnetic.local_frames,
         q_red=-q,
-        orbital_centers=model.orbital_centers,
+        orbital_centers=_vertex_centers(model),
         magnetic_site_positions=inputs.magnetic.site_positions,
         coordinate_type=config.magnetic_subspace.spin_coordinate.value,
         site_projection=config.magnetic_subspace.site_projection,
@@ -161,6 +172,58 @@ def _retarded_loop_for_q(
     )
 
 
+def _direct_retarded_loop_for_q(
+    iq: int,
+    *,
+    config: RunConfig,
+    inputs: _Inputs,
+    dfpt: HDF5DFPTProvider,
+    perturbation_chunk: int,
+) -> NDArray[np.complex128]:
+    model = inputs.model
+    q = dfpt.qpoints[int(iq)]
+    mapping = build_kq_map(model.kpoints, q)
+    g_xc = dfpt.g_xc(iq)
+    if g_xc is None:
+        raise ValueError(
+            f"direct term requires the declared exchange-resolved g_XC dataset "
+            f"{config.dfpt.g_xc_dataset!r} at q index {iq}"
+        )
+    g_xc = _canonical_perturbations(
+        g_xc, config=config, model=model, g_wrap=mapping.G_wrap
+    )
+    if g_xc.shape[0] != model.kpoints.shape[0]:
+        raise ValueError("g_XC k-point count does not match the electronic model")
+    nmag = inputs.magnetic.subspace.projectors.shape[0]
+    result = np.zeros((2 * nmag, g_xc.shape[1]), dtype=np.complex128)
+    h_k = model.hamiltonian_batch(model.kpoints)
+    # The mixed insertion carries both torque and displacement labels. Build
+    # only a perturbation chunk so its large nk*nt*np*nw*nw tensor is bounded.
+    for start in range(0, g_xc.shape[1], perturbation_chunk):
+        stop = min(start + perturbation_chunk, g_xc.shape[1])
+        direct = finite_q_direct_vertices(
+            g_xc[:, start:stop],
+            kpoints=model.kpoints,
+            q_red=q,
+            orbital_masks=inputs.magnetic.subspace.orbital_masks,
+            local_frames=inputs.magnetic.local_frames,
+            orbital_centers=_vertex_centers(model),
+            magnetic_site_positions=inputs.magnetic.site_positions,
+            coordinate_type=config.magnetic_subspace.spin_coordinate.value,
+            projector_policy=config.kernel.projector_policy.value,
+            site_projection=config.magnetic_subspace.site_projection,
+        )
+        result[:, start:stop] = retarded_direct_loop(
+            h_k,
+            direct.reshape(model.kpoints.shape[0], 2 * nmag, stop - start, model.nw, model.nw),
+            model.weights,
+            inputs.integrator,
+            eta_eV=config.integration.eta_eV,
+            perturbation_chunk=perturbation_chunk,
+        )
+    return result
+
+
 def _payload(
     iq: int,
     loop: NDArray[np.complex128],
@@ -170,26 +233,42 @@ def _payload(
     inputs: _Inputs,
     dfpt: HDF5DFPTProvider,
     conjugation_residual: tuple[float, float],
+    direct_loop: NDArray[np.complex128] | None = None,
+    direct_kernel: NDArray[np.complex128] | None = None,
 ) -> dict[str, object]:
     nmag = inputs.magnetic.subspace.projectors.shape[0]
-    loop_shaped = loop.reshape(nmag, 2, loop.shape[-1])
-    kernel_shaped = kernel.reshape(nmag, 2, kernel.shape[-1])
+    if direct_loop is None:
+        direct_loop = np.zeros_like(loop)
+    if direct_kernel is None:
+        direct_kernel = np.zeros_like(kernel)
+    total_loop = loop + direct_loop
+    total_kernel = kernel + direct_kernel
     result: dict[str, object] = {
-        "kernel/A_retarded": loop_shaped,
+        "kernel/A_retarded": total_loop.reshape(nmag, 2, loop.shape[-1]),
         "validation/q_conjugation_absolute": np.float64(conjugation_residual[0]),
         "validation/q_conjugation_relative": np.float64(conjugation_residual[1]),
-        "validation/direct_term_enabled": np.bool_(False),
+        "validation/direct_term_enabled": np.bool_(config.kernel.include_direct_vertex),
     }
-    if config.dfpt.normalization is Normalization.PHONON_ZERO_POINT_MODE:
-        result["kernel/V_pi_ph"] = kernel_shaped
-    else:
-        if dfpt.pert_atom is None or dfpt.pert_cart is None:
-            raise ValueError("Cartesian kernel lacks perturbation metadata")
-        result["kernel/K_pi_u"] = expand_cartesian_perturbations(
-            kernel_shaped,
-            dfpt.pert_atom,
-            dfpt.pert_cart,
-        )
+    for name, loop_component, kernel_component in (
+        ("bubble", loop, kernel),
+        ("direct", direct_loop, direct_kernel),
+        ("total", total_loop, total_kernel),
+    ):
+        result[f"kernel/A_retarded_{name}"] = loop_component.reshape(nmag, 2, loop.shape[-1])
+        kernel_shaped = kernel_component.reshape(nmag, 2, kernel.shape[-1])
+        if config.dfpt.normalization is Normalization.PHONON_ZERO_POINT_MODE:
+            key = "kernel/V_pi_ph"
+            projected = kernel_shaped
+        else:
+            if dfpt.pert_atom is None or dfpt.pert_cart is None:
+                raise ValueError("Cartesian kernel lacks perturbation metadata")
+            key = "kernel/K_pi_u"
+            projected = expand_cartesian_perturbations(
+                kernel_shaped, dfpt.pert_atom, dfpt.pert_cart
+            )
+        result[f"{key}_{name}"] = projected
+        if name == "total":
+            result[key] = projected
     return result
 
 
@@ -220,7 +299,28 @@ def _compute_pair(
         )
     k_positive = finalize_q_pair(a_positive, a_negative)
     k_negative = k_positive.conj()
-    residual = q_conjugation_residual(k_positive, k_negative)
+    direct_positive = np.zeros_like(a_positive)
+    direct_negative = np.zeros_like(a_negative)
+    if config.kernel.include_direct_vertex:
+        direct_positive = _direct_retarded_loop_for_q(
+            pair.positive,
+            config=config,
+            inputs=inputs,
+            dfpt=dfpt,
+            perturbation_chunk=perturbation_chunk,
+        )
+        direct_negative = direct_positive if pair.self_inverse else _direct_retarded_loop_for_q(
+            pair.negative,
+            config=config,
+            inputs=inputs,
+            dfpt=dfpt,
+            perturbation_chunk=perturbation_chunk,
+        )
+    direct_k_positive = finalize_q_pair(direct_positive, direct_negative)
+    direct_k_negative = direct_k_positive.conj()
+    residual = q_conjugation_residual(
+        k_positive + direct_k_positive, k_negative + direct_k_negative
+    )
     result = {
         pair.positive: _payload(
             pair.positive,
@@ -230,6 +330,8 @@ def _compute_pair(
             inputs=inputs,
             dfpt=dfpt,
             conjugation_residual=residual,
+            direct_loop=direct_positive,
+            direct_kernel=direct_k_positive,
         )
     }
     if not pair.self_inverse:
@@ -241,6 +343,8 @@ def _compute_pair(
             inputs=inputs,
             dfpt=dfpt,
             conjugation_residual=residual,
+            direct_loop=direct_negative,
+            direct_kernel=direct_k_negative,
         )
     return result
 
@@ -258,9 +362,9 @@ def run_compute_kernel(
         raise NotImplementedError(
             "CuPy remains an optional feature gate; this validated build uses the NumPy backend"
         )
-    if config.kernel.include_direct_vertex:
+    if config.kernel.include_direct_vertex and config.kernel.projector_policy is ProjectorPolicy.MOVING:
         raise NotImplementedError(
-            "ordinary DFPT input cannot enable the direct term; use a validated g_XC direct-vertex dataset"
+            "moving-projector direct terms require projector derivatives and are not implemented"
         )
     inputs = _load_inputs(config)
     manifest = build_run_manifest(config)
@@ -271,7 +375,9 @@ def run_compute_kernel(
         spinor_lift=config.dfpt.spinor_lift,
         spin_order=config.electrons.spin_order,
         norb=inputs.model.norb,
+        g_xc_dataset=config.dfpt.g_xc_dataset,
     ) as dfpt:
+        sample = dfpt.g(0)
         if context.is_root:
             try:
                 writer = RestartableHDF5(
@@ -300,7 +406,6 @@ def run_compute_kernel(
             if pair.positive in pending or pair.negative in pending
         )
         owned = partition_pairs(needed, context.rank, context.size)
-        sample = dfpt.g(0)
         resolved_memory = (
             config.performance.memory_limit_mb * 1024**2
             if memory_limit_bytes is None
@@ -317,6 +422,17 @@ def run_compute_kernel(
             if config.performance.perturbation_chunk is None
             else min(config.performance.perturbation_chunk, tuned_chunk)
         )
+        if config.kernel.include_direct_vertex:
+            matrix_bytes = inputs.model.kpoints.shape[0] * inputs.model.nw**2 * 16
+            nmag = inputs.magnetic.subspace.projectors.shape[0]
+            fixed_bytes = (4 * sample.shape[1] + 8) * matrix_bytes
+            bytes_per_perturbation = (2 * nmag + 6) * matrix_bytes
+            direct_chunk = (resolved_memory - fixed_bytes) // bytes_per_perturbation
+            if direct_chunk < 1:
+                if writer is not None:
+                    writer.close()
+                raise MemoryError("memory budget cannot hold one direct-vertex perturbation chunk")
+            chunk = min(chunk, direct_chunk)
         local: dict[int, dict[str, object]] = {}
         local_error: tuple[int, str, str] | None = None
         try:
