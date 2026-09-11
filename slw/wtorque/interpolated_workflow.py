@@ -49,13 +49,27 @@ def load_interpolated_workflow_config(path: str | Path) -> dict[str, Any]:
     source = Path(path).expanduser().resolve()
     config = json.loads(source.read_text())
     required = {"native_config", "kmesh", "output", "cache_dir"}
-    optional = {"qpoints", "qmesh", "points_per_segment"}
+    optional = {"qpoints", "qmesh", "points_per_segment",
+                "longrange_model", "short_range_model", "longrange_coarse_qpoints"}
     if not isinstance(config, dict) or required - config.keys() or config.keys() - required - optional:
         raise ValueError(f"interpolated config requires {sorted(required)}; optional {sorted(optional)}")
     for key in ("native_config", "output", "cache_dir"):
         target = Path(config[key]).expanduser()
         config[key] = str((source.parent / target).resolve() if not target.is_absolute() else target.resolve())
     config["kmesh"] = list(_mesh(config["kmesh"], "kmesh"))
+    for key, allowed in (("longrange_model", {"source", "point_center"}),
+                         ("short_range_model", {"source", "two_center"})):
+        config.setdefault(key, "source")
+        if not isinstance(config[key], str) or config[key] not in allowed:
+            raise ValueError(f"{key} must be one of {sorted(allowed)}")
+    if config["longrange_model"] == "point_center":
+        coarse_q = np.asarray(config.get("longrange_coarse_qpoints"), dtype=float)
+        if (coarse_q.ndim != 2 or coarse_q.shape[1:] != (3,) or not len(coarse_q)
+                or not np.all(np.isfinite(coarse_q))):
+            raise ValueError("point_center requires longrange_coarse_qpoints containing the actual source q representatives")
+        config["longrange_coarse_qpoints"] = coarse_q.tolist()
+    elif "longrange_coarse_qpoints" in config:
+        raise ValueError("longrange_coarse_qpoints requires longrange_model=point_center")
     if sum(key in config for key in ("qpoints", "qmesh", "points_per_segment")) > 1:
         raise ValueError("qpoints, qmesh, and points_per_segment are mutually exclusive")
     if "qpoints" in config:
@@ -388,7 +402,10 @@ def run_interpolated_workflow(configpath: str | Path, mpi_enabled: bool = False,
     local_error, response = None, None
     try:
         backend = DenseEPREvaluator(native["epr"], energy_unit=native["ep_energy_unit"],
-                                    displacement_unit=native["ep_displacement_unit"], cache_dir=config["cache_dir"])
+                                    displacement_unit=native["ep_displacement_unit"], cache_dir=config["cache_dir"],
+                                    longrange_model=config.get("longrange_model", "source"),
+                                    short_range_model=config.get("short_range_model", "source"),
+                                    longrange_coarse_qpoints=config.get("longrange_coarse_qpoints"))
         response = ArbitraryQResponse(inputs["frame"], backend, config["kmesh"], native)
         response.diagnostics["epr_backend"] = backend.diagnostics
     except Exception as exc:

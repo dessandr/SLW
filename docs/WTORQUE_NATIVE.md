@@ -247,6 +247,59 @@ TR-odd `g_XC` derivative and direct term are recomputed at the shifted dense
 momenta when enabled by the native input. The dense route retains kernels
 and mode couplings rather than exporting the large intermediate g_XC arrays.
 
+### Independent LR and SR interpolation choices
+
+The dense workflow JSON and `DenseEPREvaluator` accept two independent options:
+
+- `longrange_model="source"` (default) retains the source Wannier-identity
+  dipole term. `"point_center"` includes `exp(+i2π(q+G)·c_i)` for each Wannier
+  diagonal and every G term. This remains a point-center approximation, with
+  finite orbital extent and off-diagonal electronic form factors omitted.
+- `short_range_model="source"` (default) retains the original displacement
+  WS cells. `"two_center"` selects displacement images by their summed distance
+  to the bra center and the ket center in cell Re. The selected images are
+  checked under `(i,j,Re,Rp) -> (j,i,-Re,Rp-Re)`. An insufficient candidate
+  domain is rejected. No g matrix is averaged or made Hermitian by this option.
+
+`point_center` requires a polar EPR and `longrange_coarse_qpoints`: the **complete actual reduced
+q representatives used when the source EPR was produced**. The EPR mesh size
+alone does not determine these representatives, and the source finite G sum
+is not exactly reciprocal periodic. Supply the original q list rather than
+independently folding it. The list must cover the unshifted qmesh once modulo
+reciprocal integers; its original floating coordinates are retained.
+
+Changing LR applies both `-I_selected[L_new(qc)-L_source(qc)]` to the stored SR and
+`L_new(q)` on add-back. The subtraction uses the selected SR plan's actual
+diagonal `Re=0` images and degeneracies. Even at `Re=0`, single-distance and
+summed-distance WS criteria can select different near ties at the same finite
+tolerance; substituting the original cells is then inconsistent. Changing SR
+redistributes the original residue totals
+among different equivalent phonon images. Both operations preserve the sampled
+coarse q data; they can therefore be tested separately and together. The new
+image geometry makes the interpolation compatible with the real-space
+reciprocity relation, but does not remove a violation already present in the
+sampled input coefficients.
+
+Reciprocal image closure is not a magnetic-symmetry gate. In particular, it
+does not ensure AFM covariance in an electronic frame that mixes Wannier
+orbitals or varies with k. Check AFM and q-pair residuals independently for
+each selected model and for their combination; an improvement in one residual
+does not establish an improvement in the other. These options apply no AFM
+projection.
+
+For direct inspection, `evaluate_g(k,q,include_longrange=False)` returns the
+re-split SR for the selected model, and `longrange_diagonal(q)` returns its
+`(3*nat,nwan)` analytic diagonal in eV/Angstrom. The older `longrange(q)` method
+keeps returning the **source** scalar of shape `(3*nat,)`, independently of the
+selected model. To reconstruct the selected full g, embed `longrange_diagonal(q)`
+on the electronic matrix diagonal and add it to the selected SR.
+
+These choices are included in the response restart fingerprint and backend
+diagnostics. They use the same rank-local evaluator and MPI q ownership as the
+default workflow. A change of interpolation options requires separate output
+provenance; it does not validate phonons, electronic-response convergence, or
+the resulting polaron bands.
+
 The native input's `g_pair_policy` also applies here. With
 `hermitian_pair_average`, the evaluator averages g(k,q) with
 g(k+q,−q)† before the TR split and response; it does not Hermitize g at one q.

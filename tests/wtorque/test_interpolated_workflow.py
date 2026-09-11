@@ -77,6 +77,47 @@ def test_signed_pair_deduplication_without_reciprocal_folding():
     np.testing.assert_array_equal(signs, [0, 1, 0, 0, 0])
 
 
+def test_independent_lr_sr_options_reach_backend_and_change_restart_identity(tmp_path, monkeypatch):
+    import slw.wtorque.io.dense_epr as backend_module
+
+    configpath, _ = _fake_workflow(tmp_path, monkeypatch, [[.2, 0, 0]])
+    calls = []
+
+    def backend(*args, **kwargs):
+        calls.append(kwargs)
+        return SimpleNamespace(diagnostics={"longrange_model": kwargs["longrange_model"],
+                                            "short_range_model": kwargs["short_range_model"]})
+
+    monkeypatch.setattr(backend_module, "DenseEPREvaluator", backend)
+    original = workflow.run_interpolated_workflow(configpath)
+    assert calls[-1]["longrange_model"] == calls[-1]["short_range_model"] == "source"
+    config = json.loads(configpath.read_text())
+    config.update(longrange_model="point_center", short_range_model="two_center",
+                  longrange_coarse_qpoints=[[0., 0., 0.]])
+    configpath.write_text(json.dumps(config))
+    with pytest.raises(RuntimeError, match="provenance"):
+        workflow.run_interpolated_workflow(configpath)
+    config["output"] = "corrected.h5"
+    configpath.write_text(json.dumps(config))
+    corrected = workflow.run_interpolated_workflow(configpath)
+    assert calls[-1]["longrange_model"] == "point_center"
+    assert calls[-1]["short_range_model"] == "two_center"
+    assert corrected["fingerprint"] != original["fingerprint"]
+
+
+@pytest.mark.parametrize("key,value", [("longrange_model", "full_overlap"),
+                                       ("short_range_model", "average"),
+                                       ("longrange_model", []),
+                                       ("short_range_model", None)])
+def test_invalid_lr_sr_option_rejected_before_inputs(tmp_path, key, value):
+    config = dict(native_config="missing.json", kmesh=[2, 2, 2], output="out.h5",
+                  cache_dir="cache", **{key: value})
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps(config))
+    with pytest.raises(ValueError, match=key):
+        workflow.load_interpolated_workflow_config(path)
+
+
 def test_shard_round_trip_checks_provenance_pair_and_total(tmp_path):
     target = tmp_path / "q.npz"
     q = np.array([.2, 0, 0])

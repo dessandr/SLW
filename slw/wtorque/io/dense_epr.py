@@ -1,10 +1,11 @@
 """Cached qe2pert H and Cartesian g at arbitrary reduced k and q.
 
-This is the pair-specific Wigner--Seitz interpolation used by Perturbo.  The
-    stored hopping coefficients already contain their WS degeneracy weights.
-The optional 3D dipole add-back ports ``eph_wan_longrange_3d`` in Perturbo's
-``polar_correction.f90`` and acts on the original Wannier identity.  Transform
-both endpoints into another orbital frame only *after* this operation.
+The default reproduces Perturbo's pair-specific Wigner--Seitz interpolation
+and source 3D dipole add-back. Stored coefficients contain their WS weights.
+Independent options replace phonon images using both electronic endpoints
+and replace the identity LR by a point-Wannier-center LR with consistent
+coarse re-splitting. Transform both electronic endpoints only after summing
+SR and LR in the original Wannier basis.
 
 The evaluator itself is rank-local.  Callers distribute q points with MPI;
 ``cache_dir`` shares read-only, memory-mapped coefficient files between ranks
@@ -31,6 +32,10 @@ from slw.core.qe2pert_ws import (
 )
 from slw.epc.epr_io import energy_scale_to_ev, read_epr_metadata
 from slw.epc.epr_phonon import read_epr_phonon_metadata
+from slw.wtorque.io.epr_longrange import (
+    PolarLongRange3D, electronic_longrange_3d as _source_longrange_3d,
+)
+from slw.wtorque.io.epr_short_range import TwoCenterShortRangePlan
 
 _CACHE_VERSION = 1
 _BOHR_ANG = physical_constants["Bohr radius"][0] / 1.e-10
@@ -51,57 +56,8 @@ def _qpoint(value: object) -> np.ndarray:
 
 
 def electronic_longrange_3d(meta: dict[str, Any], qpoint: object) -> np.ndarray:
-    """Perturbo dipole ``dH/du`` diagonal, in Ry/bohr, shape ``(3*nat,)``.
-
-    Metadata uses Fortran-oriented ``bg`` and ``epsil`` matrices and
-    ``zstar[atom,field,displacement]``.  Unlike the phonon Ewald sum, the G
-    extents include epsilon and the smearing is ``polar_alpha``.  The exact
-    Perturbo reduced-q Gamma cutoff is retained.  No q folding is performed:
-    callers must use the same reciprocal representative as their g payload.
-    """
-    q = _qpoint(qpoint)
-    nat = int(meta["nat"])
-    result = np.zeros((nat, 3), complex)
-    if meta.get("system_2d", False) or float(meta.get("thickness_2d", -1.)) > 0:
-        raise NotImplementedError("electronic long-range add-back supports 3D dipoles only")
-    if meta.get("lquad", False):
-        raise NotImplementedError("electronic quadrupole add-back is not implemented")
-    if np.linalg.norm(q) < 1.e-8:
-        return result.ravel()
-    alpha = float(meta.get("polar_alpha", 1.))
-    if not np.isfinite(alpha) or alpha < 1.e-12:
-        raise ValueError("polar_alpha must be finite and at least 1e-12")
-    bg, epsilon = np.asarray(meta["bg"], float), np.asarray(meta["epsil"], float)
-    zstar = np.asarray(meta["zstar"], float)
-    tau = np.asarray(meta["tau_cart"], float)
-    if (bg.shape != (3, 3) or epsilon.shape != (3, 3)
-        or zstar.shape != (nat, 3, 3) or tau.shape != (nat, 3)
-        or any(not np.all(np.isfinite(x)) for x in (bg, epsilon, zstar, tau))):
-        raise ValueError("electronic polar tensors must have valid finite shapes")
-    if any(not np.isfinite(float(meta[key])) or float(meta[key]) <= 0 for key in ("alat", "volume")):
-        raise ValueError("electronic polar alat and volume must be finite and positive")
-    metric = np.einsum("ig,ij,jg->g", bg, epsilon, bg)
-    if np.any(metric <= 0) or not np.all(np.isfinite(metric)):
-        raise ValueError("electronic polar dielectric metric must be positive")
-    maximum = 14. * 4. * alpha
-    extents = np.ceil(np.sqrt(maximum / metric)).astype(int)
-    extents[np.asarray(meta["qc_dim"]) < 2] = 0
-    shifts = np.asarray([
-        (i, j, k)
-        for i in range(-extents[0], extents[0] + 1)
-        for j in range(-extents[1], extents[1] + 1)
-        for k in range(-extents[2], extents[2] + 1)
-    ], dtype=float)
-    cart = (q + shifts) @ bg.T
-    norm = np.einsum("gi,ij,gj->g", cart, epsilon, cart, optimize=True)
-    keep = (norm >= 1.e-14) & (norm <= maximum)
-    cart, norm = cart[keep], norm[keep]
-    weights = np.exp(-norm / (4. * alpha)) / norm
-    phase = np.exp(-2j * np.pi * (cart @ tau.T))
-    charge = np.einsum("gi,aij->gaj", cart, zstar, optimize=True)
-    result = np.einsum("g,ga,gaj->aj", weights, phase, charge, optimize=True)
-    tpiba = 2. * np.pi / float(meta["alat"])
-    return (result * (8j * np.pi / (float(meta["volume"]) * tpiba))).ravel()
+    """Source Perturbo 3D dipole scalar, Ry/bohr, with unchanged q policy."""
+    return _source_longrange_3d(meta, qpoint)
 
 
 @dataclass
@@ -144,7 +100,23 @@ class DenseEPREvaluator:
     def __init__(
         self, epr_path: str | Path, *, energy_unit: str, displacement_unit: str,
         expected_spinor: bool = True, cache_dir: str | Path | None = None,
+        longrange_model: str = "source", short_range_model: str = "source",
+        longrange_coarse_qpoints: object | None = None,
     ) -> None:
+        for name, value, allowed in (
+            ("longrange_model", longrange_model, {"source", "point_center"}),
+            ("short_range_model", short_range_model, {"source", "two_center"}),
+        ):
+            if not isinstance(value, str) or value not in allowed:
+                raise ValueError(f"{name} must be one of {sorted(allowed)}")
+        self.longrange_model = longrange_model
+        self.short_range_model = short_range_model
+        self._short_range_plan: TwoCenterShortRangePlan | None = None
+        if longrange_model == "point_center" and longrange_coarse_qpoints is None:
+            raise ValueError("point_center requires longrange_coarse_qpoints with the actual source q representatives")
+        if longrange_model == "source" and longrange_coarse_qpoints is not None:
+            raise ValueError("longrange_coarse_qpoints requires longrange_model=point_center")
+        self._polar_model: PolarLongRange3D | None = None
         self.path = Path(epr_path).expanduser().resolve()
         self.energy_scale = float(energy_scale_to_ev(energy_unit))
         if displacement_unit == "bohr":
@@ -166,6 +138,8 @@ class DenseEPREvaluator:
             basic = handle["basic_data"]
             lquad = "qtensor" in basic or (bool(basic["lquad"][()]) if "lquad" in basic else False)
             lpolar = bool(basic["lpolar"][()]) if "lpolar" in basic else False
+            if longrange_model == "point_center" and not lpolar:
+                raise ValueError("longrange_model=point_center requires a polar EPR (lpolar=true)")
             if lquad:
                 raise NotImplementedError("native dense EPR quadrupole add-back is not implemented")
             if lpolar:
@@ -180,6 +154,15 @@ class DenseEPREvaluator:
                 self.cache_path = None
             else:
                 self._load_cached_g(handle, Path(cache_dir).expanduser().resolve())
+        if short_range_model == "two_center":
+            self._short_range_plan = TwoCenterShortRangePlan(self)
+        if self.polar_metadata is not None and longrange_model == "point_center":
+            self._polar_model = PolarLongRange3D(
+                self.polar_metadata, self.metadata.wc, coarse_qpoints=longrange_coarse_qpoints,
+                at=self.metadata.at, tau=self.metadata.tau,
+                ws_cells=(self._short_range_plan.diagonal_ws_cells()
+                          if self._short_range_plan is not None else None),
+            )
         self.pert_atom = np.repeat(np.arange(self.metadata.nat, dtype=np.int32), 3)
         self.pert_cart = np.tile(np.arange(3, dtype=np.int32), self.metadata.nat)
         self.diagnostics = {
@@ -188,6 +171,18 @@ class DenseEPREvaluator:
             "eph_pairs": sum(len(g.pairs) for g in self._ggroups),
             "cache_path": None if self.cache_path is None else str(self.cache_path),
             "longrange": "perturbo_3d_dipole" if self.polar_metadata is not None else "none",
+            "longrange_model": longrange_model, "short_range_model": short_range_model,
+            "short_range_geometry": self._short_range_plan.diagnostics if self._short_range_plan is not None else None,
+            "longrange_resplitting": self._polar_model is not None,
+            "longrange_resplitting_geometry": short_range_model if self._polar_model is not None else None,
+            "longrange_coarse_qpoints": (
+                np.asarray(longrange_coarse_qpoints, float).tolist()
+                if self._polar_model is not None else None
+            ),
+            "electronic_form_factor": (
+                "diagonal point-Wannier-center approximation; finite-size/off-diagonal overlaps omitted"
+                if self._polar_model is not None else "source Wannier identity"
+            ),
             "longrange_q_policy": "source_representative_without_folding",
             "longrange_exact_reciprocal_periodicity": self.polar_metadata is None,
             "longrange_limitation": (
@@ -305,7 +300,11 @@ class DenseEPREvaluator:
         return values
 
     def longrange(self, qpoint: object) -> np.ndarray:
-        """Return the Wannier-diagonal dipole scalar for each Cartesian atom."""
+        """Return the source dipole scalar (legacy API), irrespective of model.
+
+        Use ``longrange_diagonal`` for the selected model's full diagonal.
+        Both methods return eV/Angstrom.
+        """
         q = _qpoint(qpoint)
         if self.polar_metadata is None:
             return np.zeros(3*self.metadata.nat, complex)
@@ -313,9 +312,16 @@ class DenseEPREvaluator:
         # of an explicit alternative unit supplied for stored coefficients.
         return electronic_longrange_3d(self.polar_metadata, q) * (RY_TO_EV / _BOHR_ANG)
 
-    def evaluate_g(self, kpoints: object, qpoint: object, *, include_longrange: bool = True) -> np.ndarray:
-        """Return g(k,q), bra at k+q and ket at k, without q-pair averaging."""
-        k, q = _points(kpoints, "kpoints"), _qpoint(qpoint)
+    def longrange_diagonal(self, qpoint: object) -> np.ndarray:
+        """Selected LR add-back, eV/Angstrom, shape (3*nat,nwan)."""
+        q = _qpoint(qpoint)
+        if self._polar_model is not None:
+            return self._polar_model.center(q) * (RY_TO_EV / _BOHR_ANG)
+        return np.broadcast_to(self.longrange(q)[:, None],
+                               (3*self.metadata.nat, self.metadata.nwan)).copy()
+
+    def _evaluate_source_short_range(self, k: np.ndarray, q: np.ndarray) -> np.ndarray:
+        """Stored SR in the source WS geometry, eV/Angstrom."""
         m = self.metadata
         values = np.zeros((len(k), 3*m.nat, m.nwan, m.nwan), complex)
         phases_k: dict[bytes, np.ndarray] = {}
@@ -332,9 +338,29 @@ class DenseEPREvaluator:
             atoms, i, j = group.pairs.T
             perturbations = 3*atoms[:, None] + np.arange(3)[None, :]
             values[:, perturbations, i[:, None], j[:, None]] = block
+        return values
+
+    def evaluate_g(self, kpoints: object, qpoint: object, *, include_longrange: bool = True) -> np.ndarray:
+        """Selected g(k,q), bra at k+q and ket at k, without q-pair averaging.
+
+        With include_longrange=False the result is the SR remainder for the
+        selected LR model, including its consistent coarse subtraction.
+        """
+        k, q = _points(kpoints, "kpoints"), _qpoint(qpoint)
+        m = self.metadata
+        if self._short_range_plan is None:
+            values = self._evaluate_source_short_range(k, q)
+        else:
+            values = self._short_range_plan.evaluate(k, q) * self.derivative_scale
+        diagonal = np.arange(m.nwan)
+        # This correction belongs to SR and remains active when add-back is
+        # disabled. Changing fine LR alone would not preserve coarse data.
+        if self._polar_model is not None:
+            values[:, :, diagonal, diagonal] += (
+                self._polar_model.sr_correction(q) * (RY_TO_EV / _BOHR_ANG)
+            )[None]
         if include_longrange:
-            diagonal = np.arange(m.nwan)
-            values[:, :, diagonal, diagonal] += self.longrange(q)[None, :, None]
+            values[:, :, diagonal, diagonal] += self.longrange_diagonal(q)[None]
         return values
 
 

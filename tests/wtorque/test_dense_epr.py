@@ -89,6 +89,68 @@ def test_coarse_fft_agreement_and_cache_reuse(tmp_path):
     assert cached.diagnostics["eph_pairs"] == 4
 
 
+def test_point_center_rejects_nonpolar_input(tmp_path):
+    path = tmp_path / "nonpolar.h5"
+    _fixture(path)
+    with pytest.raises(ValueError, match="requires a polar EPR"):
+        DenseEPREvaluator(
+            path, energy_unit="ev", displacement_unit="angstrom",
+            longrange_model="point_center",
+            longrange_coarse_qpoints=list(product([0., .5], repeat=3)),
+        )
+
+
+def test_combined_resplitting_uses_actual_sr_images_near_ws_tie(tmp_path):
+    # A source single-distance tie is split by the two-distance criterion.
+    # Construct g_coarse=0; the selected full result must be
+    # L_new(q) - I_selected[L_new(qc)] regardless of the old LR split.
+    from slw.wtorque.io.epr_longrange import PolarLongRange3D
+
+    path = tmp_path / "near_tie.h5"
+    at = np.eye(3)
+    wc = np.array([[.2, 0., 0.], [.2, 0., 0.]])
+    tau = np.array([[1.2 + .375e-6, 0., 0.]])
+    qc = np.array([[0., 0., 0.], [.5, 0., 0.]])
+    meta = dict(nat=1, qc_dim=(2, 1, 1), alat=6., volume=100., bg=at,
+                epsil=4*at, zstar=np.array([2*at]), tau_cart=tau,
+                polar_alpha=1., system_2d=False)
+    source_lr = np.array([electronic_longrange_3d(meta, q) for q in qc])
+    pws = set_wigner_seitz_cell(init_rvec_images((2, 1, 1), at), at, wc[0], tau[0])
+    assert pws.nr == 3  # two tied images of residue 0, one of residue 1
+    old_sr = (np.exp(-2j*np.pi*(pws.vectors @ qc.T)) @ (-source_lr)
+              / len(qc) / pws.ndeg[:, None])
+    with h5py.File(path, "w") as h:
+        basic = h.create_group("basic_data")
+        for name, value in dict(nat=1, num_wann=2, kc_dim=(1, 1, 1), qc_dim=(2, 1, 1),
+                                at=at.T, tau=tau, wannier_center_cryst=wc, spinor=1,
+                                lpolar=1, lquad=0, mass=[1800.], alat=6., volume=100.,
+                                bg=at, epsil=4*at, zstar=np.array([2*at]),
+                                polar_alpha=1., system_2d=0).items():
+            basic[name] = value
+        hg, gg = h.create_group("electron_wannier"), h.create_group("eph_matrix_wannier")
+        for i, j in product(range(2), repeat=2):
+            value = old_sr[:, None, :] if i == j else np.zeros((pws.nr, 1, 3), complex)
+            gg[f"ep_hop_r_1_{j+1}_{i+1}"], gg[f"ep_hop_i_1_{j+1}_{i+1}"] = value.real, value.imag
+            if i <= j:
+                index = triangular_pair_index(i+1, j+1)
+                hg[f"hopping_r{index}"], hg[f"hopping_i{index}"] = [.1], [0.]
+    backend = DenseEPREvaluator(path, energy_unit="ry", displacement_unit="bohr",
+                                short_range_model="two_center", longrange_model="point_center",
+                                longrange_coarse_qpoints=qc)
+    q = np.array([.217, 0., 0.])
+    # With the stated geometry, the nearest two-center images are -2 and -1.
+    selected_rp = np.array([[-2, 0, 0], [-1, 0, 0]])
+    polar = PolarLongRange3D(meta, wc)
+    new_lr_coarse = np.array([polar.center(point) for point in qc])
+    weights = np.exp(2j*np.pi*((q[None, :] - qc) @ selected_rp.T)).sum(axis=1) / len(qc)
+    expected_diagonal = polar.center(q) - np.einsum("q,qpi->pi", weights, new_lr_coarse)
+    expected_diagonal *= RY_TO_EV / physical_constants["Bohr radius"][0] / 1e10
+    actual = backend.evaluate_g([[.131, 0., 0.]], q)
+    np.testing.assert_allclose(actual[0, :, np.arange(2), np.arange(2)].T,
+                               expected_diagonal, atol=2e-14)
+    np.testing.assert_allclose(actual[0, :, 0, 1], 0., atol=2e-14)
+
+
 def _polar_meta():
     return {
         "nat": 2, "qc_dim": (3,3,3), "alat": 6.3, "volume": 171.2,
@@ -174,3 +236,51 @@ def test_incomplete_payload_and_spinor_boundary_fail(tmp_path):
         del f["eph_matrix_wannier/ep_hop_i_1_2_1"]
     with pytest.raises(KeyError,match="incomplete"):
         DenseEPREvaluator(path,energy_unit="ev",displacement_unit="angstrom")
+
+
+@pytest.mark.parametrize("short_range_model", ["source", "two_center"])
+def test_point_center_resplitting_preserves_coarse_data_and_separates_sr(tmp_path, short_range_model):
+    path = tmp_path / "resplit.h5"
+    _fixture(path)
+    polar = _polar_meta()
+    with h5py.File(path, "a") as f:
+        basic = f["basic_data"]
+        basic["lpolar"][...] = 1
+        for key, value in {
+            "mass": [1800.], "alat": polar["alat"], "volume": polar["volume"],
+            "bg": polar["bg"].T, "epsil": polar["epsil"].T,
+            "zstar": polar["zstar"][:1].swapaxes(-1, -2),
+            "polar_alpha": polar["polar_alpha"], "system_2d": 0,
+        }.items():
+            basic[key] = value
+    original_bytes = path.read_bytes()
+    q_coarse = np.indices((2, 2, 2)).reshape(3, -1).T / 2
+    source = DenseEPREvaluator(path, energy_unit="ev", displacement_unit="angstrom")
+    selected = DenseEPREvaluator(
+        path, energy_unit="ev", displacement_unit="angstrom",
+        longrange_model="point_center", longrange_coarse_qpoints=q_coarse,
+        short_range_model=short_range_model,
+    )
+    k = np.array([[.137, -.243, .219], [.21, .47, -.16]])
+    for q in q_coarse:
+        np.testing.assert_allclose(selected.evaluate_g(k, q), source.evaluate_g(k, q),
+                                   atol=2.e-12, rtol=2.e-13)
+    q = np.array([.127, -.374, .298])
+    full = selected.evaluate_g(k, q)
+    sr = selected.evaluate_g(k, q, include_longrange=False)
+    lr = selected.longrange_diagonal(q)[None, :, :, None] * np.eye(2)
+    np.testing.assert_allclose(full, sr + lr, atol=1.e-13)
+    assert np.linalg.norm(sr-source.evaluate_g(k, q, include_longrange=False)) > 1.e-4
+    # The legacy scalar remains explicitly the source model.
+    np.testing.assert_array_equal(selected.longrange(q), source.longrange(q))
+    assert selected.diagnostics["longrange_resplitting"] is True
+    assert path.read_bytes() == original_bytes
+
+
+def test_point_center_requires_actual_coarse_q_representatives(tmp_path):
+    with pytest.raises(ValueError, match="actual source q"):
+        DenseEPREvaluator(tmp_path / "not_read.h5", energy_unit="ev", displacement_unit="angstrom",
+                          longrange_model="point_center")
+    with pytest.raises(ValueError, match="requires longrange_model"):
+        DenseEPREvaluator(tmp_path / "not_read.h5", energy_unit="ev", displacement_unit="angstrom",
+                          longrange_coarse_qpoints=[[0., 0., 0.]])
