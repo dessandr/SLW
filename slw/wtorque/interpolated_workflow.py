@@ -22,6 +22,7 @@ from slw.wtorque.polaron_bands import (
 )
 from slw.wtorque.projection.magnon import project_external_magnons
 from slw.wtorque.projection.phonon import project_phonons
+from slw.wtorque.projection.acoustic import project_translation_kernel
 
 
 def _json(value: object) -> str:
@@ -49,7 +50,9 @@ def load_interpolated_workflow_config(path: str | Path) -> dict[str, Any]:
     source = Path(path).expanduser().resolve()
     config = json.loads(source.read_text())
     required = {"native_config", "kmesh", "output", "cache_dir"}
-    optional = {"qpoints", "qmesh", "points_per_segment",
+    optional = {"qpoints", "qmesh", "points_per_segment", "gamma_policy", "gamma_asr_tolerance",
+                "gamma_translation_policy", "gamma_translation_tolerance",
+                "vertex_symmetry_policy", "afm_inversion_translation",
                 "longrange_model", "short_range_model", "longrange_coarse_qpoints"}
     if not isinstance(config, dict) or required - config.keys() or config.keys() - required - optional:
         raise ValueError(f"interpolated config requires {sorted(required)}; optional {sorted(optional)}")
@@ -70,6 +73,26 @@ def load_interpolated_workflow_config(path: str | Path) -> dict[str, Any]:
         config["longrange_coarse_qpoints"] = coarse_q.tolist()
     elif "longrange_coarse_qpoints" in config:
         raise ValueError("longrange_coarse_qpoints requires longrange_model=point_center")
+    config.setdefault("vertex_symmetry_policy", "none")
+    if config["vertex_symmetry_policy"] not in {"none", "afm_inversion_pair"}:
+        raise ValueError("vertex_symmetry_policy must be none or afm_inversion_pair")
+    if config["vertex_symmetry_policy"] == "afm_inversion_pair":
+        translation = np.asarray(config.get("afm_inversion_translation"), float)
+        if translation.shape != (3,) or not np.all(np.isfinite(translation)):
+            raise ValueError("afm_inversion_translation must be a finite reduced three-vector")
+        config["afm_inversion_translation"] = translation.tolist()
+    elif "afm_inversion_translation" in config:
+        raise ValueError("afm_inversion_translation requires vertex_symmetry_policy=afm_inversion_pair")
+    config.setdefault("gamma_policy", "omit")
+    config.setdefault("gamma_translation_policy", "strict")
+    if config["gamma_policy"] not in {"omit", "optical"}:
+        raise ValueError("gamma_policy must be omit or optical")
+    if config["gamma_translation_policy"] not in {"strict", "project"}:
+        raise ValueError("gamma_translation_policy must be strict or project")
+    for key in ("gamma_asr_tolerance", "gamma_translation_tolerance"):
+        config.setdefault(key, 1.e-6)
+        if not np.isfinite(config[key]) or config[key] < 0:
+            raise ValueError(f"{key} must be finite and nonnegative")
     if sum(key in config for key in ("qpoints", "qmesh", "points_per_segment")) > 1:
         raise ValueError("qpoints, qmesh, and points_per_segment are mutually exclusive")
     if "qpoints" in config:
@@ -182,13 +205,16 @@ def _load_shard(path: Path, fingerprint: str, qpoint: np.ndarray) -> dict[str, A
 
 
 def _project_results(path: SampledBandPath, modes: NativePathModes, results: dict[int, dict[str, Any]],
-                     owners: np.ndarray, signs: np.ndarray) -> dict[str, Any]:
+                     owners: np.ndarray, signs: np.ndarray, config: dict | None = None) -> dict[str, Any]:
+    config = {} if config is None else config
     nq = len(path.qpoints)
     nm = modes.magnon_energies_eV.shape[1]
     np_ = modes.phonon_energies_eV.shape[1]
     nat = len(modes.phonons.masses_amu)
     kernels = {name: np.full((nq, 2, nm, 2, nat, 3), np.nan + 0j) for name in ("bubble", "direct", "total")}
     full_nambu = {name: np.full((nq, 2, 2 * nm, 2 * np_), np.nan + 0j) for name in kernels}
+    used_kernels = {name: np.full_like(value, np.nan+0j) for name, value in kernels.items()}
+    acoustic_diagnostics = {}
     for iq in np.flatnonzero(modes.valid):
         result = results[int(owners[iq])]
         for sign in range(2):
@@ -196,27 +222,48 @@ def _project_results(path: SampledBandPath, modes: NativePathModes, results: dic
             energies = modes.phonon_energies_eV[iq] if sign == 0 else modes.phonon_energies_minus_eV[iq]
             phonon_vectors = modes.phonon_eigenvectors[iq] if sign == 0 else modes.phonon_eigenvectors_minus[iq]
             magnon_vectors = modes.magnon_transform[iq] if sign == 0 else modes.magnon_transform_minus[iq]
+            active = np.flatnonzero(energies > 0)
+            translations = np.flatnonzero(energies == 0)
+            if len(translations) and (not path.gamma_mask[iq] or len(translations) != 3):
+                raise ValueError("only three Gamma translations may be omitted from phonon projection")
+            sign_diagnostics = {}
             for component in kernels:
                 kernels[component][iq, sign] = result[component][source_sign]
+                kernel = kernels[component][iq, sign]
+                if len(translations):
+                    signed_q = path.qpoints[iq] * (1 if sign == 0 else -1)
+                    phase = np.exp(-2j*np.pi*(modes.phonons.atom_positions_frac @ signed_q)) if modes.phonons.gauge == "atomic" else None
+                    kernel, diag = project_translation_kernel(kernel, modes.phonons.masses_amu, phase=phase)
+                    sign_diagnostics[component] = diag
+                    if component == "total" and diag["raw_translation_relative"] > config.get("gamma_translation_tolerance", 1.e-6):
+                        if config.get("gamma_translation_policy", "strict") == "strict":
+                            raise ValueError(f"Gamma total mixed-response translation residual {diag['raw_translation_relative']:.6g} exceeds tolerance; inspect raw bubble/direct or explicitly select diagnostic gamma_translation_policy=project")
+                used_kernels[component][iq, sign] = kernel
                 coefficient = project_phonons(
-                    kernels[component][iq, sign], normalization="cartesian_derivative",
-                    frequencies=energies, masses=modes.phonons.masses_amu, eigenvectors=phonon_vectors,
+                    kernel, normalization="cartesian_derivative",
+                    frequencies=energies[active], masses=modes.phonons.masses_amu, eigenvectors=phonon_vectors[:, :, active],
                 )
-                full_nambu[component][iq, sign] = project_external_magnons(
+                projected = project_external_magnons(
                     coefficient, magnon_vectors, modes.magnons.spin_lengths,
                     spin_coordinate="transverse_direction",
                 ).full_nambu
+                full_nambu[component][iq, sign] = 0.
+                full_nambu[component][iq, sign][:, np.r_[active, np_+active]] = projected
+            if sign_diagnostics:
+                acoustic_diagnostics[f"{iq}:{sign}"] = sign_diagnostics
     bands = solve_polaron_bands(
         modes.magnon_energies_eV, modes.phonon_energies_eV, full_nambu["total"][:, 0],
         modes.magnon_energies_minus_eV, modes.phonon_energies_minus_eV, full_nambu["total"][:, 1],
         valid_q_mask=modes.valid,
+        phonon_translation_mask=path.gamma_mask[:, None] & (modes.phonon_energies_eV == 0),
     )
-    return {"kernels": kernels, "full_nambu": full_nambu, "bands": bands}
+    return {"kernels": kernels, "used_kernels": used_kernels, "full_nambu": full_nambu, "bands": bands,
+            "gamma_translation_diagnostics": acoustic_diagnostics}
 
 
 def _write_outputs(config, native, inputs, path, kind, modes, results, owners, signs,
                    fingerprint, response_diagnostics, mpi_size, elapsed):
-    projected = _project_results(path, modes, results, owners, signs)
+    projected = _project_results(path, modes, results, owners, signs, config)
     bands = projected["bands"]
     target = Path(config["output"])
     summary = dict(inputs["summary"])
@@ -231,7 +278,12 @@ def _write_outputs(config, native, inputs, path, kind, modes, results, owners, s
         "electronic_interpolation": response_diagnostics,
         "dense_k_and_path_are_interpolated": True, "coarse_q_convergence_established": False,
         "g_xc_exported": False,
-        "gamma_policy": "omit zero-point/Goldstone singular endpoints; no gap or stabilizing shift",
+        "gamma_policy": config.get("gamma_policy", "omit"),
+        "gamma_translation_policy": config.get("gamma_translation_policy", "strict"),
+        "gamma_translation_diagnostics": projected["gamma_translation_diagnostics"],
+        "path_phonon_diagnostics": getattr(modes.phonons, "diagnostics", {}),
+        "path_magnon_diagnostics": getattr(modes.magnons, "diagnostics", {}),
+        "zero_mode_observables": "translation endpoints carry zero energy only; eigenvectors, magnon character, and phonon AM are undefined; use bands/mode_valid",
         "magnon_weight_definition": "Euclidean particle+hole magnon fraction of full Nambu eigenvector",
         "q_diagnostics": {str(key): value["diagnostics"] for key, value in results.items()},
     })
@@ -273,6 +325,8 @@ def _write_outputs(config, native, inputs, path, kind, modes, results, owners, s
             for name in ("bubble", "direct", "total"):
                 handle[f"kernel/K_pi_u_{name}"] = projected["kernels"][name][:, 0]
                 handle[f"kernel/K_pi_u_{name}_minus"] = projected["kernels"][name][:, 1]
+                handle[f"kernel_used/K_pi_u_{name}"] = projected["used_kernels"][name][:, 0]
+                handle[f"kernel_used/K_pi_u_{name}_minus"] = projected["used_kernels"][name][:, 1]
                 handle[f"coupling/full_nambu_{name}"] = projected["full_nambu"][name][:, 0]
                 handle[f"coupling/full_nambu_{name}_minus"] = projected["full_nambu"][name][:, 1]
             for field in dataclasses.fields(bands):
@@ -353,7 +407,11 @@ def run_interpolated_workflow(configpath: str | Path, mpi_enabled: bool = False,
         path, kind = _path(config, native, inputs["phonons"].lattice_ang)
         modes = native_path_modes(native["epr"], native["exchange_out"], path.qpoints,
                                   spin_lengths=native["spin_lengths"], magnetic_atom_labels=native["magnetic_atom_labels"],
-                                  source_directed_bond_weight=native["source_directed_bond_weight"])
+                                  source_directed_bond_weight=native["source_directed_bond_weight"],
+                                  anisotropy_mev=native.get("anisotropy_mev"),
+                                  anisotropy_spin_normalization=native.get("anisotropy_spin_normalization"),
+                                  gamma_policy=config["gamma_policy"],
+                                  gamma_asr_tolerance=config["gamma_asr_tolerance"])
         qtasks, owners, signs = _tasks(path.qpoints, modes.valid)
         identity = {"config": config, "native_config": native,
                     "source_sha256": inputs["summary"]["source_sha256"],
@@ -406,7 +464,9 @@ def run_interpolated_workflow(configpath: str | Path, mpi_enabled: bool = False,
                                     longrange_model=config.get("longrange_model", "source"),
                                     short_range_model=config.get("short_range_model", "source"),
                                     longrange_coarse_qpoints=config.get("longrange_coarse_qpoints"))
-        response = ArbitraryQResponse(inputs["frame"], backend, config["kmesh"], native)
+        response_config = {**native, **{key: config[key] for key in
+                           ("vertex_symmetry_policy", "afm_inversion_translation") if key in config}}
+        response = ArbitraryQResponse(inputs["frame"], backend, config["kmesh"], response_config)
         response.diagnostics["epr_backend"] = backend.diagnostics
     except Exception as exc:
         local_error = f"rank {context.rank}: {type(exc).__name__}: {exc}"

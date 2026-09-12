@@ -48,7 +48,7 @@ _REQUIRED = set(_FILES) | {
     "fermi_energy_eV", "energy_min_eV", "eta_eV", "ep_energy_unit",
     "ep_displacement_unit", "approximation",
 }
-_OPTIONAL = {"perturbation_chunk", "projector_tr_tolerance", "g_reciprocity_tolerance", "hamiltonian_tolerance_eV", "g_pair_policy", "include_direct_vertex", "g_xc_source", "export_g_xc"}
+_OPTIONAL = {"perturbation_chunk", "projector_tr_tolerance", "g_reciprocity_tolerance", "hamiltonian_tolerance_eV", "g_pair_policy", "include_direct_vertex", "g_xc_source", "export_g_xc", "anisotropy_mev", "anisotropy_spin_normalization"}
 
 
 def load_native_workflow_config(path: str | Path) -> dict[str, Any]:
@@ -56,6 +56,14 @@ def load_native_workflow_config(path: str | Path) -> dict[str, Any]:
     config = json.loads(source.read_text())
     if not isinstance(config, dict):
         raise ValueError("native workflow config must be a JSON object")
+    if (config.get("anisotropy_mev") is None) != (config.get("anisotropy_spin_normalization") is None):
+        raise ValueError("anisotropy_mev and anisotropy_spin_normalization must be supplied together")
+    if config.get("anisotropy_mev") is not None:
+        from slw.magph.model import ExchangeSpinNormalization
+        ExchangeSpinNormalization(config["anisotropy_spin_normalization"])
+        values = np.asarray(config["anisotropy_mev"], float)
+        if values.ndim > 1 or not values.size or not np.all(np.isfinite(values)):
+            raise ValueError("anisotropy_mev must contain finite site values")
     if _REQUIRED - config.keys() or config.keys() - _REQUIRED - _OPTIONAL:
         raise ValueError(f"native config missing={sorted(_REQUIRED - config.keys())}, unknown={sorted(config.keys() - _REQUIRED - _OPTIONAL)}")
     if config["approximation"] not in {"projection_anchored_bubble", "projection_anchored_frozen_frame_total"}:
@@ -141,6 +149,8 @@ def _root_inputs(config: dict[str, Any]) -> dict[str, Any]:
         config["exchange_out"], q, spin_lengths=config["spin_lengths"],
         source_directed_bond_weight=config["source_directed_bond_weight"],
         magnetic_atom_labels=config["magnetic_atom_labels"], gauge="atomic",
+        anisotropy_mev=config.get("anisotropy_mev"),
+        anisotropy_spin_normalization=config.get("anisotropy_spin_normalization"),
     )
     phonons = native_phonon_modes(config["epr"], q, gauge="atomic")
     validate_native_xml_geometry(config["qe_xml"], config["dynamical_xml"],
@@ -172,7 +182,7 @@ def _root_inputs(config: dict[str, Any]) -> dict[str, Any]:
     eigenvalues = np.linalg.eigvalsh(basis.hamiltonian_eV)
     mu = config["fermi_energy_eV"]
     summary = {
-        "approximation": "projection-anchored rigid atomic spin; TR-odd model exchange; local_partition; " + ("bubble + fixed-frame direct; " if config["include_direct_vertex"] else "bubble only; ") + "isotropic TB2J magnons",
+        "approximation": "projection-anchored rigid atomic spin; TR-odd model exchange; local_partition; " + ("bubble + fixed-frame direct; " if config["include_direct_vertex"] else "bubble only; ") + "isotropic TB2J exchange" + (" + input single-ion anisotropy" if config.get("anisotropy_mev") is not None else " magnons"),
         "direct_term_enabled": config["include_direct_vertex"], "projector_motion_enabled": False,
         "g_xc_definition": ("d[H-Theta H Theta^-1]/(2 du), fixed AMN Q/B; model_exchange_derivative, not isolated QE XC potential" if config["include_direct_vertex"] else None),
         "temperature_K": 0., "fixed_chemical_potential": True,

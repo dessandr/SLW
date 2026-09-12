@@ -98,6 +98,8 @@ class PolaronBands:
     eigen_residual_eV: NDArray[np.float64]
     valid: NDArray[np.bool_]
     status: tuple[str, ...]
+    mode_valid: NDArray[np.bool_] | None = None
+    translation_zero_mask: NDArray[np.bool_] | None = None
 
 
 def solve_polaron_bands(
@@ -112,6 +114,7 @@ def solve_polaron_bands(
     qpair_tolerance: float = 1.0e-8,
     stability_tolerance_eV: float = 1.0e-10,
     imaginary_tolerance_eV: float = 1.0e-10,
+    phonon_translation_mask: object | None = None,
 ) -> PolaronBands:
     """Solve positive-norm bands; preserve unstable/zero modes as diagnostics.
 
@@ -145,6 +148,16 @@ def solve_polaron_bands(
     valid = np.ones(nq, dtype=bool) if valid_q_mask is None else np.asarray(valid_q_mask, dtype=bool).copy()
     if valid.shape != (nq,):
         raise ValueError("valid_q_mask must have shape (nq,)")
+    if phonon_translation_mask is not None:
+        translations = np.asarray(phonon_translation_mask, bool)
+        if translations.shape != ep.shape:
+            raise ValueError("phonon_translation_mask must have shape (nq,nphonon)")
+        if np.any(translations & valid[:, None]):
+            return _solve_with_translations(
+                em, ep, vq, emm, epm, vm, valid, translations,
+                qpair_tolerance=qpair_tolerance, stability_tolerance_eV=stability_tolerance_eV,
+                imaginary_tolerance_eV=imaginary_tolerance_eV,
+            )
     count = nm + np_
     bands = np.full((nq, count), np.nan)
     weights = bands.copy()
@@ -194,7 +207,58 @@ def solve_polaron_bands(
         eres[iq] = np.max(np.abs(metric[:, None] * hessian @ selected - selected * bands[iq]))
         status.append("stable")
     return PolaronBands(bands, weights, eigenvectors, rwa, dynamic, hminimum, imax,
-                        qres, pres, eres, valid, tuple(status))
+                        qres, pres, eres, valid, tuple(status),
+                        np.broadcast_to(valid[:, None], bands.shape).copy(), np.zeros_like(bands, bool))
+
+
+def _solve_with_translations(em, ep, vq, emm, epm, vm, valid, translations, **tolerances):
+    """Solve finite oscillators and retain three unnormalized zero endpoints.
+
+    No eigenvector or phonon AM is assigned to a free rigid translation.
+    Finite-mode vectors are embedded back into the original Nambu rows.
+    """
+    from dataclasses import fields
+    nq, nm = em.shape
+    np_ = ep.shape[1]; n = nm+np_
+    base = solve_polaron_bands(em, ep, vq, emm, epm, vm,
+        valid_q_mask=np.zeros(nq, bool), **tolerances)
+    arrays = {f.name: np.array(getattr(base, f.name), copy=True)
+              for f in fields(base) if f.name != "status"}
+    status = list(base.status)
+    for iq in np.flatnonzero(valid):
+        removed = np.flatnonzero(translations[iq]); active = np.flatnonzero(~translations[iq])
+        if len(removed) not in (0, 3):
+            raise ValueError("Gamma elimination requires exactly three rigid translations")
+        if np.any(ep[iq, removed] != 0) or np.any(epm[iq, removed] != 0):
+            raise ValueError("removed translation energies must be exactly zero at both q signs")
+        inactive_columns = np.r_[removed, np_+removed]
+        if len(removed) and (np.max(abs(vq[iq][:, inactive_columns])) > 1.e-14
+                            or np.max(abs(vm[iq][:, inactive_columns])) > 1.e-14):
+            raise ValueError("rigid translations must decouple before the finite-mode BdG solve")
+        columns = np.r_[active, np_+active]
+        result = solve_polaron_bands(em[iq:iq+1], ep[iq:iq+1, active], vq[iq:iq+1, :, columns],
+            emm[iq:iq+1], epm[iq:iq+1, active], vm[iq:iq+1, :, columns], **tolerances)
+        status[iq] = result.status[0]
+        # Low three columns are energy-only acoustic endpoints, not bosons.
+        offset = len(removed)
+        target = np.arange(offset, n)
+        rows = np.r_[np.arange(nm), nm+active, n+np.arange(nm), n+nm+active]
+        for name in ('energies_eV', 'magnon_weights', 'rwa_energies_eV', 'mode_valid'):
+            arrays[name][iq, target] = getattr(result, name)[0]
+        arrays['eigenvectors'][iq][:, target] = 0.
+        arrays['eigenvectors'][iq][np.ix_(rows, target)] = result.eigenvectors[0]
+        for name in ('minimum_hessian_eigenvalue_eV', 'maximum_imaginary_eigenvalue_eV',
+                     'qpair_residual', 'paraunitarity_residual', 'eigen_residual_eV', 'valid'):
+            arrays[name][iq] = getattr(result, name)[0]
+        dynamic = np.r_[result.dynamic_eigenvalues_eV[0], np.zeros(2*offset)]
+        arrays['dynamic_eigenvalues_eV'][iq] = dynamic[np.lexsort((dynamic.imag, dynamic.real))]
+        if result.valid[0] and offset:
+            arrays['energies_eV'][iq, :offset] = 0.
+            arrays['rwa_energies_eV'][iq, :offset] = 0.
+            arrays['translation_zero_mask'][iq, :offset] = True
+            arrays['minimum_hessian_eigenvalue_eV'][iq] = min(0., result.minimum_hessian_eigenvalue_eV[0])
+            status[iq] = "stable_optical_with_rigid_translations"
+    return PolaronBands(**arrays, status=tuple(status))
 
 
 @dataclass(frozen=True)
@@ -240,12 +304,18 @@ def native_path_modes(
     gauge: str = "atomic",
     loto_mode: str = "auto",
     valid_q_mask: object | None = None,
+    anisotropy_mev: object | None = None,
+    anisotropy_spin_normalization: str | None = None,
+    gamma_policy: str = "omit",
+    gamma_asr_tolerance: float = 1.e-6,
 ) -> NativePathModes:
-    """Batch native q/-q modes, explicitly omitting singular Γ endpoints.
+    """Batch q/-q modes, with an opt-in finite-mode treatment of Gamma.
 
     A zero-point normalized acoustic mode or a metric-normalized AFM
-    Goldstone eigenvector is undefined at Γ.  These points are masked,
-    never shifted.  A batch with additional unstable/zero modes falls back
+    Goldstone eigenvector is undefined at Γ. By default these points are
+    masked. ``gamma_policy='optical'`` separates rigid translations and
+    requires finite magnon modes, optionally from input anisotropy.
+    No zero-mode energy is shifted. A batch with additional unstable/zero modes falls back
     to individual checks to record their locations.  Source, gauge, and
     other input errors still raise.  Independent q subsets may be passed
     on separate MPI ranks by the workflow owner.
@@ -260,9 +330,12 @@ def native_path_modes(
         raise ValueError("valid_q_mask must have shape (nq,)")
     status = ["stable" if value else "masked_by_caller" for value in valid]
     gamma = np.max(np.abs(points - np.rint(points)), axis=1) < 1.e-12
+    if gamma_policy not in {"omit", "optical"}:
+        raise ValueError("gamma_policy must be omit or optical")
     for index in np.flatnonzero(gamma & valid):
-        status[index] = "gamma_zero_mode_omitted"
-    valid &= ~gamma
+        status[index] = "gamma_zero_mode_omitted" if gamma_policy == "omit" else "gamma_optical_with_rigid_translations"
+    if gamma_policy == "omit":
+        valid &= ~gamma
 
     def evaluate(indices):
         paired = np.concatenate((points[indices], -points[indices]), axis=0)
@@ -270,8 +343,12 @@ def native_path_modes(
             exchange_path, paired, spin_lengths=spin_lengths,
             source_directed_bond_weight=source_directed_bond_weight,
             magnetic_atom_labels=magnetic_atom_labels, gauge=gauge,
+            anisotropy_mev=anisotropy_mev,
+            anisotropy_spin_normalization=anisotropy_spin_normalization,
         )
-        phonons = native_phonon_modes(epr_path, paired, gauge=gauge, loto_mode=loto_mode)
+        phonons = native_phonon_modes(epr_path, paired, gauge=gauge, loto_mode=loto_mode,
+            gamma_policy="optical" if gamma_policy == "optical" else "reject",
+            gamma_asr_tolerance=gamma_asr_tolerance)
         return magnons, phonons
 
     def physical_mode_error(exc):
@@ -397,7 +474,16 @@ def plot_polaron_bands(
     for branch in range(bands.energies_eV.shape[1]):
         vertices = np.column_stack((path.distance_inv_ang, bands.energies_eV[:, branch] * 1.e3))
         lines = np.stack((vertices[:-1], vertices[1:]), axis=1)[valid_edges]
-        color = ((bands.magnon_weights[:-1, branch] + bands.magnon_weights[1:, branch]) / 2)[valid_edges]
+        weights = bands.magnon_weights[:, branch].copy()
+        # Energy-only acoustic endpoints have no normalized boson character.
+        # Their plotting color may inherit the adjoining finite-q value.
+        if bands.translation_zero_mask is not None:
+            for iq in np.flatnonzero(bands.translation_zero_mask[:, branch]):
+                neighbors = [j for j in (iq-1, iq+1) if 0 <= j < len(weights)
+                             and path.segment_index[j] == path.segment_index[iq]
+                             and np.isfinite(weights[j])]
+                weights[iq] = np.mean(weights[neighbors]) if neighbors else 0.
+        color = ((weights[:-1] + weights[1:]) / 2)[valid_edges]
         collection = LineCollection(lines, cmap="coolwarm", norm=norm, linewidth=1.35, zorder=2)
         collection.set_array(color)
         ax.add_collection(collection)

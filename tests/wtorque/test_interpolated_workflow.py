@@ -55,6 +55,7 @@ def _fake_workflow(tmp_path, monkeypatch, qpoints):
 
         def __init__(self, *args):
             self.diagnostics = {"fixture_response": True}
+            type(self).config = args[-1]
 
         def evaluate_pair(self, q):
             type(self).calls.append(q.copy())
@@ -168,6 +169,30 @@ def test_interrupted_q_task_resumes_from_completed_shard(tmp_path, monkeypatch):
     np.testing.assert_allclose(response.calls, [[.2, 0, 0], [.3, 0, 0], [.3, 0, 0]])
 
 
+def test_symmetry_config_forwarded_and_separates_restart_provenance(tmp_path, monkeypatch):
+    path, response = _fake_workflow(tmp_path, monkeypatch, [[.2, 0, 0]])
+    config = json.loads(path.read_text())
+    config.update(vertex_symmetry_policy='afm_inversion_pair',afm_inversion_translation=[.5,.5,-.5])
+    path.write_text(json.dumps(config))
+    workflow.run_interpolated_workflow(path)
+    assert response.config['vertex_symmetry_policy'] == 'afm_inversion_pair'
+    assert response.config['afm_inversion_translation'] == [.5,.5,-.5]
+    config['vertex_symmetry_policy'] = 'none';del config['afm_inversion_translation']
+    path.write_text(json.dumps(config))
+    with pytest.raises(RuntimeError, match='different/incomplete provenance'):
+        workflow.run_interpolated_workflow(path)
+
+
+@pytest.mark.parametrize('extra', [dict(vertex_symmetry_policy='auto'),
+    dict(vertex_symmetry_policy='afm_inversion_pair'),
+    dict(vertex_symmetry_policy='afm_inversion_pair',afm_inversion_translation=[.5,.5]),
+    dict(afm_inversion_translation=[.5,.5,.5])])
+def test_invalid_symmetry_policy_rejected(tmp_path, extra):
+    path=tmp_path/'config.json'
+    path.write_text(json.dumps(dict(native_config='native.json',kmesh=[2,2,2],output='out.h5',cache_dir='cache',**extra)))
+    with pytest.raises(ValueError): workflow.load_interpolated_workflow_config(path)
+
+
 def test_post_hdf5_plot_interruption_recovers_missing_artifacts(tmp_path, monkeypatch):
     config, response = _fake_workflow(tmp_path, monkeypatch, [[.2, 0, 0]])
     original = workflow.plot_polaron_bands
@@ -208,3 +233,35 @@ def test_partial_figure_or_table_is_not_installed(tmp_path):
     assert list(tmp_path.iterdir()) == []
     workflow._atomic_file(target, lambda temporary: temporary.write_bytes(b"complete"))
     assert target.read_bytes() == b"complete"
+
+
+def test_gamma_bubble_direct_translation_cancellation_and_strict_gate():
+    from slw.wtorque.polaron_bands import SampledBandPath
+    from slw.wtorque.projection.acoustic import translation_basis
+    mass=np.array([2.,7.]);t=translation_basis(mass)
+    basis=np.c_[t,np.linalg.qr(t,mode='complete')[0][:,3:]]
+    ph=SimpleNamespace(masses_amu=mass,atom_positions_frac=np.zeros((2,3)),gauge='atomic')
+    mag=SimpleNamespace(spin_lengths=np.ones(1),local_frames=np.eye(3)[None])
+    ep=np.array([[0,0,0,.03,.04,.05]]);em=np.array([[.01]])
+    tp=basis.reshape(1,2,3,6);tm=np.eye(2,dtype=complex)[None]
+    modes=NativePathModes(np.array([0]),np.array([True]),('gamma_optical',),mag,ph,
+        em,ep,em.copy(),ep.copy(),tm,tp,tm.copy(),tp.copy())
+    q=np.zeros((1,3));path=SampledBandPath(q,np.zeros(1),np.zeros(1,int),np.zeros(1),('G',),np.ones(1,bool))
+    uniform=np.full((2,1,2,2,3),.001,dtype=complex)
+    optical=np.zeros_like(uniform);optical[:,:,:,0,0]=.002;optical[:,:,:,1,0]=-.002
+    response={0:dict(bubble=uniform+optical,direct=-uniform,total=optical)}
+    r=workflow._project_results(path,modes,response,np.array([0]),np.array([0]))
+    assert r['bands'].valid[0] and r['bands'].mode_valid.sum()==4
+    np.testing.assert_allclose(r['bands'].energies_eV[0,:3],0)
+    diag=r['gamma_translation_diagnostics']['0:0']
+    assert diag['bubble']['raw_translation_relative']>.1
+    assert diag['direct']['raw_translation_relative']>.1
+    assert diag['total']['raw_translation_relative']<1e-14
+    np.testing.assert_allclose(r['used_kernels']['bubble']+r['used_kernels']['direct'],r['used_kernels']['total'],atol=1e-14)
+    np.testing.assert_allclose(r['kernels']['bubble'][0,0],response[0]['bubble'][0])
+    response[0]['total']+=uniform;response[0]['bubble']+=uniform
+    with pytest.raises(ValueError,match='total mixed-response translation residual'):
+        workflow._project_results(path,modes,response,np.array([0]),np.array([0]))
+    projected=workflow._project_results(path,modes,response,np.array([0]),np.array([0]),
+        dict(gamma_translation_policy='project'))
+    assert projected['gamma_translation_diagnostics']['0:0']['total']['raw_translation_relative']>.1

@@ -178,3 +178,35 @@ def test_afm_goldstone_and_missing_mate_are_rejected(tmp_path: Path) -> None:
     path.write_text(path.read_text().replace("M2 M1 (1, 0, 0) -1.0 (0.5,0,0) 0.5\n", ""))
     with pytest.raises(ValueError, match="missing reciprocal"):
         load_tb2j_isotropic_model(path, source_directed_bond_weight=1.0)
+
+
+def test_easy_axis_gamma_gap_is_from_hamiltonian_not_energy_offset(tmp_path):
+    path=tmp_path/'exchange.out';_exchange_fixture(path)
+    k=.003
+    r=native_magnon_modes(path,[[0,0,0]],spin_lengths=[1,1],source_directed_bond_weight=1.,
+        anisotropy_mev=k,anisotropy_spin_normalization='unit_vector')
+    # Chain normal A=4J+2K, pairing B=4J in this fixture's TB2J convention.
+    expected=np.sqrt((4+2*k)**2-4**2)*1e-3
+    np.testing.assert_allclose(r.energies_eV,expected,rtol=1e-11)
+    assert r.diagnostics['max_paraunitarity_residual']<1e-10
+    # Equal easy-axis tensors preserve sublattice-exchange antiunitarity.
+    h=(r.transform[0]*np.r_[r.energies_eV[0],r.energies_eV[0]])@r.transform[0].conj().T
+    swap=np.eye(4)[[1,0,3,2]]
+    np.testing.assert_allclose(h,swap@h.conj()@swap.T,atol=1e-13)
+    with pytest.raises(ValueError,match='supplied together'):
+        native_magnon_modes(path,[[0,0,0]],spin_lengths=[1,1],source_directed_bond_weight=1.,anisotropy_mev=k)
+
+
+def test_gamma_degenerate_phonons_use_a_real_self_conjugate_basis(tmp_path,monkeypatch):
+    from slw.wtorque import native_modes
+    from slw.wtorque.projection.acoustic import translation_basis
+    path=tmp_path/'fixture.h5';_,mass=_epr_fixture(path)
+    t=translation_basis(mass);opt=np.linalg.qr(t,mode='complete')[0][:,3:]
+    matrix=(opt*np.array([.02,.02,.04])**2)@opt.conj().T/RY_TO_EV**2
+    anti=np.outer(opt[:,0],opt[:,1])-np.outer(opt[:,1],opt[:,0])
+    matrix=matrix+1e-22j*anti
+    monkeypatch.setattr(native_modes,'_assemble_chunk',lambda q,**kw:np.repeat(matrix[None],len(q),axis=0))
+    modes=native_phonon_modes(path,[[0,0,0]],gamma_policy='optical')
+    np.testing.assert_allclose(modes.eigenvectors.imag,0,atol=1e-15)
+    np.testing.assert_allclose(modes.energies_eV,[np.r_[0,0,0,.02,.02,.04]],atol=1e-15)
+    assert modes.diagnostics['gamma_asr']['0']['self_conjugate_imaginary_relative']>0

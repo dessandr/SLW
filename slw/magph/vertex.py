@@ -229,7 +229,10 @@ def _build_bare_isotropic_vertex_block(
         (q_stop - q_start, coupling.nmode, n_channel, n_channel),
         dtype=np.complex128,
     )
-    for bond in range(exchange.n_bonds):
+    # A truncated displacement response can accompany a longer-range static
+    # exchange model. Skip exactly zero response bonds without truncating J.
+    active_bonds = np.flatnonzero(np.any(lambda_chunk != 0, axis=(0, 1)))
+    for bond in active_bonds:
         i = int(exchange.bond_i[bond])
         j = int(exchange.bond_j[bond])
         amplitude = lambda_chunk[:, :, bond]

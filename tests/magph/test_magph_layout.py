@@ -54,6 +54,7 @@ NATIVE_MODULES = {
     "config.py",
     "coupling.py",
     "derivative.py",
+    "derivative_images.py",
     "dispersion.py",
     "engine.py",
     "epr_phonon.py",

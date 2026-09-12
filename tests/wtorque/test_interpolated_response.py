@@ -143,3 +143,30 @@ def test_bad_interpolated_response_configuration_rejected():
     config["g_xc_source"] = "total_g"
     with pytest.raises(ValueError, match="fixed_frame_tr_odd"):
         ArbitraryQResponse(frame, backend, [3, 1, 1], config)
+
+
+def test_joint_afm_policy_reaches_bubble_and_direct_with_actual_endpoints(monkeypatch):
+    import slw.wtorque.interpolated_response as module
+    from slw.wtorque.model.afm_symmetry import AFMInversionSymmetry
+    backend, frame, config = _fixture()
+    sym = AFMInversionSymmetry(np.kron([[0, 1], [1, 0]], [[0, 1], [-1, 0]]), np.array([1, 0]))
+    monkeypatch.setattr(module, 'native_afm_inversion_symmetry', lambda *a: sym)
+    config.update(vertex_symmetry_policy='afm_inversion_pair',g_pair_policy='hermitian_pair_average')
+    response = ArbitraryQResponse(frame, backend, [5, 2, 1], config)
+    captured = []
+    original_bubble, original_direct = response._bubble, response._direct
+    def bubble(q, final, h, xc, g):
+        ga = response.frame_interpolator.transform_vertex(g,response.base,final,perturbation_positions=response.positions)
+        np.testing.assert_allclose(sym.transform_vertex(ga),ga,atol=2.e-15)
+        captured.append('bubble')
+        return original_bubble(q, final, h, xc, g)
+    def direct(q, g, gs):
+        for value in (g,gs): np.testing.assert_allclose(sym.transform_vertex(value),value,atol=2.e-15)
+        captured.append('direct')
+        return original_direct(q,g,gs)
+    monkeypatch.setattr(response,'_bubble',bubble);monkeypatch.setattr(response,'_direct',direct)
+    result = response.evaluate_pair([.137,.223,-.071])
+    assert captured.count('bubble') == captured.count('direct') == 2
+    assert result['diagnostics']['vertex_symmetry']['plus_q']['projected_afm']['relative'] < 1.e-14
+    assert max(result['diagnostics']['direct']['g_xc_hermitian_pair_relative']) < 1.e-14
+    assert np.linalg.norm(result['total']) > 0

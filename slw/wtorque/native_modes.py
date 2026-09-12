@@ -28,7 +28,7 @@ from slw.magph.epr_phonon import _assemble_chunk, _preload_ifc_blocks
 from slw.magph.lswt import local_spin_frames, solve_isotropic_lswt
 from slw.magph.model import (
     ExchangeConvention, ExchangeModel, ExchangeRepresentation,
-    ExchangeSpinNormalization,
+    ExchangeSpinNormalization, SingleIonAnisotropy,
 )
 from slw.magph.screening import screen_magnetic_configuration
 from slw.wtorque.projection.magnon import paraunitarity_residual
@@ -72,14 +72,19 @@ def native_phonon_modes(
     *,
     gauge: str = "atomic",
     loto_mode: str = "auto",
+    gamma_policy: str = "reject",
+    gamma_asr_tolerance: float = 1.0e-6,
 ) -> NativePhononModes:
     """Reconstruct native IFCs, add polar IFCs, and diagonalize explicit q.
 
-    No acoustic rounding, energy shift, or mass normalization is hidden here:
-    nonpositive modes raise before zero-point projection.  The q list can be
+    No energy shift or mass normalization is hidden here. Nonpositive modes
+    raise by default. With ``gamma_policy='optical'``, the three physical
+    translations are separated after an explicit ASR check. The q list can be
     partitioned across MPI ranks by the workflow owner.
     """
     points = _qpoints(qpoints)
+    if gamma_policy not in {"reject", "optical"}:
+        raise ValueError("phonon gamma_policy must be reject or optical")
     selected_gauge = _gauge(gauge)
     source = Path(epr_path).expanduser().resolve()
     meta = apply_loto_override(read_epr_phonon_metadata(source), loto_mode)
@@ -117,10 +122,36 @@ def native_phonon_modes(
     negative_representative = points[np.arange(points.shape[0]), first_nonzero] < 0
     canonical_dynamical = np.where(negative_representative[:, None, None], minus_dynamical, dynamical)
     eigenvalues, vectors = np.linalg.eigh(canonical_dynamical)
+    gamma = np.max(abs(points-np.rint(points)), axis=1) < 1.e-12
+    gamma_diagnostics = {}
+    if gamma_policy == "optical":
+        from slw.wtorque.projection.acoustic import gamma_optical_modes
+        for iq in np.flatnonzero(gamma):
+            anchor = -points[iq] if negative_representative[iq] else points[iq]
+            phase = np.exp(-2j*np.pi*(positions @ anchor)) if gauge == "atomic" else None
+            matrix = canonical_dynamical[iq]
+            imaginary_relative = 0.
+            if np.max(abs(anchor)) < 1.e-12:
+                # q=-q=0 requires a self-conjugate phonon basis. Tiny imaginary
+                # roundoff in D can otherwise pick complex combinations in a
+                # degenerate optical block and spoil the Nambu q-pair identity.
+                imaginary_relative = float(np.linalg.norm(matrix.imag) / max(np.linalg.norm(matrix), np.finfo(float).tiny))
+                if imaginary_relative > 1.e-10:
+                    raise ValueError("Gamma phonon matrix is not real within q-pair tolerance")
+                matrix = matrix.real
+            ev, vec, projected, diag = gamma_optical_modes(
+                matrix, mass_ry, phase=phase, tolerance=gamma_asr_tolerance,
+            )
+            diag["self_conjugate_imaginary_relative"] = imaginary_relative
+            eigenvalues[iq], vectors[iq] = ev, vec
+            dynamical[iq] = projected.conj() if negative_representative[iq] else projected
+            gamma_diagnostics[str(iq)] = diag
     vectors = np.where(negative_representative[:, None, None], vectors.conj(), vectors)
     signed_energy = np.sign(eigenvalues) * np.sqrt(np.abs(eigenvalues)) * RY_TO_EV
-    if np.any(signed_energy <= 0):
-        iq, mode = np.unravel_index(np.argmin(signed_energy), signed_energy.shape)
+    translations = gamma[:, None] & (np.arange(signed_energy.shape[1])[None, :] < 3) if gamma_policy == "optical" else np.zeros_like(signed_energy, bool)
+    invalid = (signed_energy <= 0) & ~translations
+    if np.any(invalid):
+        iq, mode = np.argwhere(invalid)[0]
         raise ValueError(
             "nonpositive native phonon mode cannot receive zero-point normalization: "
             f"q={points[iq].tolist()}, mode={mode}, energy={signed_energy[iq, mode]:.9g} eV"
@@ -148,6 +179,10 @@ def native_phonon_modes(
             "qpair_matrix_relative_residual": qpair_residual,
             "qpair_mode_gauge": "e(-q)=conj(e(q)); first_nonzero_q_component_positive_anchor",
             "minimum_energy_eV": float(signed_energy.min()),
+            "gamma_policy": gamma_policy,
+            "gamma_asr": gamma_diagnostics,
+            "gamma_translation_normalization": "not oscillator-normalized; excluded from the finite-mode BdG",
+            "gamma_electric_boundary": "analytic q=0; directional LO limits require finite q" if bool(meta["lpolar"]) else "nonpolar",
             "fourier_phase": "exp(+i2pi_q_dot_R_plus_tau)" if gauge == "atomic" else "exp(+i2pi_q_dot_R)",
         },
     )
@@ -369,6 +404,8 @@ def native_magnon_modes(
     magnetic_atom_labels: tuple[str, ...] | list[str] | None = None,
     gauge: str = "atomic",
     collinearity_tolerance: float = 1.0e-3,
+    anisotropy_mev: object | None = None,
+    anisotropy_spin_normalization: str | None = None,
 ) -> NativeMagnonModes:
     """Solve SLW isotropic LSWT using TB2J's actual collinear spin direction.
 
@@ -397,12 +434,25 @@ def native_magnon_modes(
     if collinearity > collinearity_tolerance:
         raise ValueError(f"source moments are not collinear: residual={collinearity:.6g}")
     order = "fm" if np.all(pattern == pattern[0]) else "collinear_afm"
+    if (anisotropy_mev is None) != (anisotropy_spin_normalization is None):
+        raise ValueError("anisotropy_mev and anisotropy_spin_normalization must be supplied together")
+    anisotropy = None
+    if anisotropy_mev is not None:
+        values = np.asarray(anisotropy_mev, dtype=float)
+        if values.ndim > 1 or values.size not in (1, model.n_magnetic_sites) or not np.all(np.isfinite(values)):
+            raise ValueError("anisotropy_mev needs one finite value or one per magnetic site")
+        values = np.broadcast_to(values.reshape(-1), (model.n_magnetic_sites,)).copy()
+        anisotropy = SingleIonAnisotropy(
+            energy_mev=values, axis=np.broadcast_to(axis, (model.n_magnetic_sites, 3)).copy(),
+            spin_normalization=ExchangeSpinNormalization(anisotropy_spin_normalization),
+        )
     configuration = screen_magnetic_configuration(
         model, order=order, spin_pattern=pattern,
         spin_magnitudes=spin_lengths, quantization_axis=axis,
+        anisotropy=anisotropy,
     )
-    spectrum = solve_isotropic_lswt(model, configuration, points)
-    minus_spectrum = solve_isotropic_lswt(model, configuration, -points)
+    spectrum = solve_isotropic_lswt(model, configuration, points, anisotropy=anisotropy)
+    minus_spectrum = solve_isotropic_lswt(model, configuration, -points, anisotropy=anisotropy)
     nmag = model.n_magnetic_sites
     transform = np.zeros((points.shape[0], 2*nmag, 2*nmag), dtype=np.complex128)
     if spectrum.transformation.shape[1] == nmag:
@@ -451,6 +501,9 @@ def native_magnon_modes(
         "source_collinearity_residual": collinearity,
         "quantization_axis": axis.tolist(), "spin_pattern": pattern.tolist(),
         "lswt_engine": "slw.magph.lswt.solve_isotropic_lswt",
+        "single_ion_anisotropy_mev": None if anisotropy is None else anisotropy.energy_mev.tolist(),
+        "anisotropy_spin_normalization": anisotropy_spin_normalization,
+        "anisotropy_axis": None if anisotropy is None else axis.tolist(),
         "max_hermiticity_residual_meV": spectrum.max_hermiticity_residual_mev,
         "max_eigen_residual_meV": paired_eigen_residual,
         "max_paraunitarity_residual": paired_paraunitarity_residual,

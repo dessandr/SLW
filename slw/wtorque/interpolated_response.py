@@ -13,6 +13,7 @@ from typing import Any
 import numpy as np
 
 from slw.wtorque.model.interpolated_spinor_frame import InterpolatedSpinorFrame
+from slw.wtorque.model.afm_symmetry import native_afm_inversion_symmetry
 from slw.wtorque.model.time_reversal import atomic_spin_time_reversal
 from slw.wtorque.torque.direct_vertex import (
     finite_q_direct_vertices, retarded_direct_loop_eigh_zero_temperature,
@@ -62,6 +63,14 @@ class ArbitraryQResponse:
         self.pair_policy = config.get("g_pair_policy", "raw")
         if self.pair_policy not in {"raw", "hermitian_pair_average"}:
             raise ValueError("g_pair_policy must be raw or hermitian_pair_average")
+        self.symmetry_policy = config.get("vertex_symmetry_policy", "none")
+        if self.symmetry_policy not in {"none", "afm_inversion_pair"}:
+            raise ValueError("vertex_symmetry_policy must be none or afm_inversion_pair")
+        self.vertex_symmetry = None
+        if self.symmetry_policy == "afm_inversion_pair":
+            if self.pair_policy != "hermitian_pair_average":
+                raise ValueError("afm_inversion_pair requires g_pair_policy=hermitian_pair_average")
+            self.vertex_symmetry = native_afm_inversion_symmetry(coarse_frame, self.meta, config)
         self.chunk = int(config.get("perturbation_chunk", 3))
         if self.chunk < 1:
             raise ValueError("perturbation_chunk must be positive")
@@ -100,6 +109,8 @@ class ArbitraryQResponse:
             "valence_max_eV": float(eigenvalues[eigenvalues < mu].max()) if np.any(eigenvalues < mu) else None,
             "conduction_min_eV": float(eigenvalues[eigenvalues > mu].min()) if np.any(eigenvalues > mu) else None,
             "g_pair_policy": self.pair_policy, "direct_term_enabled": self.include_direct,
+            "vertex_symmetry_policy": self.symmetry_policy,
+            "vertex_symmetry": self.vertex_symmetry.diagnostics if self.vertex_symmetry else None,
             "raw_g_reciprocity_policy": "diagnostic before optional pair averaging",
             "configured_coarse_g_reciprocity_tolerance": config.get("g_reciprocity_tolerance"),
             "configured_coarse_g_reciprocity_gate_applied_to_interpolation": False,
@@ -164,7 +175,19 @@ class ArbitraryQResponse:
         c = self.backend.evaluate_g(self.kpoints, -q)
         d = self.backend.evaluate_g(self.kpoints - q, q)
         reciprocity = [_relative(a, _dagger(b)), _relative(c, _dagger(d))]
-        if self.pair_policy == "hermitian_pair_average":
+        symmetry_diagnostics = None
+        if self.vertex_symmetry is not None:
+            project = self.vertex_symmetry.project_wannier_pair
+            a, b, forward_diagnostics = project(
+                a, b, source_frame=self.base.atomic_frame, final_frame=plus.atomic_frame,
+                q_red=q, perturbation_positions=self.positions,
+            )
+            c, d, reverse_diagnostics = project(
+                c, d, source_frame=self.base.atomic_frame, final_frame=minus.atomic_frame,
+                q_red=-q, perturbation_positions=self.positions,
+            )
+            symmetry_diagnostics = {"plus_q": forward_diagnostics, "minus_q": reverse_diagnostics}
+        elif self.pair_policy == "hermitian_pair_average":
             a = .5 * (a + _dagger(b)); b = _dagger(a)
             c = .5 * (c + _dagger(d)); d = _dagger(c)
         retarded_bubble = np.asarray([
@@ -209,6 +232,7 @@ class ArbitraryQResponse:
                 "q_pair_kernel_residual_eV_per_angstrom": float(np.max(abs(total[1] - total[0].conj()))),
                 "plus_frame": plus.diagnostics, "minus_frame": minus.diagnostics,
                 "direct": direct_diagnostics,
+                "vertex_symmetry": symmetry_diagnostics,
             },
         }
 

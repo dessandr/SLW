@@ -123,6 +123,60 @@ in this example must match the actual calculation. TB2J's directed
 converts to SLW's half-weighted directed representation. Only J_iso is used;
 DMI and incomplete anisotropy tensors are not silently included.
 
+### Optional easy-axis anisotropy and Gamma optical modes
+
+The native JSON accepts `anisotropy_mev` (one value or one per magnetic site)
+with an explicit `anisotropy_spin_normalization` (`unit_vector` or
+`spin_operator`). These use the native single-ion Hamiltonian
+`H_SIA = -sum_i K_i (s_i dot n)^2`, with the common collinear axis parsed from
+the TB2J moments. Positive K is easy-axis. LSWT eigenvectors and the vertex
+projection are recomputed; energies are not shifted after diagonalization.
+This input is a displacement-independent model anisotropy and adds no `dK/du`
+to the electronic bubble/direct response.
+
+The `run-interpolated` JSON can enable exact Gamma using:
+
+```json
+{
+  "gamma_policy": "optical",
+  "gamma_asr_tolerance": 1e-6,
+  "gamma_translation_policy": "strict",
+  "gamma_translation_tolerance": 1e-6
+}
+```
+
+`gamma_policy` defaults to `omit`. The optical route requires positive magnon
+modes (for an AFM Goldstone model, supply a suitable anisotropy). The three
+phonon translations are constructed from `sqrt(M_kappa)` and the Bloch gauge,
+not selected with a frequency cutoff. Their orthogonal complement is
+diagonalized. A large dynamical-matrix translation residual fails the ASR
+tolerance; unstable optical modes are never removed or shifted.
+
+The Cartesian total mixed derivative must also decouple uniform translation.
+The default `strict` policy checks that identity before zero-point projection.
+`gamma_translation_policy = "project"` explicitly permits a diagnostic
+translation projection when the raw total residual is larger than tolerance.
+Both policies record raw bubble/direct/total residuals; only the total is
+required to satisfy the Ward identity. The same mass-weighted projector is
+applied linearly to each component and preserves all optical contractions.
+`kernel/` retains original responses and `kernel_used/` saves projected ones.
+
+The finite-mode full BdG retains normal and anomalous couplings and actual
+q/-q partners. `bands/energies_eV` includes three exact acoustic zeros, but
+their `bands/mode_valid` is false and their eigenvectors and magnon character
+are NaN. `bands/translation_zero_mask` distinguishes these energy-only
+endpoints. A valid q can therefore contain three unnormalized translations
+and the remaining finite-energy hybrid modes. Angular-momentum analysis must
+select `bands/mode_valid`; it must not normalize or assign PAM to the free
+translations. Their finite-q limit is a separate calculation.
+
+For polar EPR inputs, exact Gamma retains the analytic, zero macroscopic-field
+convention. Directional LO limits require explicit small nonzero q values;
+they need not coincide with the analytic Gamma optical energies. The electric
+boundary condition and ASR corrections are saved in the phonon diagnostics.
+MPI q-pair ownership and root-only output remain the same, and all these
+options enter the restart fingerprint.
+
 Optional inputs are `perturbation_chunk` (default 3),
 `hamiltonian_tolerance_eV` (1e-5), `projector_tr_tolerance` (0.05),
 `g_reciprocity_tolerance` (1e-5), and `g_pair_policy` (`raw` or
@@ -229,7 +283,7 @@ Choose one q sampling form:
 
 These three choices are mutually exclusive. Repeated endpoints and exact
 signed q partners reuse the same response task. q+G representatives are
-kept distinct. Γ and equivalent reciprocal points are explicitly omitted
+kept distinct. By default, Γ and equivalent reciprocal points are omitted
 before acoustic zero-point and AFM Goldstone normalization; their full-path
 arrays contain NaNs with a recorded mask/status. Other unstable or singular
 bare modes are located and reported. No artificial gap or stability shift
@@ -357,3 +411,50 @@ independent coupled-oscillator eigenvalues, the RWA limit, mode-gauge
 covariance, degenerate metric orthogonality, explicit instability handling,
 path breaks, q-task deduplication, provenance rejection, interrupted-task
 restart and artifact recovery after plotting fails.
+## Optional AFM vertex projection for interpolated runs
+
+`run-interpolated` accepts an explicit correction of the **full complex
+spinor** Cartesian electron–phonon vertex before the bubble and model direct
+terms are computed:
+
+```json
+{
+  "vertex_symmetry_policy": "afm_inversion_pair",
+  "afm_inversion_translation": [0.5, 0.5, -0.5]
+}
+```
+
+These keys belong in the interpolated workflow JSON. The translation above
+is a reduced-coordinate **example**; determine it from the actual magnetic
+cell. The native input must select `g_pair_policy="hermitian_pair_average"`.
+The default `vertex_symmetry_policy="none"` preserves the existing behavior.
+Use a separate output for a corrected model; the policy and translation are
+part of the response cache fingerprint.
+
+This currently supports only the antiunitary operation `A={-I|tau}T`, with
+paired real definite-parity NNKP trials in the supported global spin basis.
+It validates QE species/pseudopotential/mass and atomic positions, starting
+magnetizations, complete trial angular/radial records, magnetic projectors,
+and the exchange model's local axes/spin lengths. These checks do not prove
+that the converged DFT solution preserves A. Unsupported orbital hybrids or
+ambiguous mappings raise an error.
+
+In the atomic-position gauge, the electronic and displacement Bloch phases
+cancel: `(A g)_(pκ,α) = -S_e g_(κ,α)* S_e†`. Given the actual reversed
+endpoints `b=g(k+q,-q)`, the applied joint projection is
+`g_sym = (g + b† + A(g) + A(b†))/4`. It enforces both AFM covariance and
+`g(k,q)=g(k+q,-q)†`; a single finite-q matrix is **not** made Hermitian.
+Both endpoint frames and displacement phases are restored on return to the
+Wannier gauge. The two projections commute and are idempotent.
+
+SOC is retained: no collinearization, real-part projection, bare time-reversal
+symmetry, or independent spin rotation is imposed. The same corrected full
+vertex feeds the existing fixed-frame TR-odd `g_XC` definition and its shifted
+direct vertex. `g_XC` remains a model exchange derivative, not a separately
+resolved QE XC potential. H, phonons, and magnons are not projected by this
+option; their symmetry errors can remain in the integrated response.
+
+Each q-pair shard records raw reciprocity and AFM residuals, pair-only AFM
+residuals, corrected residuals in atomic/Wannier gauges, projector commutator,
+and correction norms. Passing a forced symmetry is an implementation check;
+large correction norms require separate interpolation/DFPT validation.

@@ -283,25 +283,16 @@ def _build_local_tb2j_projector_deriv_from_block(dh_loc, evec):
 
 
 def _accumulate_dA_from_blocks(gij, gji, dgij, dgji, p_i, p_j, dp_i=None, dp_j=None):
-    gij_u = _pauli_block_all(gij)
-    gji_u = _pauli_block_all(gji)
-    dgij_u = _pauli_block_all(dgij)
-    dgji_u = _pauli_block_all(dgji)
-    out = np.zeros((4, 4), dtype=np.complex128)
-    for u in range(4):
-        x = p_i @ gij_u[u]
-        dx = p_i @ dgij_u[u]
-        dpx = None if dp_i is None else dp_i @ gij_u[u]
-        for v in range(4):
-            y = p_j @ gji_u[v]
-            dy = p_j @ dgji_u[v]
-            val = np.einsum("ij,ji->", dx, y, optimize=True) + np.einsum("ij,ji->", x, dy, optimize=True)
-            if dpx is not None:
-                val += np.einsum("ij,ji->", dpx, y, optimize=True)
-            if dp_j is not None:
-                dpy = dp_j @ gji_u[v]
-                val += np.einsum("ij,ji->", x, dpy, optimize=True)
-            out[u, v] = val
+    gij_u = np.asarray(_pauli_block_all(gij))
+    gji_u = np.asarray(_pauli_block_all(gji))
+    x, y = p_i @ gij_u, p_j @ gji_u
+    dx = p_i @ np.asarray(_pauli_block_all(dgij))
+    dy = p_j @ np.asarray(_pauli_block_all(dgji))
+    if dp_i is not None:
+        dx += dp_i @ gij_u
+    if dp_j is not None:
+        dy += dp_j @ gji_u
+    out = np.einsum("uij,vji->uv", dx, y) + np.einsum("uij,vji->uv", x, dy)
     return out
 
 
@@ -645,6 +636,7 @@ def _compute_tensor_chunk_analytic(
     progress_every=0,
     progress_label="",
     onsite_deriv_projector=True,
+    onsite_projector_derivatives=None,
 ):
     n_pair = len(pair_meta)
     nq, _nk, _dim, _ = dg_band.shape
@@ -655,6 +647,17 @@ def _compute_tensor_chunk_analytic(
             f"got {bond_target_q_phase.shape}"
         )
     acc = np.zeros((nq, n_pair, 4, 4), dtype=np.complex128)
+
+    # A screened displacement can change the exchange field at *every* site.
+    # Legacy callers retain their target-only approximation; full spinor
+    # callers supply {site: dP(q)} in the same cell-periodic basis as G.
+    dp_sites = {}
+    if onsite_deriv_projector and onsite_projector_derivatives is not None:
+        for site, value in onsite_projector_derivatives.items():
+            value = np.asarray(value, dtype=np.complex128)
+            if site not in kdata["p_ops"] or value.shape != (nq, *kdata["p_ops"][site].shape):
+                raise ValueError("onsite projector derivative has an invalid site or shape")
+            dp_sites[int(site)] = value
 
     evals = kdata["evals"]
     dp_target_q = None
@@ -668,6 +671,8 @@ def _compute_tensor_chunk_analytic(
             _build_local_tb2j_projector_deriv_from_block(g_loc_q[iq], evec_t)
             for iq in range(g_loc_q.shape[0])
         ], dtype=np.complex128)
+    if dp_target_q is not None and onsite_projector_derivatives is None:
+        dp_sites[int(target_id)] = dp_target_q
 
     # Pre-transpose and cache static matrices
     cj_conj_T = {}
@@ -692,11 +697,15 @@ def _compute_tensor_chunk_analytic(
 
         gij_r_dict = {}
         gji_r_dict = {}
+        base_blocks = {
+            (li, lj): c_inv[li] @ cj_conj_T[lj]
+            for li in cj_conj_T for lj in cj_conj_T
+        }
         for ip, meta in enumerate(pair_meta):
             li, lj = int(meta["li"]), int(meta["lj"])
 
-            gij_k = c_inv[li] @ cj_conj_T[lj]
-            gji_k = c_inv[lj] @ cj_conj_T[li]
+            gij_k = base_blocks[li, lj]
+            gji_k = base_blocks[lj, li]
 
             wk_ph = wk * phase[ip]
             gij_r_dict[ip] = np.tensordot(wk_ph, gij_k, axes=(0, 0))
@@ -706,24 +715,26 @@ def _compute_tensor_chunk_analytic(
         for iq in range(nq):
             kq_idx = kq_map[iq]
             dg_b = dg_band[iq] # (nk, dim, dim)
+            left_response = {li: c_inv[li][kq_idx] @ dg_b for li in cj_conj_T}
+            response_blocks = {
+                (li, lj): left_response[li] @ c_inv_cT[lj]
+                for li in cj_conj_T for lj in cj_conj_T
+            }
 
             for ip, meta in enumerate(pair_meta):
                 li, lj = int(meta["li"]), int(meta["lj"])
 
-                ci_kq_inv = c_inv[li][kq_idx]
-                dgij_k = (ci_kq_inv @ dg_b) @ c_inv_cT[lj]
-
-                cj_kq_inv = c_inv[lj][kq_idx]
-                dgji_k = (cj_kq_inv @ dg_b) @ c_inv_cT[li]
+                dgij_k = response_blocks[li, lj]
+                dgji_k = response_blocks[lj, li]
 
                 wk_ph = wk * phase[ip]
                 dgij_r = np.tensordot(wk_ph, dgij_k, axes=(0, 0))
                 endpoint_phase = bond_target_q_phase[iq, ip]
                 dgji_r = endpoint_phase * np.tensordot(wk_ph.conj(), dgji_k, axes=(0, 0))
-                dp_i = dp_target_q[iq] if dp_target_q is not None and int(target_id) == li else None
+                dp_i = dp_sites[li][iq] if li in dp_sites else None
                 dp_j = (
-                    endpoint_phase * dp_target_q[iq]
-                    if dp_target_q is not None and int(target_id) == lj
+                    endpoint_phase * dp_sites[lj][iq]
+                    if lj in dp_sites
                     else None
                 )
                 acc[iq, ip] += _accumulate_dA_from_blocks(

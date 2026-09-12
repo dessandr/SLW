@@ -120,3 +120,22 @@ def test_cell_path_keeps_breaks_and_plot(tmp_path):
                                  valid_q_mask=~path.gamma_mask)
     plot_polaron_bands(path, result, tmp_path / "bands.png")
     assert (tmp_path / "bands.png").stat().st_size > 1000
+
+
+def test_gamma_reduced_bdg_retains_zero_energies_but_no_acoustic_bosons():
+    em=[.01];ep=[0,0,0,.06];g=.002
+    coupling=np.zeros((2,8),complex);coupling[:,[3,7]]=g
+    r=solve_polaron_bands([em],[ep],[coupling],[em],[ep],[_minus(coupling)],
+        phonon_translation_mask=[[1,1,1,0]])
+    ref=_solve(em,[.06],np.full((2,2),g))
+    np.testing.assert_allclose(r.energies_eV[0,:3],0)
+    np.testing.assert_allclose(r.energies_eV[0,3:],ref.energies_eV[0],atol=1e-14)
+    assert r.valid[0] and r.mode_valid[0].tolist()==[False,False,False,True,True]
+    assert np.isnan(r.eigenvectors[0,:,:3]).all()
+    assert np.isnan(r.magnon_weights[0,:3]).all()
+    t=r.eigenvectors[0,:,3:];metric=np.r_[np.ones(5),-np.ones(5)]
+    np.testing.assert_allclose(t.conj().T@(metric[:,None]*t),np.eye(2),atol=1e-14)
+    coupling[:,[0,4]]=1e-4
+    with pytest.raises(ValueError,match='decouple'):
+        solve_polaron_bands([em],[ep],[coupling],[em],[ep],[_minus(coupling)],
+            phonon_translation_mask=[[1,1,1,0]])
